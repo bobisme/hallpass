@@ -1267,6 +1267,31 @@ fn real_clock_without_variable() {
     assert_eq!(out["window"]["state"], "expired");
 }
 
+/// Only in a release build without the `test-clock` feature: the variable
+/// is ignored, said so, and the real clock decides. Run with
+/// `cargo test --release --test cli -- release_build`.
+#[cfg(not(any(debug_assertions, feature = "test-clock")))]
+#[test]
+fn release_build_ignores_the_test_clock() {
+    let case = Case::new();
+    let past = PASS
+        .replace("2026-11-20T08:00:00Z", "2000-01-01T00:00:00Z")
+        .replace("2026-11-20T17:00:00Z", "2000-01-02T00:00:00Z");
+    let file = case.pass("p.toml", &past);
+    // The test clock says the window is open; the real clock says it ended.
+    let output = run(
+        &["--format", "json", "spend", s(&file), "calls"],
+        Some("2000-01-01T12:00:00Z"),
+    );
+    let out: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(code(&output), 2, "{out}");
+    assert_eq!(out["test_clock"], false);
+    assert_eq!(out["refusal"]["code"], "expired");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("is set but ignored"));
+    let (_, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(out["entries"].as_array().map(Vec::len), Some(0), "{out}");
+}
+
 #[test]
 fn usage_errors_exit_one() {
     let _case = Case::new();

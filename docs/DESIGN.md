@@ -277,7 +277,13 @@ that it ignores the variable and uses the real clock. When it is honoured,
 every command prints a warning on standard error and the JSON output says
 `"test_clock": true`. The name says what it is, so nobody sets it by
 accident. To run the integration tests against a release build use
-`cargo test --release --features test-clock`.
+`cargo test --release --features test-clock` (all pass). A plain
+`cargo test --release` builds a binary that ignores the variable: the
+tests that never set the clock pass, the ones that rely on it fail because
+the real clock decides, and `release_build_ignores_the_test_clock`, which
+is compiled only into that configuration, checks that a release binary
+ignores the variable, says so, and decides on the real clock
+(`cargo test --release --test cli -- release_build`).
 
 ## Dependencies
 
