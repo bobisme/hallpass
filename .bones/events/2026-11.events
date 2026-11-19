@@ -5,3 +5,4 @@
 1795057095968818	sippycup-2u2m2v	itc:AQ		item.create	bn-2bf	{"description":"From the v0.1 builder's known limits.","kind":"task","size":"s","title":"Refuse 6to4 and Teredo addresses and directed broadcast inside a listed network"}	blake3:inU4IIri7kiqV7AfPhKaMklMnz_TzGwxCAAFsIBu_lM
 1795105251311924	sippycup-2u2m2v	itc:AQ		item.move	bn-136	{"state":"done"}	blake3:vYjbyWtDg2qEqnvoH2Q2dOAwEcIG8WMSVv6nYS2N58U
 1795106065031799	sippycup-2u2m2v	itc:AQ		item.move	bn-ju3	{"state":"done"}	blake3:fJyn4UTut1D2FyElgeNTX3R3IWG3-CkGRgbrL800PaE
+1795106306658182	sippycup-2u2m2v	itc:AQ		item.move	bn-2bf	{"state":"done"}	blake3:0AP1qlypHNsdDGfr0k8Rb2CmPjNBtxJc_gznOLO1Q00
