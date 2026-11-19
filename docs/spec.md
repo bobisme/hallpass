@@ -123,7 +123,11 @@ In this order, stopping at the first refusal:
 ### `spend(pass, counter, n, note, expected digest, needed, now)`
 
 1. Request checks, before any file is touched: `n` from 1 to 10^12, note one
-   line of at most 500 characters. Failure is a usage error.
+   line of at most 500 characters with no control character (newline, tab,
+   escape, C1 controls), no Unicode line or paragraph separator (U+2028,
+   U+2029) and no bidirectional control (U+061C, U+200E, U+200F,
+   U+202A-U+202E, U+2066-U+2069). Failure is a usage error. (Reading a
+   ledger accepts notes that only avoid control characters, the 0.1 rule.)
 2. Load and validate the pass. Create the ledger with its header if it does
    not exist.
 3. Open the ledger (not a link, mode exactly private: no group or other
@@ -182,6 +186,7 @@ hallpass [--format text|json] <command>
   permits FILE --to ADDR:PORT/PROTO [--duration SECONDS]
   spend FILE COUNTER [--n N] [--note TEXT] [--digest DIGEST] [--duration SECONDS]
   digest FILE
+  ledger FILE [--counter NAME]
 ```
 
 Exit codes: **0** ok or allowed; **2** refused by the pass; **1** any other
@@ -199,15 +204,27 @@ print the parser's text on standard error with exit 1.
 | `permits` | allowed | refused | invalid pass or target |
 | `spend` | recorded | refused, nothing recorded | any error, nothing recorded |
 | `digest` | printed | never | invalid pass |
+| `ledger` | listed (also when there is no ledger yet) | never | invalid pass, damaged or foreign ledger, bad `--counter` |
 
 `check` does not judge the window; `status` does.
+
+`ledger` is read-only. It takes the same shared lock as `status`, verifies
+the whole chain, and lists each entry (sequence number, time, counter,
+amount, the pass digest it was made under, note), then the total per
+counter. `--counter NAME` shows one counter. A pass without a ledger says
+so and exits 0. In text output every operator-supplied string (notes, and
+pass text in `status`) is shown with control characters, line separators
+and bidirectional controls escaped as `\u{...}` and a backslash as `\\`,
+so a note can neither forge a line of output nor send a terminal escape
+sequence. JSON output carries the exact text.
 
 ### JSON fields
 
 Every object has `command` and `result` (`ok`, `allowed`, `refused`,
 `error`) and `file`.
 
-- **error** (any command): `error` `{code, message}`, `problems` (list of
+- **error** (any command): `error` `{code, message, line}` (`line` is the
+  1-based ledger line for `ledger-corrupt`, else null), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
 - **check**: `digest`, `pass_id`, `problems` (empty).
@@ -224,6 +241,14 @@ Every object has `command` and `result` (`ok`, `allowed`, `refused`,
   recorded, else current), `remaining` (or null), `seq` (the new entry's
   sequence number, or null), `note`, `refusal` (or null).
 - **digest**: `digest`, `pass_id`.
+- **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
+  pass now), `counter` (the `--counter` filter or null), `verified` (always
+  `true` on success: a chain that does not verify is an error), `entries`
+  (list of `{seq, time, counter, n, digest, note}`; `digest` is the pass
+  digest the spend was decided against, `note` null when none), `totals`
+  (list of `{name, spent, total, remaining}` for every counter of the pass
+  and every counter in the ledger, sorted by name; `total` and `remaining`
+  null for a counter the pass no longer has).
 
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
@@ -258,6 +283,8 @@ Crate `hallpass` (re-exports `time`):
 | `Pass::destination_for(ip, port, protocol)` | the matching destination, window not checked |
 | `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend; `SpendOutcome.refusal` is `None` when recorded |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock |
+| `read_ledger(&LoadedPass) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`) and the tally, chain verified, under a shared lock |
+| `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `ledger_path(path)` | `<pass>.ledger` |
 | `write_template(path)`, `TEMPLATE` | `init` |
 | `parse_address`, `parse_network`, `embedded_ipv4`, `Target` (`FromStr`), `Network`, `Protocol`, `PortSet` | strict parsing |
@@ -302,7 +329,5 @@ is revoked. [DESIGN.md](DESIGN.md) explains each.
   how many. Planned: the SIP assessment toolbox calling `hallpass ...
   --format json` before each send and `spend` per call; the web tester
   using the library per request.
-- **A ledger inspection command** (planned): listing entries; today read
-  the JSON Lines file directly.
 - **Protocols beyond tcp and udp**, and link-local destinations with an
   interface field: would need a new format version; not planned in detail.

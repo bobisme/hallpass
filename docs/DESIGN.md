@@ -106,8 +106,16 @@ tool that pinned the old digest, which is the point.
   entry and `fdatasync` it, release the lock. A refusal writes nothing. The
   write is confirmed to the caller only after the sync.
 - **Locking** uses `std::fs::File::lock` / `lock_shared` (stable since Rust
-  1.89; `flock(2)` on Linux). No crate is needed. `status` takes a shared
-  lock so it never reads half a spend.
+  1.89; `flock(2)` on Linux). No crate is needed. `status` and `ledger`
+  take a shared lock so they never read half a spend.
+- **Notes are operator text** and end up on terminals. A note is one line
+  without control characters; since 0.2 a new note may also not contain
+  the Unicode line and paragraph separators or bidirectional controls
+  (which can make text display as something else, as in "Trojan Source").
+  Reading keeps the 0.1 rule, so a ledger written by 0.1 stays readable.
+  Text output escapes every such character as `\u{...}` (and `\` as `\\`,
+  so an escape cannot be faked); JSON keeps the exact text, as JSON
+  escaping already makes it one line.
 - **Edits**: the spent amount of a counter is the sum over all entries with
   that name, whatever their digest. Raising a total takes effect; no edit
   resets the count. Changing the pass `id` makes the ledger foreign and is

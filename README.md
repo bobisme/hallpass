@@ -79,6 +79,15 @@ REFUSED: 192.0.2.11:5060/udp: 192.0.2.11 is not in any destination of this pass;
 
 $ hallpass spend engagement.pass.toml calls --note "first call"
 RECORDED: 1 calls (1 of 6 spent, 5 left; ledger entry 1)
+
+$ hallpass ledger engagement.pass.toml
+Ledger of pass example-2026-11 (engagement.pass.toml.ledger)
+    seq  time                  counter                 n  digest               note
+      1  2026-11-20T09:00:00Z  calls                   1  sha256:789b8599fd63  first call
+Totals:
+  calls            1 spent of 6
+Chain verified: 1 entries, every line follows the one before it.
+Current pass digest: sha256:…
 ```
 
 The sixth `spend` of `calls` succeeds and the seventh is refused (exit 2),

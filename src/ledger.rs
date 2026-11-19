@@ -16,6 +16,7 @@
 //! takes effect, and no edit resets the count.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -132,7 +133,63 @@ fn line_hash(line: &[u8]) -> String {
     Digest::of(line).to_string()
 }
 
-/// Check a note: printable, at most [`MAX_NOTE`] characters.
+/// Characters a note may not contain when it is written, beyond control
+/// characters: the Unicode line and paragraph separators (some viewers break
+/// lines at them) and the bidirectional formatting controls (they reorder how
+/// the text around them is displayed, so a note could disguise itself).
+const fn is_disguising(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2028}'
+            | '\u{2029}'
+            | '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// `text` made safe to print on a terminal as part of one line.
+///
+/// Control characters, line separators and bidirectional controls are
+/// written as `\u{…}`, and a backslash as `\\`, so the escaping cannot be
+/// forged either. Other text is unchanged.
+#[must_use]
+pub fn display_safe(text: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| c == '\\' || c.is_control() || is_disguising(c);
+    if !text.chars().any(unsafe_char) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if c == '\\' {
+            out.push_str("\\\\");
+        } else if unsafe_char(c) {
+            let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Check a note before it is recorded: one plain line, at most
+/// [`MAX_NOTE`] characters, without control characters, line separators or
+/// bidirectional controls.
+fn check_new_note(note: &str) -> Result<(), String> {
+    if note.chars().any(is_disguising) {
+        return Err(
+            "the note contains a line separator or a bidirectional text control, which can make it display as something else; write one plain line"
+                .to_owned(),
+        );
+    }
+    check_note(note)
+}
+
+/// Check a recorded note: printable, at most [`MAX_NOTE`] characters. This is
+/// the rule hallpass 0.1 wrote notes under, so older ledgers stay readable;
+/// new notes must also pass [`check_new_note`].
 fn check_note(note: &str) -> Result<(), String> {
     if note.chars().any(char::is_control) {
         return Err(
@@ -148,8 +205,51 @@ fn check_note(note: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// One recorded spend, as read back from the ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LedgerEntry {
+    /// The sequence number, from 1.
+    pub seq: u64,
+    /// When the spend was recorded (the caller's clock at the time).
+    pub time: OffsetDateTime,
+    /// The counter.
+    pub counter: String,
+    /// The amount.
+    pub amount: u64,
+    /// The digest of the pass the spend was decided against.
+    pub digest: Digest,
+    /// The note, if one was given. Operator-supplied text: escape it before
+    /// showing it on a terminal.
+    pub note: Option<String>,
+}
+
+/// The whole ledger of a pass, read and verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LedgerView {
+    /// The ledger file.
+    pub path: PathBuf,
+    /// False when there is no ledger yet (nothing was spent).
+    pub exists: bool,
+    /// Every entry, in order.
+    pub entries: Vec<LedgerEntry>,
+    /// The totals.
+    pub tally: Tally,
+}
+
+/// A ledger parsed and verified.
+struct Parsed {
+    tally: Tally,
+    entries: Vec<LedgerEntry>,
+    /// The hash of the last line (the header when there are no entries).
+    tail: String,
+    /// The last sequence number (0 when there are no entries).
+    seq: u64,
+}
+
 /// Parse the whole ledger. Any doubt is an error, never an empty count.
-fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<(Tally, String, u64), Error> {
+fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<Parsed, Error> {
     let corrupt = |line: usize, detail: &str| Error::LedgerCorrupt {
         path: path.to_path_buf(),
         line,
@@ -183,6 +283,7 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<(Tally, Stri
         });
     }
     let mut tally = Tally::default();
+    let mut entries = Vec::new();
     let mut prev = line_hash(first);
     let mut seq = 0u64;
     for (i, line) in lines.enumerate() {
@@ -204,16 +305,20 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<(Tally, Stri
         if !is_counter_name(&entry.counter) || entry.n == 0 || entry.n > MAX_CEILING {
             return Err(corrupt(number, "the counter name or amount is not valid"));
         }
-        if entry.digest.parse::<Digest>().is_err()
-            || OffsetDateTime::parse(&entry.time, &Rfc3339).is_err()
-            || entry
-                .note
-                .as_deref()
-                .is_some_and(|n| check_note(n).is_err())
+        let (Ok(digest), Ok(time)) = (
+            entry.digest.parse::<Digest>(),
+            OffsetDateTime::parse(&entry.time, &Rfc3339),
+        ) else {
+            return Err(corrupt(number, "the time, digest or note is not valid"));
+        };
+        if entry
+            .note
+            .as_deref()
+            .is_some_and(|n| check_note(n).is_err())
         {
             return Err(corrupt(number, "the time, digest or note is not valid"));
         }
-        let total = tally.spent.entry(entry.counter).or_insert(0);
+        let total = tally.spent.entry(entry.counter.clone()).or_insert(0);
         *total = total
             .checked_add(entry.n)
             .filter(|t| *t <= MAX_CEILING)
@@ -221,8 +326,21 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<(Tally, Stri
         tally.entries += 1;
         seq = entry.seq;
         prev = line_hash(line);
+        entries.push(LedgerEntry {
+            seq,
+            time,
+            counter: entry.counter,
+            amount: entry.n,
+            digest,
+            note: entry.note,
+        });
     }
-    Ok((tally, prev, seq))
+    Ok(Parsed {
+        tally,
+        entries,
+        tail: prev,
+        seq,
+    })
 }
 
 fn check_private(path: &Path, file: &fs::File) -> Result<(), Error> {
@@ -246,9 +364,15 @@ fn check_private(path: &Path, file: &fs::File) -> Result<(), Error> {
 ///
 /// A ledger that is a link, not private, damaged, or for another pass id.
 pub fn tally(loaded: &LoadedPass) -> Result<Tally, Error> {
+    Ok(read_shared(loaded)?.map_or_else(Tally::default, |p| p.tally))
+}
+
+/// Read and verify the whole ledger beside `loaded` under a shared lock:
+/// `None` when there is no ledger.
+fn read_shared(loaded: &LoadedPass) -> Result<Option<Parsed>, Error> {
     let path = ledger_path(&loaded.path);
     match fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Tally::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::io(&path, &e)),
         Ok(_) => {}
     }
@@ -258,8 +382,33 @@ pub fn tally(loaded: &LoadedPass) -> Result<Tally, Error> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|e| Error::io(&path, &e))?;
-    let (tally, _, _) = parse_ledger(&path, &bytes, &loaded.pass.id)?;
-    Ok(tally)
+    parse_ledger(&path, &bytes, &loaded.pass.id).map(Some)
+}
+
+/// Read every entry of the ledger beside `loaded`, verifying the whole chain,
+/// under a shared lock (so it never sees half of a spend). A missing ledger
+/// is returned with `exists: false` and no entries.
+///
+/// # Errors
+///
+/// As [`tally`]: a ledger that is a link, not private, damaged (the error
+/// names the line and what is wrong), or for another pass id.
+pub fn read_ledger(loaded: &LoadedPass) -> Result<LedgerView, Error> {
+    let path = ledger_path(&loaded.path);
+    Ok(match read_shared(loaded)? {
+        Some(parsed) => LedgerView {
+            path,
+            exists: true,
+            entries: parsed.entries,
+            tally: parsed.tally,
+        },
+        None => LedgerView {
+            path,
+            exists: false,
+            entries: Vec::new(),
+            tally: Tally::default(),
+        },
+    })
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -387,7 +536,7 @@ pub fn spend(
         )));
     }
     if let Some(note) = request.note {
-        check_note(note).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
+        check_new_note(note).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     }
     let first = load(pass_path)?;
     let path = ledger_path(pass_path);
@@ -402,7 +551,12 @@ pub fn spend(
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|e| Error::io(&path, &e))?;
-    let (tally, prev, seq) = parse_ledger(&path, &bytes, &loaded.pass.id)?;
+    let Parsed {
+        tally,
+        tail: prev,
+        seq,
+        ..
+    } = parse_ledger(&path, &bytes, &loaded.pass.id)?;
     let total = loaded.pass.ceilings.get(request.counter).copied();
     let spent = tally.spent(request.counter);
     let mut outcome = SpendOutcome {
@@ -581,6 +735,96 @@ mod tests {
                 .refusal
                 .is_none()
         );
+    }
+
+    #[test]
+    fn notes_that_could_disguise_themselves_are_refused() {
+        let (_dir, path) = setup();
+        for bad in [
+            "a\nb",
+            "a\rb",
+            "tab\there",
+            "esc\u{1b}[31m",
+            "csi\u{9b}31m",
+            "del\u{7f}",
+            "line\u{2028}sep",
+            "para\u{2029}sep",
+            "rlo\u{202e}txt",
+            "isolate\u{2066}x\u{2069}",
+            "mark\u{200f}",
+        ] {
+            let mut noted = request("calls", 1);
+            noted.note = Some(bad);
+            assert!(
+                matches!(spend(&path, &noted, NOW), Err(Error::Usage(_))),
+                "{bad:?}"
+            );
+        }
+        let mut noted = request("calls", 1);
+        noted.note = Some("plain note, with \"quotes\" and ünïcode");
+        assert!(spend(&path, &noted, NOW).expect("spend").refusal.is_none());
+        let long = "x".repeat(MAX_NOTE + 1);
+        noted.note = Some(&long);
+        assert!(matches!(spend(&path, &noted, NOW), Err(Error::Usage(_))));
+    }
+
+    #[test]
+    fn display_safe_escapes_everything_that_moves_the_cursor() {
+        assert_eq!(display_safe("plain ünïcode"), "plain ünïcode");
+        assert_eq!(display_safe("a\nb"), "a\\u{000a}b");
+        assert_eq!(display_safe("\u{1b}[2J"), "\\u{001b}[2J");
+        assert_eq!(display_safe("\u{9b}"), "\\u{009b}");
+        assert_eq!(display_safe("x\u{202e}y"), "x\\u{202e}y");
+        assert_eq!(display_safe("x\u{2028}y"), "x\\u{2028}y");
+        // An escaped-looking note cannot pass for an escape.
+        assert_eq!(display_safe("\\u{000a}"), "\\\\u{000a}");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn display_safe_is_one_plain_line(text in ".*") {
+            let shown = display_safe(&text);
+            proptest::prop_assert!(!shown.chars().any(|c| c.is_control() || is_disguising(c)));
+        }
+    }
+
+    #[test]
+    fn read_ledger_lists_entries() {
+        let (_dir, path) = setup();
+        let loaded = load(&path).expect("load");
+        let view = read_ledger(&loaded).expect("read");
+        assert!(!view.exists);
+        assert_eq!(view.entries, Vec::new());
+        let mut noted = request("calls", 2);
+        noted.note = Some("first");
+        spend(&path, &noted, NOW).expect("spend");
+        spend(&path, &request("requests", 5), NOW).expect("spend");
+        let view = read_ledger(&loaded).expect("read");
+        assert!(view.exists);
+        assert_eq!(view.entries.len(), 2);
+        let first = &view.entries[0];
+        assert_eq!(
+            (first.seq, first.counter.as_str(), first.amount),
+            (1, "calls", 2)
+        );
+        assert_eq!(first.note.as_deref(), Some("first"));
+        assert_eq!(first.digest, loaded.digest);
+        assert_eq!(first.time, NOW);
+        assert_eq!(view.entries[1].note, None);
+        assert_eq!(view.tally.spent("requests"), 5);
+        // A ledger written by an older hallpass may hold a line separator in
+        // a note; it stays readable.
+        let ledger = ledger_path(&path);
+        let text = fs::read_to_string(&ledger).expect("read");
+        let lines: Vec<&str> = text.lines().collect();
+        let entry = lines[1].replace("\"first\"", "\"fir\\u2028st\"");
+        let second = lines[2].replace(
+            &line_hash(lines[1].as_bytes()),
+            &line_hash(entry.as_bytes()),
+        );
+        fs::write(&ledger, format!("{}\n{entry}\n{second}\n", lines[0])).expect("write");
+        let view = read_ledger(&loaded).expect("read");
+        assert_eq!(view.entries[0].note.as_deref(), Some("fir\u{2028}st"));
     }
 
     #[test]

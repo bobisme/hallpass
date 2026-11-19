@@ -718,6 +718,160 @@ fn digest_tracks_every_byte() {
     assert_eq!(json(&["digest", s(&bad)], None).0, 1);
 }
 
+// ---- ledger ------------------------------------------------------------
+
+#[test]
+fn ledger_without_entries_says_so() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    let (rc, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["exists"], false);
+    assert_eq!(out["entries"].as_array().map(Vec::len), Some(0));
+    assert_eq!(out["totals"][0]["name"], "calls");
+    assert_eq!(out["totals"][0]["spent"], 0);
+    let text = run(&["ledger", s(&file)], None);
+    assert_eq!(code(&text), 0);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("No ledger yet"));
+    assert!(!case.path("p.toml.ledger").exists(), "ledger is read-only");
+}
+
+#[test]
+fn ledger_lists_entries_and_totals() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    let (_, d) = json(&["digest", s(&file)], None);
+    let digest = d["digest"].as_str().expect("digest").to_owned();
+    let (rc, _) = json(
+        &[
+            "spend",
+            s(&file),
+            "calls",
+            "--n",
+            "2",
+            "--note",
+            "matrix run 1",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(
+        json(
+            &["spend", s(&file), "requests", "--n", "40"],
+            Some("2026-11-20T10:00:00Z")
+        )
+        .0,
+        0
+    );
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    let (rc, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["result"], "ok");
+    assert_eq!(out["exists"], true);
+    assert_eq!(out["verified"], true);
+    let entries = out["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["seq"], 1);
+    assert_eq!(entries[0]["time"], NOW);
+    assert_eq!(entries[0]["counter"], "calls");
+    assert_eq!(entries[0]["n"], 2);
+    assert_eq!(entries[0]["note"], "matrix run 1");
+    assert_eq!(entries[0]["digest"], digest.as_str());
+    assert_eq!(entries[1]["note"], Value::Null);
+    let totals = out["totals"].as_array().expect("totals");
+    assert_eq!(totals[0]["name"], "calls");
+    assert_eq!(
+        (totals[0]["spent"].as_u64(), totals[0]["remaining"].as_u64()),
+        (Some(3), Some(3))
+    );
+    assert_eq!(totals[1]["spent"], 40);
+
+    let (rc, out) = json(&["ledger", s(&file), "--counter", "requests"], None);
+    assert_eq!(rc, 0);
+    assert_eq!(out["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(out["totals"].as_array().map(Vec::len), Some(1));
+    assert_eq!(out["counter"], "requests");
+
+    let text = run(&["ledger", s(&file)], None);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("matrix run 1"), "{stdout}");
+    assert!(stdout.contains("Chain verified: 3 entries"), "{stdout}");
+    assert!(stdout.contains(&digest[..19]), "{stdout}");
+
+    let (rc, out) = json(&["ledger", s(&file), "--counter", "Bad Name"], None);
+    assert_eq!((rc, out["error"]["code"].as_str()), (1, Some("usage")));
+}
+
+#[test]
+fn ledger_reports_damage_with_its_line() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    let ledger = case.path("p.toml.ledger");
+    let text = fs::read_to_string(&ledger).expect("read");
+    fs::write(&ledger, text.replacen("\"n\":1", "\"n\":2", 1)).expect("damage");
+    let (rc, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(rc, 1, "{out}");
+    assert_eq!(out["error"]["code"], "ledger-corrupt");
+    assert_eq!(out["error"]["line"], 3);
+    let shown = run(&["ledger", s(&file)], None);
+    assert_eq!(code(&shown), 1);
+    assert!(String::from_utf8_lossy(&shown.stderr).contains("damaged at line 3"));
+    fs::write(&ledger, "").expect("empty");
+    let (rc, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(
+        (rc, out["error"]["code"].as_str()),
+        (1, Some("ledger-corrupt"))
+    );
+}
+
+#[test]
+fn notes_cannot_forge_output_lines_or_control_the_terminal() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    for bad in [
+        "ok\n    2  2026-11-20T09:00:00Z  calls  1  forged",
+        "\u{1b}[2J\u{1b}[Hcleared",
+        "\u{9b}31mred",
+        "x\u{2028}y",
+        "evil\u{202e}txt.exe",
+    ] {
+        let (rc, out) = json(&["spend", s(&file), "calls", "--note", bad], Some(NOW));
+        assert_eq!(
+            (rc, out["error"]["code"].as_str()),
+            (1, Some("usage")),
+            "{bad:?}: {out}"
+        );
+    }
+    assert!(!case.path("p.toml.ledger").exists());
+    // A ledger from an older hallpass may hold a bidi control in a note
+    // (0.1 refused only control characters). It is shown escaped.
+    assert_eq!(
+        json(
+            &["spend", s(&file), "calls", "--note", "PLACEHOLDER"],
+            Some(NOW)
+        )
+        .0,
+        0
+    );
+    let ledger = case.path("p.toml.ledger");
+    let text = fs::read_to_string(&ledger).expect("read");
+    let lines: Vec<&str> = text.lines().collect();
+    let entry = lines[1].replace("PLACEHOLDER", "evil\\u202etxt.exe \\\\u{000a}");
+    fs::write(&ledger, format!("{}\n{entry}\n", lines[0])).expect("write");
+    let shown = run(&["ledger", s(&file)], None);
+    assert_eq!(code(&shown), 0, "{shown:?}");
+    let stdout = String::from_utf8(shown.stdout).expect("utf8");
+    assert!(
+        stdout.contains("evil\\u{202e}txt.exe \\\\u{000a}"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains('\u{202e}'));
+    let (_, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(out["entries"][0]["note"], "evil\u{202e}txt.exe \\u{000a}");
+}
+
 // ---- clock and usage ---------------------------------------------------
 
 #[test]

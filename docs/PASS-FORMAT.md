@@ -202,6 +202,8 @@ edit it. It is JSON Lines:
   more can be spent until a person repairs it. The one safe repair is
   removing a final line that is cut short: that spend never completed, so
   the tool never got the go-ahead.
+- `hallpass ledger FILE` lists the entries and verifies the chain; read
+  the file with it rather than by hand.
 - **When the pass is edited**, spends recorded under the old digest still
   count. The spent amount of a counter is the sum of every entry with that
   counter name, whatever digest it carries. So a ceiling the owner raises
@@ -217,4 +219,4 @@ edit it. It is JSON Lines:
 | destinations | 1024 |
 | counters | 64 |
 | ceiling total | 10^12 |
-| note on a spend | 500 characters, one line |
+| note on a spend | 500 characters, one line: no control characters, line separators or bidirectional controls |

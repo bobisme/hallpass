@@ -93,6 +93,14 @@ enum Command {
         /// The pass file.
         file: PathBuf,
     },
+    /// List the ledger of a pass: every spend, the totals, and whether the chain verified.
+    Ledger {
+        /// The pass file.
+        file: PathBuf,
+        /// Show only this counter.
+        #[arg(long, value_name = "NAME")]
+        counter: Option<String>,
+    },
 }
 
 impl Command {
@@ -104,6 +112,7 @@ impl Command {
             Self::Permits { .. } => "permits",
             Self::Spend { .. } => "spend",
             Self::Digest { .. } => "digest",
+            Self::Ledger { .. } => "ledger",
         }
     }
 }
@@ -165,9 +174,9 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         Error::Invalid { problems, .. } => problems,
         _ => &[],
     };
-    let mut text = format!("hallpass {command}: error: {error}\n");
+    let mut text = format!("hallpass {command}: error: {}\n", safe(&error.to_string()));
     for p in problems {
-        let _ = writeln!(text, "  - {p}");
+        let _ = writeln!(text, "  - {}", safe(&p.to_string()));
     }
     text.push_str("Nothing was permitted and nothing was recorded.\n");
     Output {
@@ -176,7 +185,14 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
             "command": command,
             "result": "error",
             "file": file.map(|f| f.display().to_string()),
-            "error": { "code": error.code(), "message": error.to_string() },
+            "error": {
+                "code": error.code(),
+                "message": error.to_string(),
+                "line": match error {
+                    Error::LedgerCorrupt { line, .. } => Some(*line),
+                    _ => None,
+                },
+            },
             "problems": problems_json(problems),
         }),
         text,
@@ -220,7 +236,7 @@ fn window_text(pass: &Pass, state: &WindowState) -> String {
             "REVOKED{} ({range})",
             reason
                 .as_ref()
-                .map_or_else(String::new, |r| format!(": {r}"))
+                .map_or_else(String::new, |r| format!(": {}", safe(r)))
         ),
     }
 }
@@ -276,11 +292,11 @@ fn status_text(
     let mut text = format!(
         "Pass {} \"{}\" ({})\nApproved by: {} (reference: {})\nOperator: {}\nWindow: {}\n",
         pass.id,
-        pass.name,
-        file.display(),
-        pass.approval.owner,
-        pass.approval.reference,
-        pass.approval.operator,
+        safe(&pass.name),
+        safe(&file.display().to_string()),
+        safe(&pass.approval.owner),
+        safe(&pass.approval.reference),
+        safe(&pass.approval.operator),
         window_text(pass, state)
     );
     text.push_str("Destinations:\n");
@@ -293,7 +309,8 @@ fn status_text(
             d.protocol,
             d.ports,
             d.hostname.as_ref().map_or_else(String::new, |h| format!(
-                "  (owner calls it {h}; grants nothing)"
+                "  (owner calls it {}; grants nothing)",
+                safe(h)
             )),
             if d.whole_network_approved {
                 "  [whole network approved]"
@@ -326,7 +343,7 @@ fn status_text(
     }
     let _ = writeln!(text, "Digest: {}", loaded.digest);
     if let Some(r) = refusal {
-        let _ = writeln!(text, "This pass permits NOTHING now: {r}.");
+        let _ = writeln!(text, "This pass permits NOTHING now: {}.", safe(&r.message));
     }
     text
 }
@@ -441,7 +458,7 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
             "refused",
             None,
             Some(refusal_json(r)),
-            format!("REFUSED: {target}: {r}.\n"),
+            format!("REFUSED: {target}: {}.\n", safe(&r.message)),
         ),
     };
     Output {
@@ -504,7 +521,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             outcome.spent,
             remaining.unwrap_or(0)
         ),
-        (Some(r), _, _) => format!("REFUSED: {r}.\n"),
+        (Some(r), _, _) => format!("REFUSED: {}.\n", safe(&r.message)),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
     Output {
@@ -551,6 +568,160 @@ fn digest(file: &Path) -> Output {
     }
 }
 
+/// The short form of a digest for a table column: `sha256:` and 12 hex digits.
+fn short_digest(digest: &Digest) -> String {
+    digest.to_string().chars().take(19).collect()
+}
+
+/// Counter name, amount spent, and the pass's total for it.
+type Total<'a> = (&'a str, u64, Option<u64>);
+
+fn ledger_text(
+    loaded: &LoadedPass,
+    view: &hallpass::LedgerView,
+    entries: &[&hallpass::LedgerEntry],
+    totals: &[Total<'_>],
+    counter: Option<&str>,
+) -> String {
+    let pass = &loaded.pass;
+    let mut text = String::new();
+    let ledger_shown = safe(&view.path.display().to_string()).into_owned();
+    if view.exists {
+        let _ = writeln!(text, "Ledger of pass {} ({ledger_shown})", pass.id);
+        if let Some(c) = counter {
+            let _ = writeln!(text, "Only counter {c}.");
+        }
+        if entries.is_empty() {
+            text.push_str("  no entries\n");
+        } else {
+            let _ = writeln!(
+                text,
+                "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  note",
+                "seq", "time", "counter", "n", "digest"
+            );
+        }
+        for e in entries {
+            let row = format!(
+                "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  {}",
+                e.seq,
+                stamp(e.time),
+                e.counter,
+                e.amount,
+                short_digest(&e.digest),
+                e.note
+                    .as_deref()
+                    .map_or_else(String::new, |n| safe(n).into_owned())
+            );
+            let _ = writeln!(text, "{}", row.trim_end());
+        }
+    } else {
+        let _ = writeln!(
+            text,
+            "No ledger yet for pass {} ({ledger_shown} does not exist): nothing has been spent.",
+            pass.id
+        );
+    }
+    text.push_str("Totals:\n");
+    if totals.is_empty() {
+        text.push_str("  none\n");
+    }
+    for (name, spent, total) in totals {
+        let _ = match total {
+            Some(t) => writeln!(text, "  {name:<16} {spent} spent of {t}"),
+            None => writeln!(text, "  {name:<16} {spent} spent (no ceiling in this pass)"),
+        };
+    }
+    if view.exists {
+        let _ = writeln!(
+            text,
+            "Chain verified: {} entries, every line follows the one before it.",
+            view.entries.len()
+        );
+    }
+    let _ = writeln!(text, "Current pass digest: {}", loaded.digest);
+    text
+}
+
+fn ledger(file: &Path, counter: Option<&str>) -> Output {
+    if let Some(name) = counter
+        && !hallpass::is_counter_name(name)
+    {
+        return error_output(
+            "ledger",
+            Some(file),
+            &Error::Usage(format!(
+                "--counter: `{}` is not a counter name (lower-case letters, digits, `_` and `-`, starting with a letter)",
+                safe(name)
+            )),
+        );
+    }
+    let loaded = match hallpass::load(file) {
+        Ok(l) => l,
+        Err(e) => return error_output("ledger", Some(file), &e),
+    };
+    let view = match hallpass::read_ledger(&loaded) {
+        Ok(v) => v,
+        Err(e) => return error_output("ledger", Some(file), &e),
+    };
+    let pass = &loaded.pass;
+    let wanted = |name: &str| counter.is_none_or(|c| c == name);
+    let entries: Vec<&hallpass::LedgerEntry> =
+        view.entries.iter().filter(|e| wanted(&e.counter)).collect();
+    let mut names: Vec<&str> = pass
+        .ceilings
+        .keys()
+        .chain(view.tally.spent.keys())
+        .map(String::as_str)
+        .filter(|n| wanted(n))
+        .collect();
+    if let Some(c) = counter {
+        names.push(c);
+    }
+    names.sort_unstable();
+    names.dedup();
+    let totals: Vec<Total<'_>> = names
+        .iter()
+        .map(|n| (*n, view.tally.spent(n), pass.ceilings.get(*n).copied()))
+        .collect();
+
+    let text = ledger_text(&loaded, &view, &entries, &totals, counter);
+
+    Output {
+        code: OK,
+        json: json!({
+            "command": "ledger",
+            "result": "ok",
+            "file": file.display().to_string(),
+            "ledger": view.path.display().to_string(),
+            "exists": view.exists,
+            "pass_id": pass.id,
+            "digest": loaded.digest.to_string(),
+            "counter": counter,
+            "verified": true,
+            "entries": entries.iter().map(|e| json!({
+                "seq": e.seq,
+                "time": stamp(e.time),
+                "counter": e.counter,
+                "n": e.amount,
+                "digest": e.digest.to_string(),
+                "note": e.note,
+            })).collect::<Vec<_>>(),
+            "totals": totals.iter().map(|(name, spent, total)| json!({
+                "name": name,
+                "spent": spent,
+                "total": total,
+                "remaining": total.map(|t| t.saturating_sub(*spent)),
+            })).collect::<Vec<_>>(),
+        }),
+        text,
+    }
+}
+
+/// Operator-supplied text, escaped for a terminal.
+fn safe(text: &str) -> std::borrow::Cow<'_, str> {
+    hallpass::display_safe(text)
+}
+
 fn run(cli: &Cli) -> Output {
     let name = cli.command.name();
     let needs_clock = matches!(
@@ -592,6 +763,7 @@ fn run(cli: &Cli) -> Output {
             &clock,
         ),
         Command::Digest { file } => digest(file),
+        Command::Ledger { file, counter } => ledger(file, counter.as_deref()),
     }
 }
 

@@ -56,7 +56,10 @@ pub use address::{
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
 pub use error::Error;
 pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load};
-pub use ledger::{MAX_NOTE, SpendOutcome, SpendRequest, Tally, ledger_path, spend, tally};
+pub use ledger::{
+    LedgerEntry, LedgerView, MAX_NOTE, SpendOutcome, SpendRequest, Tally, display_safe,
+    ledger_path, read_ledger, spend, tally,
+};
 pub use pass::{
     Approval, Destination, FORMAT_VERSION, IPV4_CAP, IPV4_FLOOR, IPV6_CAP, IPV6_FLOOR, MAX_CEILING,
     MAX_COUNTERS, MAX_DESTINATIONS, Pass, Problem, is_counter_name,
