@@ -2,5 +2,16 @@
 name = "hallpass"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A written permission slip for authorized testing: who approved what, to which literal addresses, until when, and how much"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+unnecessary_wraps = "allow"
 
 [dependencies]
