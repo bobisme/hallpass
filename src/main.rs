@@ -1,1 +1,614 @@
-fn main() {}
+//! The `hallpass` command line.
+//!
+//! Exit codes: 0 ok or allowed, 2 refused by the pass, 1 any other error.
+//! Every command accepts `--format json` and then prints one JSON object on
+//! standard output.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use hallpass::time::{Duration, OffsetDateTime};
+use hallpass::{
+    Decision, Digest, Error, LoadedPass, Pass, Problem, Refusal, SpendRequest, Target, WindowState,
+    span, stamp,
+};
+use serde_json::{Value, json};
+
+/// The environment variable that sets the clock in tests. Honoured only by
+/// debug builds and builds with the `test-clock` feature.
+const TEST_CLOCK_VAR: &str = "HALLPASS_UNSAFE_TEST_CLOCK";
+
+#[derive(Parser)]
+#[command(
+    name = "hallpass",
+    version,
+    about = "Read a pass (the written permission slip for an authorized test), decide what it permits now, and count what has been spent",
+    after_help = "Exit codes: 0 ok or allowed, 2 refused by the pass, 1 any other error.\nhallpass is advisory: it answers tools that ask; it cannot stop a tool that does not."
+)]
+struct Cli {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = Format::Text, global = true)]
+    format: Format,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Format {
+    Text,
+    Json,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Write a commented template with nothing approved (never overwrites).
+    Init {
+        /// The new pass file.
+        file: PathBuf,
+    },
+    /// Validate a pass and list every problem.
+    Check {
+        /// The pass file.
+        file: PathBuf,
+    },
+    /// Show who approved, the window, destinations and ceilings.
+    Status {
+        /// The pass file.
+        file: PathBuf,
+    },
+    /// Say whether a destination is permitted right now.
+    Permits {
+        /// The pass file.
+        file: PathBuf,
+        /// `ADDRESS:PORT/PROTOCOL`, for example `192.0.2.10:5060/udp` or `[2001:db8::1]:443/tcp`.
+        #[arg(long, value_name = "ADDR:PORT/PROTO")]
+        to: String,
+        /// Refuse unless the window stays open this many seconds more.
+        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        duration: u32,
+    },
+    /// Record a spend against a ceiling, atomically, or refuse and record nothing.
+    Spend {
+        /// The pass file.
+        file: PathBuf,
+        /// The counter name, one of the pass's ceilings.
+        counter: String,
+        /// The amount to spend.
+        #[arg(long = "n", value_name = "N", default_value_t = 1)]
+        amount: u64,
+        /// A note recorded with the entry.
+        #[arg(long)]
+        note: Option<String>,
+        /// Refuse unless the pass still has this digest (from `hallpass digest`).
+        #[arg(long, value_name = "DIGEST")]
+        digest: Option<String>,
+        /// Refuse unless the window stays open this many seconds more.
+        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        duration: u32,
+    },
+    /// Print the digest of the pass (SHA-256 of its bytes).
+    Digest {
+        /// The pass file.
+        file: PathBuf,
+    },
+}
+
+impl Command {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init",
+            Self::Check { .. } => "check",
+            Self::Status { .. } => "status",
+            Self::Permits { .. } => "permits",
+            Self::Spend { .. } => "spend",
+            Self::Digest { .. } => "digest",
+        }
+    }
+}
+
+/// What a command produced: an exit code, a JSON object, and text.
+struct Output {
+    code: u8,
+    json: Value,
+    text: String,
+}
+
+const OK: u8 = 0;
+const ERROR: u8 = 1;
+const REFUSED: u8 = 2;
+
+/// The clock: the real one, or the test clock where it is honoured.
+struct Clock {
+    now: OffsetDateTime,
+    test: bool,
+}
+
+fn clock() -> Result<Clock, Error> {
+    let real = Clock {
+        now: OffsetDateTime::now_utc(),
+        test: false,
+    };
+    let Some(value) = std::env::var_os(TEST_CLOCK_VAR) else {
+        return Ok(real);
+    };
+    if !cfg!(any(debug_assertions, feature = "test-clock")) {
+        eprintln!(
+            "hallpass: {TEST_CLOCK_VAR} is set but ignored: this build uses the real clock only"
+        );
+        return Ok(real);
+    }
+    let text = value.to_string_lossy();
+    let now = OffsetDateTime::parse(&text, &hallpass::time::format_description::well_known::Rfc3339)
+        .map_err(|_| {
+            Error::Usage(format!(
+                "{TEST_CLOCK_VAR} is `{text}`, not an RFC 3339 timestamp; unset it to use the real clock"
+            ))
+        })?;
+    eprintln!(
+        "hallpass: WARNING: test clock in use ({TEST_CLOCK_VAR}={text}); decisions are NOT about the real time"
+    );
+    Ok(Clock { now, test: true })
+}
+
+fn refusal_json(refusal: &Refusal) -> Value {
+    json!({ "code": refusal.code.as_str(), "message": refusal.message })
+}
+
+fn problems_json(problems: &[Problem]) -> Value {
+    json!(problems)
+}
+
+fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
+    let problems: &[Problem] = match error {
+        Error::Invalid { problems, .. } => problems,
+        _ => &[],
+    };
+    let mut text = format!("hallpass {command}: error: {error}\n");
+    for p in problems {
+        let _ = writeln!(text, "  - {p}");
+    }
+    text.push_str("Nothing was permitted and nothing was recorded.\n");
+    Output {
+        code: ERROR,
+        json: json!({
+            "command": command,
+            "result": "error",
+            "file": file.map(|f| f.display().to_string()),
+            "error": { "code": error.code(), "message": error.to_string() },
+            "problems": problems_json(problems),
+        }),
+        text,
+    }
+}
+
+fn window_json(pass: &Pass, state: &WindowState) -> Value {
+    let seconds = |d: &Duration| d.whole_seconds().max(0);
+    let (remaining, opens, ended, reason) = match state {
+        WindowState::Valid { remaining } => (Some(seconds(remaining)), None, None, None),
+        WindowState::NotYetValid { opens_in } => (None, Some(seconds(opens_in)), None, None),
+        WindowState::Expired { ended_ago } => (None, None, Some(seconds(ended_ago)), None),
+        WindowState::Revoked { reason } => (None, None, None, reason.clone()),
+    };
+    json!({
+        "state": state.as_str(),
+        "valid_from": stamp(pass.approval.valid_from),
+        "valid_until": stamp(pass.approval.valid_until),
+        "seconds_remaining": remaining,
+        "seconds_until_open": opens,
+        "seconds_since_end": ended,
+        "revoked_reason": reason,
+    })
+}
+
+fn window_text(pass: &Pass, state: &WindowState) -> String {
+    let range = format!(
+        "{} to {}",
+        stamp(pass.approval.valid_from),
+        stamp(pass.approval.valid_until)
+    );
+    match state {
+        WindowState::Valid { remaining } => format!("VALID, {} left ({range})", span(*remaining)),
+        WindowState::NotYetValid { opens_in } => {
+            format!("NOT YET VALID, opens in {} ({range})", span(*opens_in))
+        }
+        WindowState::Expired { ended_ago } => {
+            format!("EXPIRED {} ago ({range})", span(*ended_ago))
+        }
+        WindowState::Revoked { reason } => format!(
+            "REVOKED{} ({range})",
+            reason
+                .as_ref()
+                .map_or_else(String::new, |r| format!(": {r}"))
+        ),
+    }
+}
+
+fn init(file: &Path) -> Output {
+    match hallpass::write_template(file) {
+        Ok(()) => Output {
+            code: OK,
+            json: json!({ "command": "init", "result": "ok", "file": file.display().to_string() }),
+            text: format!(
+                "Wrote {} (mode 0600). It approves nothing: fill it in from the owner's written approval, then run `hallpass check {}`.\n",
+                file.display(),
+                file.display()
+            ),
+        },
+        Err(e) => error_output("init", Some(file), &e),
+    }
+}
+
+fn check(file: &Path) -> Output {
+    match hallpass::load(file) {
+        Ok(loaded) => Output {
+            code: OK,
+            json: json!({
+                "command": "check",
+                "result": "ok",
+                "file": file.display().to_string(),
+                "digest": loaded.digest.to_string(),
+                "pass_id": loaded.pass.id,
+                "problems": [],
+            }),
+            text: format!(
+                "{}: OK, pass {} with {} destination(s) and {} ceiling(s). The window is checked by `hallpass status`.\nDigest: {}\n",
+                file.display(),
+                loaded.pass.id,
+                loaded.pass.destinations.len(),
+                loaded.pass.ceilings.len(),
+                loaded.digest
+            ),
+        },
+        Err(e) => error_output("check", Some(file), &e),
+    }
+}
+
+fn status_text(
+    file: &Path,
+    loaded: &LoadedPass,
+    tally: &hallpass::Tally,
+    state: &WindowState,
+    refusal: Option<&Refusal>,
+) -> String {
+    let pass = &loaded.pass;
+    let mut text = format!(
+        "Pass {} \"{}\" ({})\nApproved by: {} (reference: {})\nOperator: {}\nWindow: {}\n",
+        pass.id,
+        pass.name,
+        file.display(),
+        pass.approval.owner,
+        pass.approval.reference,
+        pass.approval.operator,
+        window_text(pass, state)
+    );
+    text.push_str("Destinations:\n");
+    for d in &pass.destinations {
+        let _ = writeln!(
+            text,
+            "  {:<16} {:<24} {} {}{}{}",
+            d.label,
+            d.network.to_string(),
+            d.protocol,
+            d.ports,
+            d.hostname.as_ref().map_or_else(String::new, |h| format!(
+                "  (owner calls it {h}; grants nothing)"
+            )),
+            if d.whole_network_approved {
+                "  [whole network approved]"
+            } else {
+                ""
+            }
+        );
+    }
+    text.push_str("Ceilings:\n");
+    if pass.ceilings.is_empty() {
+        text.push_str("  none\n");
+    }
+    for (name, total) in &pass.ceilings {
+        let spent = tally.spent(name);
+        let _ = writeln!(
+            text,
+            "  {name:<16} {total} total, {spent} spent, {} left",
+            total.saturating_sub(spent)
+        );
+    }
+    for (name, spent) in tally
+        .spent
+        .iter()
+        .filter(|(n, _)| !pass.ceilings.contains_key(*n))
+    {
+        let _ = writeln!(
+            text,
+            "  {name:<16} no ceiling in this pass any more, {spent} spent earlier"
+        );
+    }
+    let _ = writeln!(text, "Digest: {}", loaded.digest);
+    if let Some(r) = refusal {
+        let _ = writeln!(text, "This pass permits NOTHING now: {r}.");
+    }
+    text
+}
+
+fn status(file: &Path, clock: &Clock) -> Output {
+    let loaded = match hallpass::load(file) {
+        Ok(l) => l,
+        Err(e) => return error_output("status", Some(file), &e),
+    };
+    let tally = match hallpass::tally(&loaded) {
+        Ok(t) => t,
+        Err(e) => return error_output("status", Some(file), &e),
+    };
+    let pass = &loaded.pass;
+    let state = pass.window_at(clock.now);
+    let refusal = pass.check_window(clock.now, Duration::ZERO).err();
+    let destinations: Vec<Value> = pass
+        .destinations
+        .iter()
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "kind": if d.network.is_host() { "address" } else { "network" },
+                "destination": d.network.to_string(),
+                "protocol": d.protocol.as_str(),
+                "ports": d.ports.ranges().iter().map(|(s, e)| json!({"start": s, "end": e})).collect::<Vec<_>>(),
+                "ports_text": d.ports.to_string(),
+                "hostname": d.hostname,
+                "whole_network_approved": d.whole_network_approved,
+            })
+        })
+        .collect();
+    let counters: Vec<Value> = pass
+        .ceilings
+        .iter()
+        .map(|(name, total)| {
+            let spent = tally.spent(name);
+            json!({
+                "name": name,
+                "total": total,
+                "spent": spent,
+                "remaining": total.saturating_sub(spent),
+            })
+        })
+        .collect();
+    let unlisted: Vec<Value> = tally
+        .spent
+        .iter()
+        .filter(|(name, _)| !pass.ceilings.contains_key(*name))
+        .map(|(name, spent)| json!({ "name": name, "spent": spent }))
+        .collect();
+
+    let text = status_text(file, &loaded, &tally, &state, refusal.as_ref());
+    Output {
+        code: if refusal.is_some() { REFUSED } else { OK },
+        json: json!({
+            "command": "status",
+            "result": if refusal.is_some() { "refused" } else { "ok" },
+            "file": file.display().to_string(),
+            "digest": loaded.digest.to_string(),
+            "now": stamp(clock.now),
+            "test_clock": clock.test,
+            "pass": {
+                "id": pass.id,
+                "name": pass.name,
+                "owner": pass.approval.owner,
+                "reference": pass.approval.reference,
+                "operator": pass.approval.operator,
+            },
+            "window": window_json(pass, &state),
+            "destinations": destinations,
+            "counters": counters,
+            "unlisted_spends": unlisted,
+            "refusal": refusal.as_ref().map(refusal_json),
+        }),
+        text,
+    }
+}
+
+fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
+    let target: Target = match to.parse() {
+        Ok(t) => t,
+        Err(message) => {
+            return error_output(
+                "permits",
+                Some(file),
+                &Error::Usage(format!("--to: {message}")),
+            );
+        }
+    };
+    let loaded: LoadedPass = match hallpass::load(file) {
+        Ok(l) => l,
+        Err(e) => return error_output("permits", Some(file), &e),
+    };
+    let pass = &loaded.pass;
+    let decision = pass.permits(&target, clock.now, Duration::seconds(i64::from(duration)));
+    let state = pass.window_at(clock.now);
+    let (code, result, label, refusal, text) = match &decision {
+        Decision::Allowed { label } => (
+            OK,
+            "allowed",
+            Some(label.clone()),
+            None,
+            format!(
+                "ALLOWED: {target} by destination {label} of pass {} (window: {})\n",
+                pass.id,
+                window_text(pass, &state)
+            ),
+        ),
+        Decision::Refused(r) => (
+            REFUSED,
+            "refused",
+            None,
+            Some(refusal_json(r)),
+            format!("REFUSED: {target}: {r}.\n"),
+        ),
+    };
+    Output {
+        code,
+        json: json!({
+            "command": "permits",
+            "result": result,
+            "file": file.display().to_string(),
+            "digest": loaded.digest.to_string(),
+            "pass_id": pass.id,
+            "now": stamp(clock.now),
+            "test_clock": clock.test,
+            "target": target.to_string(),
+            "label": label,
+            "refusal": refusal,
+            "window": window_json(pass, &state),
+        }),
+        text,
+    }
+}
+
+struct SpendArgs<'a> {
+    file: &'a Path,
+    counter: &'a str,
+    amount: u64,
+    note: Option<&'a str>,
+    digest: Option<&'a str>,
+    duration: u32,
+}
+
+fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
+    let file = args.file;
+    let expect_digest = match args.digest.map(str::parse::<Digest>).transpose() {
+        Ok(d) => d,
+        Err(message) => {
+            return error_output(
+                "spend",
+                Some(file),
+                &Error::Usage(format!("--digest: {message}")),
+            );
+        }
+    };
+    let request = SpendRequest {
+        counter: args.counter,
+        amount: args.amount,
+        note: args.note,
+        expect_digest,
+        needed: Duration::seconds(i64::from(args.duration)),
+    };
+    let outcome = match hallpass::spend(file, &request, clock.now) {
+        Ok(o) => o,
+        Err(e) => return error_output("spend", Some(file), &e),
+    };
+    let remaining = outcome.remaining();
+    let text = match (&outcome.refusal, outcome.total, outcome.seq) {
+        (None, Some(total), Some(seq)) => format!(
+            "RECORDED: {} {} ({} of {total} spent, {} left; ledger entry {seq})\n",
+            outcome.amount,
+            outcome.counter,
+            outcome.spent,
+            remaining.unwrap_or(0)
+        ),
+        (Some(r), _, _) => format!("REFUSED: {r}.\n"),
+        _ => "REFUSED: no decision.\n".to_owned(),
+    };
+    Output {
+        code: if outcome.refusal.is_some() {
+            REFUSED
+        } else {
+            OK
+        },
+        json: json!({
+            "command": "spend",
+            "result": if outcome.refusal.is_some() { "refused" } else { "allowed" },
+            "file": file.display().to_string(),
+            "digest": outcome.digest.to_string(),
+            "pass_id": outcome.pass_id,
+            "now": stamp(clock.now),
+            "test_clock": clock.test,
+            "counter": outcome.counter,
+            "n": outcome.amount,
+            "total": outcome.total,
+            "spent": outcome.spent,
+            "remaining": remaining,
+            "seq": outcome.seq,
+            "note": args.note,
+            "refusal": outcome.refusal.as_ref().map(refusal_json),
+        }),
+        text,
+    }
+}
+
+fn digest(file: &Path) -> Output {
+    match hallpass::load(file) {
+        Ok(loaded) => Output {
+            code: OK,
+            json: json!({
+                "command": "digest",
+                "result": "ok",
+                "file": file.display().to_string(),
+                "digest": loaded.digest.to_string(),
+                "pass_id": loaded.pass.id,
+            }),
+            text: format!("{}\n", loaded.digest),
+        },
+        Err(e) => error_output("digest", Some(file), &e),
+    }
+}
+
+fn run(cli: &Cli) -> Output {
+    let name = cli.command.name();
+    let needs_clock = matches!(
+        cli.command,
+        Command::Status { .. } | Command::Permits { .. } | Command::Spend { .. }
+    );
+    let clock = if needs_clock {
+        match clock() {
+            Ok(c) => c,
+            Err(e) => return error_output(name, None, &e),
+        }
+    } else {
+        Clock {
+            now: OffsetDateTime::now_utc(),
+            test: false,
+        }
+    };
+    match &cli.command {
+        Command::Init { file } => init(file),
+        Command::Check { file } => check(file),
+        Command::Status { file } => status(file, &clock),
+        Command::Permits { file, to, duration } => permits(file, to, *duration, &clock),
+        Command::Spend {
+            file,
+            counter,
+            amount,
+            note,
+            digest,
+            duration,
+        } => spend(
+            &SpendArgs {
+                file,
+                counter,
+                amount: *amount,
+                note: note.as_deref(),
+                digest: digest.as_deref(),
+                duration: *duration,
+            },
+            &clock,
+        ),
+        Command::Digest { file } => digest(file),
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let code = if e.use_stderr() { ERROR } else { OK };
+            let _ = e.print();
+            return ExitCode::from(code);
+        }
+    };
+    let output = run(&cli);
+    match cli.format {
+        Format::Json => println!("{}", output.json),
+        Format::Text if output.code == ERROR => eprint!("{}", output.text),
+        Format::Text => print!("{}", output.text),
+    }
+    ExitCode::from(output.code)
+}

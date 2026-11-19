@@ -15,3 +15,19 @@ unwrap_used = "deny"
 unnecessary_wraps = "allow"
 
 [dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["parsing", "formatting", "macros"] }
+toml = "1.2.1"
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[features]
+# Honour HALLPASS_UNSAFE_TEST_CLOCK in release builds too (debug builds always do).
+# Only for running the integration tests with --release; never for operators.
+test-clock = []

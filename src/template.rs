@@ -1,0 +1,137 @@
+//! The commented template `hallpass init` writes.
+
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+
+use crate::error::Error;
+
+/// The template: every field present and explained, nothing approved. It
+/// does not validate until it is filled in (it has no destination and
+/// empty names), so it can never be used by mistake.
+pub const TEMPLATE: &str = r#"# hallpass pass: the written permission slip for one authorized test.
+# Fill it in from the owner's WRITTEN approval only. See docs/PASS-FORMAT.md.
+# Then run `hallpass check FILE` until it reports no problems.
+#
+# Nothing here is approved yet: there are no destinations, so this pass
+# permits nothing.
+
+format = 1
+
+# A stable id for this approval (letters, digits, . _ -). The ledger beside
+# this file belongs to this id; a new approval gets a new pass file.
+id = ""
+
+# A short human name.
+name = ""
+
+[approval]
+# Who approved (the owner of the destinations), and where the written
+# approval is (for example "email of 2026-11-18 from the owner").
+owner = ""
+reference = ""
+# Who runs the test.
+operator = ""
+
+# The window, as RFC 3339 timestamps with an explicit offset (Z or +01:00).
+# valid_from is the first second allowed; valid_until is the first second
+# no longer allowed. A timestamp without an offset is refused.
+valid_from = ""
+valid_until = ""
+
+# Set to true when the owner withdraws the approval. A spend in progress
+# reads this file again and stops.
+revoked = false
+# revoked_reason = "owner asked to stop on 2026-11-20 at 10:15"
+
+# One [[destination]] per literal address or network the owner approved.
+# Hostnames are never authorization: `hostname` only records the name the
+# owner uses.
+#
+# [[destination]]
+# label = "sip-edge"              # unique; named in every decision
+# address = "192.0.2.10"          # one literal IP, or instead:
+# network = "192.0.2.0/28"        # a CIDR (no host bits set)
+# protocol = "udp"                # "tcp" or "udp"
+# ports = [5060, "10000-10100"]   # a port, a list, or "start-end" ranges
+# hostname = "sip.example.net"    # informational only; grants nothing
+#
+# A network broader than /24 (IPv4) or /64 (IPv6) is refused unless the
+# written approval names that whole network; then add:
+# whole_network_approved = true
+
+[ceilings]
+# Named counters with the total the owner approved. Each tool defines its
+# own units. `hallpass spend FILE COUNTER` records spends in the ledger
+# beside this file, across every process.
+# calls = 6
+# requests = 500
+"#;
+
+/// Write the template to `path`, mode 0600. Never overwrites.
+///
+/// # Errors
+///
+/// [`Error::Exists`] when anything (a file or a link) is already at `path`,
+/// or [`Error::Io`].
+pub fn write_template(path: &Path) -> Result<(), Error> {
+    if path.symlink_metadata().is_ok() {
+        return Err(Error::Exists {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::Exists {
+                    path: path.to_path_buf(),
+                }
+            } else {
+                Error::io(path, &e)
+            }
+        })?;
+    file.write_all(TEMPLATE.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| Error::io(path, &e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pass::Pass;
+
+    #[test]
+    fn template_permits_nothing() {
+        let problems = Pass::parse(TEMPLATE).expect_err("must not validate");
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert!(fields.contains(&"destination"), "{fields:?}");
+        assert!(fields.contains(&"approval.owner"), "{fields:?}");
+        assert!(fields.contains(&"approval.valid_until"), "{fields:?}");
+    }
+
+    #[test]
+    fn filled_template_validates() {
+        let filled = TEMPLATE
+            .replace("id = \"\"", "id = \"t1\"")
+            .replace("name = \"\"", "name = \"T\"")
+            .replace("owner = \"\"", "owner = \"O\"")
+            .replace("reference = \"\"", "reference = \"R\"")
+            .replace("operator = \"\"", "operator = \"P\"")
+            .replace("valid_from = \"\"", "valid_from = 2026-11-20T08:00:00Z")
+            .replace("valid_until = \"\"", "valid_until = 2026-11-20T12:00:00Z")
+            .replace("# [[destination]]", "[[destination]]")
+            .replace("# label", "label")
+            .replace("# address", "address")
+            .replace("# protocol", "protocol")
+            .replace("# ports", "ports")
+            .replace("# hostname", "hostname")
+            .replace("# calls", "calls");
+        let pass = Pass::parse(&filled).expect("valid");
+        assert_eq!(pass.ceilings.get("calls"), Some(&6));
+    }
+}
