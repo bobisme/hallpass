@@ -1,7 +1,12 @@
 //! Integration tests: run the built `hallpass` binary for every command and
 //! every refusal path. The clock is set with `HALLPASS_UNSAFE_TEST_CLOCK`,
 //! which debug builds (and `--features test-clock`) honour; no test sleeps.
+//!
+//! The witness state directory is never the real one: every run gets
+//! `XDG_STATE_HOME` and `HOME` inside the temporary directory of the test's
+//! current [`Case`], and a run outside any case panics.
 
+use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -49,11 +54,26 @@ struct Case {
     dir: tempfile::TempDir,
 }
 
+thread_local! {
+    /// The home directory of the current test's newest [`Case`]. Each test
+    /// runs on its own thread.
+    static HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
 impl Case {
+    /// A fresh directory; from now on this thread's runs use its `home`
+    /// (and `home/state` as `XDG_STATE_HOME`).
     fn new() -> Self {
-        Self {
-            dir: tempfile::tempdir().expect("tempdir"),
-        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        fs::create_dir(&home).expect("home");
+        HOME.with(|h| *h.borrow_mut() = Some(home));
+        Self { dir }
+    }
+
+    /// The state directory that hallpass uses in this case.
+    fn state(&self) -> PathBuf {
+        self.dir.path().join("home").join("state").join("hallpass")
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -69,9 +89,27 @@ impl Case {
     }
 }
 
-fn run(args: &[&str], now: Option<&str>) -> Output {
+/// A command for the binary with the environment of the current case.
+fn hallpass() -> Command {
+    let home = HOME.with(|h| h.borrow().clone()).expect(
+        "create a Case before running hallpass: tests must never touch the real state directory",
+    );
+    assert!(
+        home.is_dir(),
+        "the case directory is gone: {}",
+        home.display()
+    );
     let mut command = Command::new(BIN);
-    command.args(args).env_remove(CLOCK);
+    command
+        .env_remove(CLOCK)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", home.join("state"));
+    command
+}
+
+fn run(args: &[&str], now: Option<&str>) -> Output {
+    let mut command = hallpass();
+    command.args(args);
     if let Some(now) = now {
         command.env(CLOCK, now);
     }
@@ -581,7 +619,7 @@ fn spend_two_concurrent_spenders_never_exceed_total() {
         #[allow(clippy::needless_collect)]
         let children: Vec<_> = (0..12)
             .map(|_| {
-                Command::new(BIN)
+                hallpass()
                     .args(["spend", s(&file), "requests", "--n", "15"])
                     .env(CLOCK, NOW)
                     .stdout(std::process::Stdio::null())
@@ -611,6 +649,12 @@ fn spend_two_concurrent_spenders_never_exceed_total() {
     assert_eq!(recorded, 33);
     let ledger = fs::read_to_string(case.path("p.toml.ledger")).expect("ledger");
     assert_eq!(ledger.lines().count(), 34, "header and 33 entries");
+    let witness: Value = serde_json::from_slice(
+        &fs::read(case.state().join("example-2026-11.witness")).expect("witness"),
+    )
+    .expect("json");
+    assert_eq!(witness["seq"], 33);
+    assert_eq!(witness["totals"]["requests"], 495);
 }
 
 #[test]
@@ -795,7 +839,10 @@ fn ledger_lists_entries_and_totals() {
     let text = run(&["ledger", s(&file)], None);
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(stdout.contains("matrix run 1"), "{stdout}");
-    assert!(stdout.contains("Chain verified: 3 entries"), "{stdout}");
+    assert!(
+        stdout.contains("3 line(s) after the header, chain verified, the witness matches"),
+        "{stdout}"
+    );
     assert!(stdout.contains(&digest[..19]), "{stdout}");
 
     let (rc, out) = json(&["ledger", s(&file), "--counter", "Bad Name"], None);
@@ -860,6 +907,12 @@ fn notes_cannot_forge_output_lines_or_control_the_terminal() {
     let lines: Vec<&str> = text.lines().collect();
     let entry = lines[1].replace("PLACEHOLDER", "evil\\u202etxt.exe \\\\u{000a}");
     fs::write(&ledger, format!("{}\n{entry}\n", lines[0])).expect("write");
+    // This machine's witness notices the edit; a 0.1 ledger has no witness.
+    assert_eq!(
+        json(&["ledger", s(&file)], None).1["error"]["code"],
+        "ledger-changed"
+    );
+    fs::remove_file(case.state().join("example-2026-11.witness")).expect("forget witness");
     let shown = run(&["ledger", s(&file)], None);
     assert_eq!(code(&shown), 0, "{shown:?}");
     let stdout = String::from_utf8(shown.stdout).expect("utf8");
@@ -870,6 +923,279 @@ fn notes_cannot_forge_output_lines_or_control_the_terminal() {
     assert!(!stdout.contains('\u{202e}'));
     let (_, out) = json(&["ledger", s(&file)], None);
     assert_eq!(out["entries"][0]["note"], "evil\u{202e}txt.exe \\u{000a}");
+}
+
+// ---- the witness -------------------------------------------------------
+
+fn error_code(value: &Value) -> Option<&str> {
+    value["error"]["code"].as_str()
+}
+
+#[test]
+fn deleting_the_ledger_does_not_reset_the_count() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    assert_eq!(
+        json(&["spend", s(&file), "calls", "--n", "4"], Some(NOW)).0,
+        0
+    );
+    fs::remove_file(case.path("p.toml.ledger")).expect("delete ledger");
+    for args in [
+        vec!["spend", s(&file), "calls"],
+        vec!["status", s(&file)],
+        vec!["permits", s(&file), "--to", "192.0.2.10:5060/udp"],
+        vec!["ledger", s(&file)],
+    ] {
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(
+            (rc, error_code(&out)),
+            (1, Some("ledger-missing")),
+            "{args:?}: {out}"
+        );
+        let message = out["error"]["message"].as_str().expect("message");
+        assert!(message.contains("spent: calls 4"), "{message}");
+        assert!(message.contains("hallpass adopt"), "{message}");
+    }
+    let text = run(&["status", s(&file)], Some(NOW));
+    assert_eq!(code(&text), 1);
+    assert!(!String::from_utf8_lossy(&text.stdout).contains("0 spent"));
+    assert!(String::from_utf8_lossy(&text.stderr).contains("is missing"));
+    assert!(!case.path("p.toml.ledger").exists(), "nothing was created");
+
+    assert_eq!(
+        code(&run(&["adopt", s(&file)], Some(NOW))),
+        1,
+        "--reason is required"
+    );
+    let (rc, out) = json(
+        &[
+            "adopt",
+            s(&file),
+            "--reason",
+            "ledger lost when the laptop was reimaged",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["case"], "ledger-missing");
+    assert_eq!(out["created"], true);
+    assert_eq!(out["carried"]["calls"], 4);
+    assert_eq!(out["previous"]["seq"], 1);
+    let (rc, out) = json(&["status", s(&file)], Some(NOW));
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["counters"][0]["spent"], 4);
+    assert_eq!(out["ledger"]["witness"], "matches");
+    assert_eq!(out["ledger"]["adoptions"], 1);
+    assert_eq!(
+        json(&["spend", s(&file), "calls", "--n", "2"], Some(NOW)).0,
+        0
+    );
+    let (rc, out) = spend(&file, "calls", NOW);
+    assert_eq!(
+        (rc, out["refusal"]["code"].as_str()),
+        (2, Some("ceiling-reached"))
+    );
+    let (_, out) = json(&["ledger", s(&file)], None);
+    assert_eq!(
+        out["adoptions"][0]["reason"],
+        "ledger lost when the laptop was reimaged"
+    );
+    assert_eq!(out["adoptions"][0]["carried"]["calls"], 4);
+    let shown = run(&["ledger", s(&file)], None);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout)
+            .contains("ADOPTED, carried from the witness: calls 4")
+    );
+    // Nothing more to adopt.
+    let (rc, out) = json(&["adopt", s(&file), "--reason", "again"], Some(NOW));
+    assert_eq!((rc, error_code(&out)), (1, Some("usage")));
+}
+
+#[test]
+fn an_edited_last_line_is_caught_everywhere() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    assert_eq!(
+        json(
+            &["spend", s(&file), "calls", "--n", "5", "--note", "run 1"],
+            Some(NOW)
+        )
+        .0,
+        0
+    );
+    let ledger = case.path("p.toml.ledger");
+    let good = fs::read_to_string(&ledger).expect("read");
+    fs::write(&ledger, good.replace("\"n\":5", "\"n\":1")).expect("edit");
+    for args in [
+        vec!["spend", s(&file), "calls"],
+        vec!["status", s(&file)],
+        vec!["permits", s(&file), "--to", "192.0.2.10:5060/udp"],
+        vec!["ledger", s(&file)],
+    ] {
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(
+            (rc, error_code(&out)),
+            (1, Some("ledger-changed")),
+            "{args:?}: {out}"
+        );
+    }
+    fs::write(&ledger, &good).expect("restore");
+    assert_eq!(permits(&file, "192.0.2.10:5060/udp", NOW).0, 0);
+}
+
+#[test]
+fn a_pass_moved_without_its_ledger_is_refused_and_with_it_accepted() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    fs::create_dir(case.path("archive")).expect("mkdir");
+    let moved = case.path("archive/p.toml");
+    fs::rename(&file, &moved).expect("move pass");
+    let (rc, out) = spend(&moved, "calls", NOW);
+    assert_eq!((rc, error_code(&out)), (1, Some("ledger-missing")), "{out}");
+    let message = out["error"]["message"].as_str().expect("m");
+    assert!(message.contains("last seen at"), "{message}");
+    assert!(message.contains("p.toml.ledger"), "{message}");
+    fs::rename(
+        case.path("p.toml.ledger"),
+        case.path("archive/p.toml.ledger"),
+    )
+    .expect("move ledger");
+    let (rc, out) = spend(&moved, "calls", NOW);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["spent"], 2);
+    let warning = out["warnings"][0].as_str().expect("warning");
+    assert!(warning.contains("moved or copied"), "{warning}");
+    let (_, out) = spend(&moved, "calls", NOW);
+    assert_eq!(out["warnings"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn a_pass_from_another_machine_is_accepted_with_a_warning() {
+    let first = Case::new();
+    let file = first.pass("p.toml", PASS);
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    // A second home: another machine or user, with no witness yet.
+    let _other = Case::new();
+    let (rc, out) = json(&["status", s(&file)], Some(NOW));
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["counters"][0]["spent"], 1);
+    assert_eq!(out["ledger"]["witness"], "missing");
+    assert!(
+        out["warnings"][0]
+            .as_str()
+            .expect("w")
+            .contains("no witness")
+    );
+    let text = run(&["status", s(&file)], Some(NOW));
+    assert!(
+        String::from_utf8_lossy(&text.stderr).contains("hallpass: warning: there is no witness")
+    );
+    assert!(String::from_utf8_lossy(&text.stdout).contains("NO WITNESS yet"));
+    let (rc, out) = spend(&file, "calls", NOW);
+    assert_eq!(rc, 0, "{out}");
+    assert!(
+        out["warnings"][0]
+            .as_str()
+            .expect("w")
+            .contains("one is recorded now")
+    );
+    let (_, out) = json(&["status", s(&file)], Some(NOW));
+    assert_eq!(out["ledger"]["witness"], "matches");
+}
+
+#[test]
+fn an_unusable_state_directory_fails_closed_for_spends() {
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    let not_a_dir = case.path("not-a-dir");
+    fs::write(&not_a_dir, "").expect("write");
+    let with_state = |state: Option<&Path>, home: Option<&Path>, args: &[&str]| {
+        let mut command = hallpass();
+        command.env_remove("XDG_STATE_HOME").env_remove("HOME");
+        if let Some(state) = state {
+            command.env("XDG_STATE_HOME", state);
+        }
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        let output = command
+            .args(["--format", "json"])
+            .args(args)
+            .env(CLOCK, NOW)
+            .output()
+            .expect("run");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+        (code(&output), value)
+    };
+    let spend_args = ["spend", s(&file), "calls"];
+    let (rc, out) = with_state(Some(&not_a_dir), None, &spend_args);
+    assert_eq!(
+        (rc, error_code(&out)),
+        (1, Some("witness-unavailable")),
+        "{out}"
+    );
+    let (rc, out) = with_state(None, None, &spend_args);
+    assert_eq!(
+        (rc, error_code(&out)),
+        (1, Some("witness-unavailable")),
+        "{out}"
+    );
+    assert!(
+        out["error"]["message"]
+            .as_str()
+            .expect("m")
+            .contains("XDG_STATE_HOME")
+    );
+    assert!(!case.path("p.toml.ledger").exists(), "nothing was recorded");
+    // Read-only commands still answer, with a warning.
+    let (rc, out) = with_state(None, None, &["status", s(&file)]);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["ledger"]["witness"], "not-checked");
+    assert!(
+        out["warnings"][0]
+            .as_str()
+            .expect("w")
+            .contains("not checked against its witness"),
+        "{out}"
+    );
+    let (rc, out) = with_state(
+        None,
+        None,
+        &["permits", s(&file), "--to", "192.0.2.10:5060/udp"],
+    );
+    assert_eq!(rc, 0, "{out}");
+
+    // A relative XDG_STATE_HOME is ignored (XDG rules): HOME is used.
+    let home = case.path("home2");
+    fs::create_dir(&home).expect("mkdir");
+    let (rc, out) = with_state(Some(Path::new("relative/state")), Some(&home), &spend_args);
+    assert_eq!(rc, 0, "{out}");
+    let state = home.join(".local/state/hallpass");
+    assert!(state.join("example-2026-11.witness").is_file());
+    assert_eq!(
+        fs::metadata(&state).expect("meta").permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(state.join("example-2026-11.witness"))
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    // Not writable: refused before anything is recorded.
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).expect("chmod");
+    let (rc, out) = with_state(None, Some(&home), &spend_args);
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod");
+    assert_eq!(
+        (rc, error_code(&out)),
+        (1, Some("witness-unavailable")),
+        "{out}"
+    );
+    let (_, out) = with_state(None, Some(&home), &["ledger", s(&file)]);
+    assert_eq!(out["entries"].as_array().map(Vec::len), Some(1), "{out}");
 }
 
 // ---- clock and usage ---------------------------------------------------
@@ -899,6 +1225,7 @@ fn real_clock_without_variable() {
 
 #[test]
 fn usage_errors_exit_one() {
+    let _case = Case::new();
     assert_eq!(code(&run(&["frobnicate"], None)), 1);
     assert_eq!(code(&run(&["spend"], None)), 1);
     assert_eq!(code(&run(&["--help"], None)), 0);

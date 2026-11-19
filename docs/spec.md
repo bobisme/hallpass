@@ -43,7 +43,16 @@ the same questions.
 - **Ceiling**: a named counter with a total (`calls = 6`). Each tool
   defines its own units.
 - **Ledger**: the append-only file beside the pass that records every
-  spend.
+  spend (and every adoption).
+- **Witness**: a small record per pass id in the user's state directory,
+  outside the pass directory: the ledger's last sequence number, the hash
+  of its last line, the totals, and where the ledger was. It lets hallpass
+  notice a lost, replaced or rewound ledger.
+- **State directory**: `$XDG_STATE_HOME/hallpass/`, or
+  `$HOME/.local/state/hallpass/` when `XDG_STATE_HOME` is unset, empty or
+  not an absolute path. Created mode 0700; witness and lock files 0600.
+- **Adoption**: an operator's recorded acknowledgment, with a reason, of a
+  ledger that was lost, changed outside hallpass, or had no witness.
 - **Digest**: `sha256:` plus the SHA-256 of the pass file's exact bytes.
 
 ## The pass file (summary)
@@ -128,21 +137,80 @@ In this order, stopping at the first refusal:
    U+2029) and no bidirectional control (U+061C, U+200E, U+200F,
    U+202A-U+202E, U+2066-U+2069). Failure is a usage error. (Reading a
    ledger accepts notes that only avoid control characters, the 0.1 rule.)
-2. Load and validate the pass. Create the ledger with its header if it does
-   not exist.
-3. Open the ledger (not a link, mode exactly private: no group or other
+2. Load and validate the pass. Find the state directory, create it if
+   needed (0700), check that it is a private directory and writable, and
+   take an exclusive lock on `<pass id>.lock` in it. Read the witness.
+3. If the ledger does not exist: when the witness records any line,
+   `ledger-missing` (nothing is created); otherwise create the ledger with
+   its header.
+4. Open the ledger (not a link, mode exactly private: no group or other
    bits) and take an exclusive lock.
-4. Under the lock: load and validate the pass again from disk; read and
-   verify the whole ledger.
-5. Refuse, recording nothing, in this order: `pass-changed` (an expected
-   digest was given and differs), the window rules (`revoked`,
+5. Under both locks: load and validate the pass again from disk (its id
+   must not have changed); read and verify the whole ledger; compare it with
+   the witness (see "The witness"). A ledger that does not hold the
+   witnessed line is `ledger-changed`. When there was no witness, or the
+   witness saw the ledger at another path or fewer lines ago, write the
+   witness now, with a warning.
+6. Refuse, recording nothing in the ledger, in this order: `pass-changed`
+   (an expected digest was given and differs), the window rules (`revoked`,
    `not-yet-valid`, `expired`, `window-too-short`), `unknown-counter` (not
    in `[ceilings]`), `ceiling-reached` (spent + n > total).
-6. Otherwise append one entry (time, counter, n, digest of the pass as just
+7. Otherwise append one entry (time, counter, n, digest of the pass as just
    read, note, sequence number, hash of the previous line), sync it to disk,
-   and release the lock. The spend is confirmed only after the sync.
+   then replace the witness (written aside, synced, renamed), and release
+   both locks. The spend is confirmed only after both. If the witness cannot
+   be written after the entry was, the result is `witness-not-updated`: the
+   spend counts, but the caller is told not to proceed.
 
-Two processes spending at once never together exceed the total.
+Two processes spending at once never together exceed the total. Writers
+always lock the witness first and the ledger second; readers take only a
+shared lock on the ledger and read the witness, which is replaced
+atomically.
+
+### The witness
+
+After every recorded spend or adoption the witness for the pass id holds
+the ledger's last sequence number, the SHA-256 of its last line, the totals
+per counter, the ledger's resolved path and the time. Every command that
+reads the ledger (`status`, `permits`, `spend`, `ledger`, `adopt`) compares:
+
+| Ledger | Witness | Result |
+|---|---|---|
+| missing | none, or no lines recorded | nothing spent (`fresh`) |
+| missing | records lines | **error `ledger-missing`**, naming the witnessed totals, where the ledger was last seen and when, and what to do |
+| present | none | accepted with a warning (`missing`); `spend` records a witness |
+| present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
+| present | the witnessed line is there, and `k` lines follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added lines; they count |
+| present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
+| present | could not be read (no state directory, damaged, not private) | `spend` and `adopt`: **error `witness-unavailable`**. `status`, `permits`, `ledger`: answered, with a warning and `not-checked` |
+
+The path in the witness is informational: identity is the hash chain. A
+pass moved with its ledger is accepted with a warning and the witness
+follows it; the copy left behind is then `ledger-changed` (only one copy
+can be spent from). A second pass file that reuses an id and has no ledger
+is `ledger-missing`, not a fresh count.
+
+### `adopt(pass, reason, now)`
+
+`hallpass adopt FILE --reason TEXT` acknowledges a ledger that would
+otherwise be refused or warned about, and records the acknowledgment in
+the ledger as a line in the hash chain (`event: "adopt"`, the reason, the
+pass digest, the witness's previous record, and `carried`):
+
+- ledger missing, witness records lines: a new ledger is started; `carried`
+  is the witness's totals;
+- ledger changed: `carried` is, per counter, what the witness recorded
+  beyond what the ledger holds;
+- no witness: `carried` is empty.
+
+Carried amounts count as spent. An adoption never lowers a count below
+what the witness recorded; there is no reset to zero (a new budget is a
+raised ceiling in the pass, or a new pass). Then the witness records the
+new last line. The reason follows the note rules and is required. With
+nothing to adopt (the ledger matches its witness, or there is neither a
+ledger nor a witnessed spend) it is a usage error. A damaged ledger
+(`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
+the loss. The window is not checked: an adoption permits nothing.
 
 ### When the pass is edited
 
@@ -154,6 +222,7 @@ Two processes spending at once never together exceed the total.
   its earlier spends under `unlisted_spends`.
 - A changed `id` makes the ledger foreign: every spend and `status` fails
   with `ledger-foreign` until the id is restored or a new pass file is used.
+  A new id also has its own witness.
 - The digest changes with any byte; a caller that passed `--digest` gets
   `pass-changed`.
 
@@ -171,10 +240,15 @@ Each of these is an error (exit 1), permits nothing, and records nothing:
 | the pass does not validate (every problem listed) | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
+| the ledger is missing but its witness recorded lines | `ledger-missing` |
+| the ledger does not hold the line its witness recorded | `ledger-changed` |
+| `spend`, `adopt`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
+| the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
-| bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note, a malformed test clock | `usage` |
+| bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a malformed test clock | `usage` |
 
-A missing ledger is not an error: it means nothing was spent.
+A missing ledger is not an error when no witness records lines for the
+pass id: it means nothing was spent.
 
 ## Command line
 
@@ -187,6 +261,7 @@ hallpass [--format text|json] <command>
   spend FILE COUNTER [--n N] [--note TEXT] [--digest DIGEST] [--duration SECONDS]
   digest FILE
   ledger FILE [--counter NAME]
+  adopt FILE --reason TEXT
 ```
 
 Exit codes: **0** ok or allowed; **2** refused by the pass; **1** any other
@@ -200,18 +275,27 @@ print the parser's text on standard error with exit 1.
 |---|---|---|---|
 | `init` | template written (mode 0600; it does not validate until filled in) | never | file exists, write failed |
 | `check` | the pass validates | never | any problem |
-| `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error |
-| `permits` | allowed | refused | invalid pass or target |
+| `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
+| `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
 | `spend` | recorded | refused, nothing recorded | any error, nothing recorded |
 | `digest` | printed | never | invalid pass |
-| `ledger` | listed (also when there is no ledger yet) | never | invalid pass, damaged or foreign ledger, bad `--counter` |
+| `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
+| `adopt` | adoption recorded | never | invalid pass, damaged ledger, nothing to adopt, missing reason, unusable state directory |
 
 `check` does not judge the window; `status` does.
 
+`permits` reads the ledger and its witness too (read-only, shared lock):
+a damaged, lost or changed record is an error there as everywhere.
+
+Warnings (no witness yet, a ledger extended past its witness or moved, a
+witness that could not be checked) go to standard error as
+`hallpass: warning: ...` in text output, and into `warnings` in JSON.
+
 `ledger` is read-only. It takes the same shared lock as `status`, verifies
-the whole chain, and lists each entry (sequence number, time, counter,
-amount, the pass digest it was made under, note), then the total per
-counter. `--counter NAME` shows one counter. A pass without a ledger says
+the whole chain, compares it with the witness, and lists each entry
+(sequence number, time, counter, amount, the pass digest it was made
+under, note) and each adoption (with what it carried and its reason), then
+the total per counter. `--counter NAME` shows one counter. A pass without a ledger says
 so and exits 0. In text output every operator-supplied string (notes, and
 pass text in `status`) is shown with control characters, line separators
 and bidirectional controls escaped as `\u{...}` and a backslash as `\\`,
@@ -221,7 +305,7 @@ sequence. JSON output carries the exact text.
 ### JSON fields
 
 Every object has `command` and `result` (`ok`, `allowed`, `refused`,
-`error`) and `file`.
+`error`), `file`, and `warnings` (a list of strings, usually empty).
 
 - **error** (any command): `error` `{code, message, line}` (`line` is the
   1-based ledger line for `ledger-corrupt`, else null), `problems` (list of
@@ -233,7 +317,10 @@ Every object has `command` and `result` (`ok`, `allowed`, `refused`,
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
   end}`)`, ports_text, hostname, whole_network_approved}`), `counters` (list
   of `{name, total, spent, remaining}`), `unlisted_spends` (list of `{name,
-  spent}`), `refusal` (`{code, message}` or null).
+  spent}`), `ledger` `{path, exists, entries, adoptions, witness,
+  moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
+  `not-checked`; `moved_from` the path the witness last saw, or null),
+  `refusal` (`{code, message}` or null).
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
   (normalized), `label` (or null), `refusal` (or null), `window`.
 - **spend**: `digest`, `pass_id`, `now`, `test_clock`, `counter`, `n`,
@@ -245,10 +332,19 @@ Every object has `command` and `result` (`ok`, `allowed`, `refused`,
   pass now), `counter` (the `--counter` filter or null), `verified` (always
   `true` on success: a chain that does not verify is an error), `entries`
   (list of `{seq, time, counter, n, digest, note}`; `digest` is the pass
-  digest the spend was decided against, `note` null when none), `totals`
+  digest the spend was decided against, `note` null when none),
+  `adoptions` (list of `{seq, time, reason, digest, carried, previous}`;
+  `carried` is an object of counter name to amount, `previous` is `{ledger,
+  seq, totals, updated}` or null), `witness`, `moved_from` (as in
+  `status`), `totals`
   (list of `{name, spent, total, remaining}` for every counter of the pass
   and every counter in the ledger, sorted by name; `total` and `remaining`
-  null for a counter the pass no longer has).
+  null for a counter the pass no longer has). `spent` includes carried
+  amounts.
+- **adopt**: `ledger`, `pass_id`, `digest`, `now`, `test_clock`, `case`
+  (`ledger-missing`, `ledger-changed` or `no-witness`), `created` (a new
+  ledger was started), `seq`, `reason`, `carried` and `totals` (objects of
+  counter name to amount), `previous` (as in `ledger`, or null).
 
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
@@ -263,7 +359,7 @@ Refusal codes: `not-yet-valid`, `expired`, `revoked`, `window-too-short`,
 ### Test clock
 
 `HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` replaces "now" for `status`,
-`permits` and `spend`, only in debug builds and builds with the
+`permits`, `spend` and `adopt`, only in debug builds and builds with the
 `test-clock` feature. When used, a warning goes to standard error and
 `test_clock` is `true`. Release builds ignore it and say so on standard
 error.
@@ -281,14 +377,17 @@ Crate `hallpass` (re-exports `time`):
 | `Pass::check_window(now, needed) -> Result<(), Refusal>` | window rule |
 | `Pass::permits(&Target, now, needed) -> Decision` | `Allowed { label }` or `Refused(Refusal)` |
 | `Pass::destination_for(ip, port, protocol)` | the matching destination, window not checked |
-| `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend; `SpendOutcome.refusal` is `None` when recorded |
-| `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock |
-| `read_ledger(&LoadedPass) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`) and the tally, chain verified, under a shared lock |
+| `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend with the witness in `StateDir::from_env()`; `SpendOutcome.refusal` is `None` when recorded; `SpendOutcome.warnings` |
+| `spend_in(path, &SpendRequest, now, &StateDir)` | the same with an explicit state directory |
+| `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
+| `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
+| `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
+| `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `ledger_path(path)` | `<pass>.ledger` |
 | `write_template(path)`, `TEMPLATE` | `init` |
 | `parse_address`, `parse_network`, `embedded_ipv4`, `Target` (`FromStr`), `Network`, `Protocol`, `PortSet` | strict parsing |
-| `Digest` (`Display`/`FromStr` as `sha256:<hex>`), `Refusal`, `RefusalCode`, `WindowState`, `Problem`, `Error` (with `code()`) | value types |
+| `Digest` (`Display`/`FromStr` as `sha256:<hex>`), `Refusal`, `RefusalCode`, `WindowState`, `Problem`, `Error` (with `code()`; `LedgerMissing` boxes a `MissingLedger`) | value types |
 | `stamp`, `span` | time formatting used in messages |
 | constants: `FORMAT_VERSION`, `IPV4_CAP`, `IPV6_CAP`, `IPV4_FLOOR`, `IPV6_FLOOR`, `MAX_CEILING`, `MAX_COUNTERS`, `MAX_DESTINATIONS`, `MAX_NOTE`, `MAX_PASS_BYTES` | documented limits |
 
@@ -305,14 +404,18 @@ hallpass protects against mistakes and drift in the approval record and
 its use: typos (unknown keys), ambiguous or smuggled addresses, names used
 as authorization, over-broad networks, offset-less times, testing outside
 the window or after revocation, ceilings that only hold per command, a pass
-changed mid-run (digest), damaged state (fail closed) and link tricks on
-the pass and ledger.
+changed mid-run (digest), damaged state (fail closed), link tricks on
+the pass and ledger, and accidents to the ledger as a whole: a ledger lost
+in a copy or a `git clean`, a pass moved without its ledger, an older copy
+of the ledger put back, an editor that rewrote the last line (the
+witness).
 
 It does not protect against: a tool that does not ask or ignores the
-answer; anyone who can write the engagement directory (they can edit the
-pass, delete or rewrite the ledger; deleting the ledger or moving the pass
-resets the count; the last ledger entry can be altered undetected); a wrong
-system clock; unreliable `flock` on network file systems; symbolic links in
+answer; anyone determined to cheat with write access to their own files
+(they can edit the pass, and delete or rewrite both the ledger and the
+witness consistently; the witness catches accidents and casual edits, not
+that); a pass used from two machines or users, whose witnesses do not see
+each other; a wrong system clock; unreliable `flock` on network file systems; symbolic links in
 parent directories; directed broadcast addresses inside a listed network;
 relay-embedding IPv6 (6to4, Teredo); and work already running when a pass
 is revoked. [DESIGN.md](DESIGN.md) explains each.

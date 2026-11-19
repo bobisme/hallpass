@@ -69,6 +69,7 @@ Destinations:
 Ceilings:
   calls            6 total, 0 spent, 6 left
 Digest: sha256:…
+Ledger: none yet (nothing spent)
 
 $ hallpass permits engagement.pass.toml --to 192.0.2.10:5060/udp
 ALLOWED: 192.0.2.10:5060/udp by destination sip-edge of pass example-2026-11 (…)
@@ -86,7 +87,7 @@ Ledger of pass example-2026-11 (engagement.pass.toml.ledger)
       1  2026-11-20T09:00:00Z  calls                   1  sha256:789b8599fd63  first call
 Totals:
   calls            1 spent of 6
-Chain verified: 1 entries, every line follows the one before it.
+Ledger: 1 line(s) after the header, chain verified, the witness matches
 Current pass digest: sha256:…
 ```
 
@@ -95,8 +96,20 @@ whether the seven spends come from one process, seven commands, or two
 terminals at once. Set `revoked = true` in the pass and the next `spend` or
 `permits` from any tool is refused.
 
+If the ledger goes missing (left behind in a copy, deleted by a cleanup),
+hallpass does not start again from 0:
+
+```text
+$ hallpass status engagement.pass.toml
+hallpass status: error: the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says hallpass recorded 1 ledger line(s) for this pass id (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
+
+$ hallpass adopt engagement.pass.toml --reason "ledger lost when the laptop was reimaged"
+ADOPTED: engagement.pass.toml.ledger for pass example-2026-11 (the ledger was missing; a new one was started). Recorded as ledger entry 1 … Carried from the witness: calls 1. Spent now: calls 1.
+```
+
 Exit codes: **0** ok or allowed, **2** refused by the pass, **1** any other
-error (unreadable or invalid pass, damaged ledger, bad arguments). Every
+error (unreadable or invalid pass, damaged, lost or changed ledger, bad
+arguments). Every
 command takes `--format json` and then prints one JSON object on standard
 output; [docs/spec.md](docs/spec.md) lists the fields.
 
@@ -134,6 +147,13 @@ What it guards against:
   `spend --digest` refuses if it changed.
 - **Damaged state**: an unreadable pass or a damaged ledger permits
   nothing. It is never treated as empty.
+- **A lost, replaced or rewound ledger**: a small witness in
+  `~/.local/state/hallpass/` (or `$XDG_STATE_HOME/hallpass/`) records each
+  ledger's last line. A ledger lost in a copy or a `git clean`, a pass
+  moved without its ledger, an older copy put back, or an edited last line
+  is refused until it is restored or adopted with
+  `hallpass adopt FILE --reason TEXT`, which is recorded in the ledger and
+  keeps the count.
 - **Link tricks**: the pass and the ledger are never read through a
   symbolic link; a pass writable by others and a ledger readable by others
   are refused.
@@ -141,9 +161,11 @@ What it guards against:
 What it does not guard against:
 
 - a tool that does not ask, or ignores the answer;
-- someone with write access to the engagement directory: they can edit the
-  pass, delete the ledger (which resets the count), or rewrite it
-  consistently;
+- a determined operator: they own the pass, the ledger and the witness,
+  and can edit or delete all of them consistently. The witness catches
+  accidents and casual edits, not a deliberate cheat;
+- the same pass used from two machines or user accounts (each has its own
+  witness);
 - a wrong system clock (the window uses the caller's clock);
 - network file systems where `flock` is unreliable;
 - what happens inside a long step after a tool has asked (revocation takes
@@ -161,4 +183,6 @@ cargo doc --no-deps
 ```
 
 The integration tests set the clock with `HALLPASS_UNSAFE_TEST_CLOCK`,
-which only debug builds and `--features test-clock` honour.
+which only debug builds and `--features test-clock` honour. Every test
+points `XDG_STATE_HOME` and `HOME` (or the library's `StateDir`) at a
+temporary directory, so the suite never touches your real witnesses.

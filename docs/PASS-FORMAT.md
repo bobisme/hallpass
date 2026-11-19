@@ -202,6 +202,25 @@ edit it. It is JSON Lines:
   more can be spent until a person repairs it. The one safe repair is
   removing a final line that is cut short: that spend never completed, so
   the tool never got the go-ahead.
+- An **adoption** is a line of its own in the chain, written by
+  `hallpass adopt FILE --reason TEXT`:
+
+  ```text
+  {"seq":3,"time":"…","event":"adopt","reason":"ledger lost in a copy","digest":"sha256:…","carried":{"calls":4},"witness":{"ledger":"/…/engagement.pass.toml.ledger","seq":2,"tail":"sha256:…","totals":{"calls":4},"updated":"2026-11-20T09:00:00Z"},"prev":"sha256:…"}
+  ```
+
+  `carried` amounts count as spent; `witness` is what the witness recorded
+  before (or null). hallpass 0.1 does not know this line and fails closed
+  on a ledger that has one.
+- **The witness.** Each spend also writes
+  `$XDG_STATE_HOME/hallpass/<pass id>.witness` (default
+  `~/.local/state/hallpass/`), one JSON object with the last sequence
+  number, the hash of the last line, the totals and the ledger's path. A
+  ledger that is gone while the witness records lines (`ledger-missing`),
+  or that does not hold the witnessed line (`ledger-changed`), permits
+  nothing until it is restored or adopted. Do not edit the witness either;
+  back it up with the ledger if the engagement moves machines (or adopt the
+  ledger on the new machine, which is recorded).
 - `hallpass ledger FILE` lists the entries and verifies the chain; read
   the file with it rather than by hand.
 - **When the pass is edited**, spends recorded under the old digest still

@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
-    Decision, Digest, Error, LoadedPass, Pass, Problem, Refusal, SpendRequest, Target, WindowState,
-    span, stamp,
+    Decision, Digest, Error, LoadedPass, Pass, Problem, Refusal, SpendRequest, StateDir, Target,
+    WindowState, span, stamp,
 };
 use serde_json::{Value, json};
 
@@ -101,6 +101,17 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         counter: Option<String>,
     },
+    /// Accept a ledger that was lost, changed outside hallpass, or has no witness, and record why.
+    ///
+    /// The adoption is written into the ledger. A lost or rewound ledger
+    /// keeps the count its witness recorded: adoption never lowers a count.
+    Adopt {
+        /// The pass file.
+        file: PathBuf,
+        /// Why (one line; it is recorded in the ledger).
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
 }
 
 impl Command {
@@ -113,6 +124,7 @@ impl Command {
             Self::Spend { .. } => "spend",
             Self::Digest { .. } => "digest",
             Self::Ledger { .. } => "ledger",
+            Self::Adopt { .. } => "adopt",
         }
     }
 }
@@ -178,7 +190,12 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
     for p in problems {
         let _ = writeln!(text, "  - {}", safe(&p.to_string()));
     }
-    text.push_str("Nothing was permitted and nothing was recorded.\n");
+    text.push_str(match error {
+        Error::WitnessNotUpdated { .. } => {
+            "Nothing was permitted. The spend was recorded and counts against the ceiling.\n"
+        }
+        _ => "Nothing was permitted and nothing was recorded.\n",
+    });
     Output {
         code: ERROR,
         json: json!({
@@ -353,10 +370,11 @@ fn status(file: &Path, clock: &Clock) -> Output {
         Ok(l) => l,
         Err(e) => return error_output("status", Some(file), &e),
     };
-    let tally = match hallpass::tally(&loaded) {
-        Ok(t) => t,
+    let view = match hallpass::read_ledger(&loaded, &StateDir::from_env()) {
+        Ok(v) => v,
         Err(e) => return error_output("status", Some(file), &e),
     };
+    let tally = &view.tally;
     let pass = &loaded.pass;
     let state = pass.window_at(clock.now);
     let refusal = pass.check_window(clock.now, Duration::ZERO).err();
@@ -396,7 +414,8 @@ fn status(file: &Path, clock: &Clock) -> Output {
         .map(|(name, spent)| json!({ "name": name, "spent": spent }))
         .collect();
 
-    let text = status_text(file, &loaded, &tally, &state, refusal.as_ref());
+    let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
+    let _ = writeln!(text, "Ledger: {}", ledger_state_text(&view));
     Output {
         code: if refusal.is_some() { REFUSED } else { OK },
         json: json!({
@@ -417,6 +436,8 @@ fn status(file: &Path, clock: &Clock) -> Output {
             "destinations": destinations,
             "counters": counters,
             "unlisted_spends": unlisted,
+            "ledger": ledger_json(&view),
+            "warnings": view.warnings,
             "refusal": refusal.as_ref().map(refusal_json),
         }),
         text,
@@ -436,6 +457,12 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
     };
     let loaded: LoadedPass = match hallpass::load(file) {
         Ok(l) => l,
+        Err(e) => return error_output("permits", Some(file), &e),
+    };
+    // The ledger and its witness are checked too: a lost or changed record
+    // fails closed here as everywhere else.
+    let view = match hallpass::read_ledger(&loaded, &StateDir::from_env()) {
+        Ok(v) => v,
         Err(e) => return error_output("permits", Some(file), &e),
     };
     let pass = &loaded.pass;
@@ -475,6 +502,7 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
             "label": label,
             "refusal": refusal,
             "window": window_json(pass, &state),
+            "warnings": view.warnings,
         }),
         text,
     }
@@ -546,6 +574,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "seq": outcome.seq,
             "note": args.note,
             "refusal": outcome.refusal.as_ref().map(refusal_json),
+            "warnings": outcome.warnings,
         }),
         text,
     }
@@ -589,9 +618,41 @@ fn ledger_text(
     if view.exists {
         let _ = writeln!(text, "Ledger of pass {} ({ledger_shown})", pass.id);
         if let Some(c) = counter {
-            let _ = writeln!(text, "Only counter {c}.");
+            let _ = writeln!(text, "Only counter {c} (adoptions are always shown).");
         }
-        if entries.is_empty() {
+        let mut rows: Vec<(u64, String)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e.seq,
+                    format!(
+                        "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  {}",
+                        e.seq,
+                        stamp(e.time),
+                        e.counter,
+                        e.amount,
+                        short_digest(&e.digest),
+                        e.note
+                            .as_deref()
+                            .map_or_else(String::new, |n| safe(n).into_owned())
+                    ),
+                )
+            })
+            .collect();
+        rows.extend(view.adoptions.iter().map(|a| {
+            (
+                a.seq,
+                format!(
+                    "  {:>5}  {:<20}  ADOPTED, carried from the witness: {}; reason: {}",
+                    a.seq,
+                    stamp(a.time),
+                    hallpass::totals_text(&a.carried),
+                    safe(&a.reason)
+                ),
+            )
+        }));
+        rows.sort_by_key(|(seq, _)| *seq);
+        if rows.is_empty() {
             text.push_str("  no entries\n");
         } else {
             let _ = writeln!(
@@ -600,18 +661,7 @@ fn ledger_text(
                 "seq", "time", "counter", "n", "digest"
             );
         }
-        for e in entries {
-            let row = format!(
-                "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  {}",
-                e.seq,
-                stamp(e.time),
-                e.counter,
-                e.amount,
-                short_digest(&e.digest),
-                e.note
-                    .as_deref()
-                    .map_or_else(String::new, |n| safe(n).into_owned())
-            );
+        for (_, row) in rows {
             let _ = writeln!(text, "{}", row.trim_end());
         }
     } else {
@@ -631,15 +681,54 @@ fn ledger_text(
             None => writeln!(text, "  {name:<16} {spent} spent (no ceiling in this pass)"),
         };
     }
-    if view.exists {
-        let _ = writeln!(
-            text,
-            "Chain verified: {} entries, every line follows the one before it.",
-            view.entries.len()
-        );
-    }
+    let _ = writeln!(text, "Ledger: {}", ledger_state_text(view));
     let _ = writeln!(text, "Current pass digest: {}", loaded.digest);
     text
+}
+
+/// One line on the ledger and its witness, for `status` and `ledger`.
+fn ledger_state_text(view: &hallpass::LedgerView) -> String {
+    use hallpass::WitnessStatus as W;
+    if !view.exists {
+        return "none yet (nothing spent)".to_owned();
+    }
+    let lines = view.entries.len() + view.adoptions.len();
+    let witness = match &view.witness {
+        W::Matches => "the witness matches",
+        W::Extended { .. } => "the witness is behind (see the warning)",
+        W::Missing => "NO WITNESS yet (see the warning)",
+        W::NotChecked { .. } => "the witness was NOT CHECKED (see the warning)",
+        _ => "",
+    };
+    format!(
+        "{lines} line(s) after the header, chain verified, {witness}{}",
+        if view.moved_from.is_some() {
+            "; it was moved or copied (see the warning)"
+        } else {
+            ""
+        }
+    )
+}
+
+/// The `ledger` object in `status` output.
+fn ledger_json(view: &hallpass::LedgerView) -> Value {
+    json!({
+        "path": view.path.display().to_string(),
+        "exists": view.exists,
+        "entries": view.entries.len(),
+        "adoptions": view.adoptions.len(),
+        "witness": view.witness.as_str(),
+        "moved_from": view.moved_from,
+    })
+}
+
+fn witnessed_json(w: &hallpass::Witnessed) -> Value {
+    json!({
+        "ledger": w.ledger,
+        "seq": w.seq,
+        "totals": w.totals,
+        "updated": w.updated,
+    })
 }
 
 fn ledger(file: &Path, counter: Option<&str>) -> Output {
@@ -659,7 +748,7 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
         Ok(l) => l,
         Err(e) => return error_output("ledger", Some(file), &e),
     };
-    let view = match hallpass::read_ledger(&loaded) {
+    let view = match hallpass::read_ledger(&loaded, &StateDir::from_env()) {
         Ok(v) => v,
         Err(e) => return error_output("ledger", Some(file), &e),
     };
@@ -698,6 +787,8 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
             "digest": loaded.digest.to_string(),
             "counter": counter,
             "verified": true,
+            "witness": view.witness.as_str(),
+            "moved_from": view.moved_from,
             "entries": entries.iter().map(|e| json!({
                 "seq": e.seq,
                 "time": stamp(e.time),
@@ -706,12 +797,65 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
                 "digest": e.digest.to_string(),
                 "note": e.note,
             })).collect::<Vec<_>>(),
+            "adoptions": view.adoptions.iter().map(|a| json!({
+                "seq": a.seq,
+                "time": stamp(a.time),
+                "reason": a.reason,
+                "digest": a.digest.to_string(),
+                "carried": a.carried,
+                "previous": a.previous.as_ref().map(witnessed_json),
+            })).collect::<Vec<_>>(),
             "totals": totals.iter().map(|(name, spent, total)| json!({
                 "name": name,
                 "spent": spent,
                 "total": total,
                 "remaining": total.map(|t| t.saturating_sub(*spent)),
             })).collect::<Vec<_>>(),
+            "warnings": view.warnings,
+        }),
+        text,
+    }
+}
+
+fn adopt(file: &Path, reason: &str, clock: &Clock) -> Output {
+    let outcome = match hallpass::adopt(file, reason, clock.now, &StateDir::from_env()) {
+        Ok(o) => o,
+        Err(e) => return error_output("adopt", Some(file), &e),
+    };
+    let what = match outcome.case {
+        hallpass::AdoptCase::LedgerMissing => "the ledger was missing; a new one was started",
+        hallpass::AdoptCase::LedgerChanged => "the ledger did not match its witness",
+        hallpass::AdoptCase::NoWitness => "the ledger had no witness",
+        _ => "adopted",
+    };
+    let a = &outcome.adoption;
+    let text = format!(
+        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason \"{}\". Carried from the witness: {}. Spent now: {}.\n",
+        safe(&outcome.ledger.display().to_string()),
+        outcome.pass_id,
+        a.seq,
+        safe(&a.reason),
+        hallpass::totals_text(&a.carried),
+        hallpass::totals_text(&outcome.totals),
+    );
+    Output {
+        code: OK,
+        json: json!({
+            "command": "adopt",
+            "result": "ok",
+            "file": file.display().to_string(),
+            "ledger": outcome.ledger.display().to_string(),
+            "pass_id": outcome.pass_id,
+            "digest": a.digest.to_string(),
+            "now": stamp(clock.now),
+            "test_clock": clock.test,
+            "case": outcome.case.as_str(),
+            "created": outcome.created,
+            "seq": a.seq,
+            "reason": a.reason,
+            "carried": a.carried,
+            "previous": a.previous.as_ref().map(witnessed_json),
+            "totals": outcome.totals,
         }),
         text,
     }
@@ -726,7 +870,10 @@ fn run(cli: &Cli) -> Output {
     let name = cli.command.name();
     let needs_clock = matches!(
         cli.command,
-        Command::Status { .. } | Command::Permits { .. } | Command::Spend { .. }
+        Command::Status { .. }
+            | Command::Permits { .. }
+            | Command::Spend { .. }
+            | Command::Adopt { .. }
     );
     let clock = if needs_clock {
         match clock() {
@@ -764,6 +911,7 @@ fn run(cli: &Cli) -> Output {
         ),
         Command::Digest { file } => digest(file),
         Command::Ledger { file, counter } => ledger(file, counter.as_deref()),
+        Command::Adopt { file, reason } => adopt(file, reason, &clock),
     }
 }
 
@@ -776,11 +924,25 @@ fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
-    let output = run(&cli);
+    let mut output = run(&cli);
+    if output.json.get("warnings").is_none() {
+        output.json["warnings"] = json!([]);
+    }
     match cli.format {
         Format::Json => println!("{}", output.json),
-        Format::Text if output.code == ERROR => eprint!("{}", output.text),
-        Format::Text => print!("{}", output.text),
+        Format::Text => {
+            for w in output.json["warnings"].as_array().into_iter().flatten() {
+                eprintln!(
+                    "hallpass: warning: {}",
+                    safe(w.as_str().unwrap_or_default())
+                );
+            }
+            if output.code == ERROR {
+                eprint!("{}", output.text);
+            } else {
+                print!("{}", output.text);
+            }
+        }
     }
     ExitCode::from(output.code)
 }

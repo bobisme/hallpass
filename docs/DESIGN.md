@@ -11,14 +11,18 @@ six commands. hallpass closes that gap with the ledger.
 
 - **Library first, CLI second.** Rust tools call the library; other tools
   call `hallpass ... --format json`. The CLI is a thin layer over the same
-  functions and adds no rule of its own.
+  functions and adds no rule of its own. (`hallpass permits` calls both
+  `read_ledger` and `Pass::permits`, so a lost or changed ledger fails
+  closed there too; a library caller that wants the same calls both.)
 - **Pure decisions, injected clock.** `Pass::window_at`,
   `Pass::check_window` and `Pass::permits` take `now` from the caller and
-  read nothing. Only `load`, `tally`, `spend` and `write_template` touch the
-  file system.
+  read nothing. Only `load`, `tally`, `read_ledger`, `spend`, `spend_in`,
+  `adopt` and `write_template` touch the file system, and only `spend`
+  (through `StateDir::from_env`) reads the environment.
 - **Small public API**: `load`, `Pass` (with `permits`, `window_at`,
-  `check_window`, `destination_for`), `spend`, `tally`, `ledger_path`,
-  `write_template`, the address parsers, and their value types. Structs
+  `check_window`, `destination_for`), `spend`, `spend_in`, `adopt`,
+  `tally`, `read_ledger`, `ledger_path`, `StateDir`, `write_template`, the
+  address parsers, and their value types. Structs
   that the library builds are `#[non_exhaustive]` so a caller cannot build
   an unvalidated `Pass`.
 
@@ -124,6 +128,89 @@ tool that pinned the old digest, which is the point.
   processes; both tests fail when the lock is removed (checked by hand by
   commenting out the lock call).
 
+## The witness
+
+The hash chain catches damage inside the ledger, but not the loss of the
+whole file, an older copy put back, or an edit to the last line (nothing
+follows it to check its hash). These are the accidents that happen: a
+ledger left behind when the pass is copied or moved, a `git clean`, a
+restore from yesterday's backup, an editor that rewrote the file. The
+witness catches them.
+
+- **What**: one small JSON file per pass id,
+  `$XDG_STATE_HOME/hallpass/<id>.witness` (default
+  `~/.local/state/hallpass/`), with the ledger's last sequence number, the
+  SHA-256 of its last line, the totals, the ledger's resolved path and the
+  time. It lives outside the engagement directory on purpose: whatever
+  removes or replaces that directory leaves the witness.
+- **The rule** is that the ledger must extend what the witness saw: line
+  `seq` must hash to the witnessed hash. Lines after it are accepted (with
+  a warning) because a ledger only grows: extra lines can only raise the
+  count. Anything else (fewer lines, a different line at that position) is
+  `ledger-changed`. A missing ledger with a witness of any line is
+  `ledger-missing`, and nothing is created, so the count does not restart
+  at 0.
+- **Identity is the chain, not the path.** The path in the witness is
+  recorded for messages only. A pass moved with its ledger matches, and the
+  witness follows it (warning). If the ledger was copied, the first copy
+  spent from wins and the other becomes `ledger-changed`, so two copies can
+  never both be spent from. Two pass files with the same id and separate
+  ledgers are noticed the same way, and a second pass reusing an id without
+  a ledger is `ledger-missing`; the message names where the other ledger
+  is and says to give one pass its own id.
+- **Order of writes**: ledger first (appended and synced), witness second
+  (written aside, synced, renamed, directory synced). A crash between the
+  two leaves the witness one line behind, which the rule above accepts: no
+  lock-out, and the spend counts. Writing the witness first would make a
+  crash look like a lost line and lock the operator out. If the witness
+  cannot be written after the ledger was, the caller gets
+  `witness-not-updated` (do not proceed; the spend counts). To make that
+  rare, the state directory is checked for writability (a probe file)
+  before anything is appended.
+- **Locks**: writers (`spend`, `adopt`) take an exclusive lock on
+  `<id>.lock` in the state directory, then on the ledger. Every writer uses
+  that order, so they cannot deadlock. The witness lock serializes writers
+  of the same id across different ledgers (copies), which the ledger lock
+  alone cannot. Readers take only a shared ledger lock and read the
+  witness, which is replaced atomically by rename.
+- **A ledger without a witness** (a pass brought from another machine or
+  user, or a ledger from 0.1) is accepted with a warning, and `spend`
+  records a witness for it, even when the spend is then refused. Refusing
+  would make a legitimate move impossible; the warning says that until a
+  witness exists, a loss would go unnoticed. `hallpass adopt` records the
+  same acknowledgment explicitly in the ledger.
+- **Adoption** (`hallpass adopt FILE --reason TEXT`) is the one way past
+  `ledger-missing` and `ledger-changed`. It writes an `adopt` line into the
+  chain with the reason, the pass digest and the witness's previous record,
+  so the event is in the record itself. It **carries** the witnessed
+  totals that the ledger no longer holds: per counter, `max(0, witnessed -
+  in ledger)`, counted as spent. This is the improvement on a plain
+  "acknowledge the reset": the operator can recover from a lost ledger
+  without being able to reset the count by losing it. There is no option to
+  reset to zero, because no accident calls for one: a ceiling is the
+  owner's, and more budget is a raised ceiling in the pass or a new pass.
+  Adopting twice carries nothing the second time (the totals already
+  include the first carry), so a retry after a failed witness write does
+  not double-count.
+- **State directory failures**: `spend` and `adopt` fail closed
+  (`witness-unavailable`) when there is no state directory (neither
+  `XDG_STATE_HOME` nor `HOME` is an absolute path), it cannot be created,
+  it is not a private (0700-like, no group or other bits) directory, it is
+  not writable, or the witness is damaged or not private. The read-only
+  commands (`status`, `permits`, `ledger`) answer with a warning and
+  `"witness": "not-checked"`: they record nothing, so they cannot make the
+  count wrong, and an operator with a broken home directory can still see
+  the state of the pass. They still fail closed on everything they can
+  check: a damaged ledger, and a lost or changed one when the witness is
+  readable.
+- **Considered and not chosen**: storing the tail hash in the pass (the
+  operator edits the pass, and the digest would change on every spend);
+  extended attributes on the ledger (lost by many copy tools, not on every
+  file system); refusing a ledger whose window opened long ago without a
+  flag (the bone's first idea; it does not catch a lost ledger after the
+  first spend, and the witness does); a ledger outside the pass directory
+  altogether (the pass and its count would no longer travel together).
+
 ## Files and links
 
 - The pass and the ledger are opened only after `lstat` says they are
@@ -165,20 +252,29 @@ No locking crate: the standard library has file locks.
 
 - **Advisory only.** hallpass answers tools that ask. It does not stop a
   tool that does not ask, and it does not filter packets.
-- **Deleting the ledger resets the count.** A missing ledger means nothing
-  was spent. So does moving the pass to a new path. Anyone who can write the
-  directory can do either. Keep the engagement directory private (0700) and
-  back up the ledger with the evidence.
-- **The last entry can be altered** without detection (nothing follows it
-  to check its hash), and a whole ledger can be rewritten consistently by
-  anyone with write access. The chain catches accidents, not a determined
-  insider.
+- **A determined operator can still cheat.** They own the pass, the
+  ledger and the witness. Deleting or rewriting the ledger and the witness
+  together, consistently, is not detected; neither is editing the witness
+  to match an edited ledger. hallpass cannot prevent this and does not try:
+  the witness catches accidents and casual edits (a lost or replaced
+  ledger, a moved pass, a rewritten last line), not a deliberate cheat.
+  Keep the engagement directory private (0700) and back up the ledger with
+  the evidence.
+- **One witness per user and machine.** A pass used from two machines or
+  two user accounts has two witnesses that do not see each other; the
+  ledger's lock and chain still hold, but a loss is noticed only by the
+  machine that last wrote it. Run one engagement from one place.
+- **The first spend on a new machine is trusted.** A ledger without a
+  witness is accepted (with a warning). A ledger that was already lost
+  before any witness existed (for example under 0.1) is not noticed.
+- **A line added right after a crash** (before the witness was updated)
+  could be edited undetected until the next spend updates the witness.
 - **Locks are advisory and local.** `flock` does not work reliably on some
   network file systems. Keep the pass on a local disk.
 - **The window uses the caller's clock.** Changing the system clock moves
   the window. Keep NTP on.
 - **Parent directories are not checked for links**; only the pass and
-  ledger file names themselves.
+  ledger file names themselves, and the state directory itself.
 - **Subnet broadcast**: in a listed network such as `192.0.2.0/24`,
   hallpass cannot know whether `192.0.2.255` is a directed broadcast
   address on the owner's network. It is permitted like any other address in

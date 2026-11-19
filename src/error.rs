@@ -91,6 +91,54 @@ pub enum Error {
         /// The id in the pass.
         pass_id: String,
     },
+    /// The ledger is gone, but the witness says spends were recorded.
+    #[error("{0}")]
+    LedgerMissing(Box<MissingLedger>),
+    /// The ledger does not contain the line the witness recorded.
+    #[error(
+        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {} --reason \"...\"`, which records the adoption in the ledger and never lowers a count below what the witness recorded",
+        path.display(),
+        witness.display(),
+        pass.display()
+    )]
+    LedgerChanged {
+        /// The ledger file.
+        path: PathBuf,
+        /// The pass file.
+        pass: PathBuf,
+        /// The witness file.
+        witness: PathBuf,
+        /// What differs.
+        detail: String,
+    },
+    /// The witness cannot be read or written, so a spend cannot be checked
+    /// against it.
+    #[error(
+        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it",
+        dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string())
+    )]
+    WitnessUnavailable {
+        /// The pass id.
+        pass_id: String,
+        /// The state directory, when one could be determined.
+        dir: Option<PathBuf>,
+        /// What went wrong.
+        detail: String,
+    },
+    /// The spend was recorded in the ledger, but the witness could not be
+    /// updated afterwards.
+    #[error(
+        "the spend was recorded in {} as entry {seq}, but the witness could not be updated afterwards ({detail}). Treat this spend as NOT permitted; it still counts against the ceiling. The next command accepts the ledger, since it only adds to what the witness recorded",
+        path.display()
+    )]
+    WitnessNotUpdated {
+        /// The ledger file.
+        path: PathBuf,
+        /// The entry that was recorded.
+        seq: u64,
+        /// What went wrong.
+        detail: String,
+    },
     /// The file already exists (`init` never overwrites).
     #[error("{} already exists; hallpass init never overwrites. Choose another path", path.display())]
     Exists {
@@ -115,6 +163,10 @@ impl Error {
             Self::Invalid { .. } => "invalid-pass",
             Self::LedgerCorrupt { .. } => "ledger-corrupt",
             Self::LedgerForeign { .. } => "ledger-foreign",
+            Self::LedgerMissing(_) => "ledger-missing",
+            Self::LedgerChanged { .. } => "ledger-changed",
+            Self::WitnessUnavailable { .. } => "witness-unavailable",
+            Self::WitnessNotUpdated { .. } => "witness-not-updated",
             Self::Exists { .. } => "exists",
             Self::Usage(_) => "usage",
         }
@@ -132,5 +184,44 @@ impl Error {
             path: path.to_path_buf(),
             message,
         }
+    }
+}
+
+/// The details of [`Error::LedgerMissing`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MissingLedger {
+    /// The ledger file that is missing.
+    pub path: PathBuf,
+    /// The pass file.
+    pub pass: PathBuf,
+    /// The pass id.
+    pub pass_id: String,
+    /// The witness file.
+    pub witness: PathBuf,
+    /// The last sequence number the witness recorded.
+    pub seq: u64,
+    /// Where the ledger was when the witness was written.
+    pub last_seen: String,
+    /// The totals the witness recorded.
+    pub totals: std::collections::BTreeMap<String, u64>,
+    /// When the witness was written.
+    pub updated: String,
+}
+
+impl std::fmt::Display for MissingLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the ledger {} for pass `{}` is missing, but the witness {} says hallpass recorded {} ledger line(s) for this pass id (spent: {}); the ledger was last seen at {} on {}. hallpass will not count from zero. Put the ledger back beside the pass (move it from there, or restore it from a backup); if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals. If this pass is a different approval that reused the id, give it its own id",
+            self.path.display(),
+            self.pass_id,
+            self.witness.display(),
+            self.seq,
+            crate::witness::totals_text(&self.totals),
+            self.last_seen,
+            self.updated,
+            self.pass.display()
+        )
     }
 }

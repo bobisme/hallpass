@@ -38,8 +38,15 @@
 //! ```
 //!
 //! Everything that decides is pure and takes `now` from the caller; only
-//! [`load`], [`tally`], [`spend`] and [`write_template`] touch the file
-//! system.
+//! [`load`], [`tally`], [`read_ledger`], [`spend`], [`spend_in`], [`adopt`]
+//! and [`write_template`] touch the file system.
+//!
+//! Besides the ledger beside the pass, [`spend`] keeps a *witness* of the
+//! ledger's last line in the user's state directory ([`StateDir`]), so that
+//! a lost, replaced or rewound ledger is refused instead of counting from
+//! zero. [`spend`] finds that directory from the environment; [`spend_in`]
+//! takes it explicitly (tests should always point it at a temporary
+//! directory).
 
 mod address;
 mod decision;
@@ -49,16 +56,18 @@ mod ledger;
 mod pass;
 mod ports;
 mod template;
+mod witness;
 
 pub use address::{
     AddressError, Network, Protocol, Target, embedded_ipv4, parse_address, parse_network,
 };
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
-pub use error::Error;
+pub use error::{Error, MissingLedger};
 pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load};
 pub use ledger::{
-    LedgerEntry, LedgerView, MAX_NOTE, SpendOutcome, SpendRequest, Tally, display_safe,
-    ledger_path, read_ledger, spend, tally,
+    AdoptCase, AdoptOutcome, Adoption, LedgerEntry, LedgerView, MAX_NOTE, SpendOutcome,
+    SpendRequest, Tally, WitnessStatus, adopt, display_safe, ledger_path, read_ledger, spend,
+    spend_in, tally,
 };
 pub use pass::{
     Approval, Destination, FORMAT_VERSION, IPV4_CAP, IPV4_FLOOR, IPV6_CAP, IPV6_FLOOR, MAX_CEILING,
@@ -67,3 +76,4 @@ pub use pass::{
 pub use ports::PortSet;
 pub use template::{TEMPLATE, write_template};
 pub use time;
+pub use witness::{StateDir, Witnessed, totals_text};
