@@ -268,6 +268,16 @@ fn check_refuses_strict_spellings_and_special_addresses() {
         ("255.255.255.255", "broadcast"),
         ("169.254.169.254", "link-local"),
         ("2001:DB8::1", "canonical"),
+        (
+            "2002:c000:20a::1",
+            "6to4 address (2002::/16) that carries the IPv4 address 192.0.2.10",
+        ),
+        (
+            "2001:0:c633:6401:8000:f227:34ff:8efa",
+            "Teredo address (2001::/32) that carries the IPv4 address 203.0.113.5",
+        ),
+        ("2001:db8::5efe:c000:20a", "ISATAP"),
+        ("::ffff:0:c000:20a", "IPv4-translated"),
     ] {
         let p = check_problems(&PASS.replace("192.0.2.10", bad));
         assert_eq!(p.len(), 1, "{bad}: {p:?}");
@@ -406,6 +416,13 @@ fn permits_refusals() {
         ("192.0.2.10:5060/tcp", NOW, "port-not-listed"),
         ("192.0.2.10:5061/udp", NOW, "port-not-listed"),
         ("[::ffff:192.0.2.10]:5060/udp", NOW, "embedded-ipv4"),
+        ("[2002:c000:20a::1]:5060/udp", NOW, "embedded-ipv4"),
+        (
+            "[2001:0:c633:6401:8000:f227:34ff:8efa]:5060/udp",
+            NOW,
+            "embedded-ipv4",
+        ),
+        ("[2001:db8::5efe:c000:20a]:443/tcp", NOW, "embedded-ipv4"),
         (
             "192.0.2.10:5060/udp",
             "2026-11-20T07:59:59Z",
@@ -436,6 +453,33 @@ fn permits_refusals() {
     let revoked = case.pass("r.toml", &PASS.replace("revoked = false", "revoked = true"));
     let (rc, out) = permits(&revoked, "192.0.2.10:5060/udp", NOW);
     assert_eq!((rc, out["refusal"]["code"].as_str()), (2, Some("revoked")));
+}
+
+#[test]
+fn permits_refuses_network_and_broadcast_addresses() {
+    let case = Case::new();
+    let text = PASS.replace(
+        "network = \"2001:db8::/120\"",
+        "network = \"198.51.100.0/24\"",
+    ) + "\n[[destination]]\nlabel = \"pair\"\nnetwork = \"203.0.113.6/31\"\nprotocol = \"udp\"\nports = 5060\n";
+    // Keep [ceilings] last: move the new destination above it.
+    let text =
+        text.replace("[ceilings]\ncalls = 6\nrequests = 500\n", "") + "\n[ceilings]\ncalls = 6\n";
+    let file = case.pass("p.toml", &text);
+    assert_eq!(json(&["check", s(&file)], None).0, 0);
+    for edge in ["198.51.100.0:443/tcp", "198.51.100.255:443/tcp"] {
+        let (rc, out) = permits(&file, edge, NOW);
+        assert_eq!(rc, 2, "{edge}: {out}");
+        assert_eq!(out["refusal"]["code"], "network-or-broadcast", "{edge}");
+        let message = out["refusal"]["message"].as_str().expect("m");
+        assert!(
+            message.contains("198.51.100.0/24") && message.contains("web"),
+            "{message}"
+        );
+    }
+    assert_eq!(permits(&file, "198.51.100.254:443/tcp", NOW).0, 0);
+    assert_eq!(permits(&file, "203.0.113.6:5060/udp", NOW).0, 0);
+    assert_eq!(permits(&file, "203.0.113.7:5060/udp", NOW).0, 0);
 }
 
 #[test]

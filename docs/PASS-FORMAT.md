@@ -113,13 +113,23 @@ Refused, each with a message that says what to write instead:
 | a non-canonical IPv6 spelling (`2001:DB8::1`, `2001:0db8::1`) | the message gives the canonical form |
 | an interface suffix (`fe80::1%eth0`) | a pass cannot name an interface |
 | an IPv6 form that carries an IPv4 address: IPv4-mapped `::ffff:0:0/96`, IPv4-compatible `::/96` (other than `::1`), NAT64 `64:ff9b::/96` and `64:ff9b:1::/48` | traffic to these reaches the IPv4 address, past an IPv4-only reading of the list; name the IPv4 address itself |
+| an IPv6 transition address that tunnels or translates to IPv4: 6to4 `2002::/16`, Teredo `2001::/32`, SIIT-translated `::ffff:0:0:0/96`, and an ISATAP interface identifier (`…:0:5efe:a.b.c.d`, `…:200:5efe:a.b.c.d`) under any prefix (as an address, or a network of /96 or longer) | packets to these are carried over IPv4 to the address inside; the message names it. Name the native address instead |
 | the unspecified address `0.0.0.0/8`, `::` | "any" is not a destination |
 | multicast `224.0.0.0/4`, `ff00::/8` | not one host |
 | broadcast `255.255.255.255`, and the reserved block `240.0.0.0/4` | not one host |
 | link-local `169.254.0.0/16`, `fe80::/10` | see below |
 
 A network is refused if it contains or overlaps any of these ranges, so
-`0.0.0.0/0` and `::/0` are refused too.
+`0.0.0.0/0` and `::/0` are refused too. (A network such as `2001:db8::/64`
+contains ISATAP-form addresses among ordinary ones; it is accepted, and
+each ISATAP-form address in it is refused when a tool asks about it.)
+
+A listed IPv4 network of /30 or broader is accepted, but `permits` refuses
+its first (network) and last (all-ones, directed broadcast) address with
+`network-or-broadcast`: they are not hosts, and a packet to the broadcast
+address may reach every host on the network. If the owner's network is
+larger than the one listed and such an address is really one host, list it
+as its own `address`; then it is permitted. /31 and /32 are unaffected.
 
 A CIDR must have no host bits set: `192.0.2.1/24` is refused (write
 `192.0.2.0/24` for the network, or `address = "192.0.2.1"` for the host).

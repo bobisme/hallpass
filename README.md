@@ -135,7 +135,9 @@ What it guards against:
 
 - **Mistakes in the approval record**: a typo in a key (unknown keys are
   errors), an ambiguous address (`010.0.0.1`, `10.1`), a host name used as
-  authorization, an IPv4 address hidden in IPv6 (`::ffff:192.0.2.1`), "any"
+  authorization, an IPv4 address hidden in IPv6 (`::ffff:192.0.2.1`, and
+  the 6to4, Teredo, ISATAP and SIIT forms), the broadcast address of a
+  listed network, "any"
   (`0.0.0.0/0`), a network far wider than the owner's service (breadth
   cap), a time without an offset.
 - **Testing outside the window or after revocation**: `permits` and `spend`

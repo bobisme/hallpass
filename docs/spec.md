@@ -87,7 +87,8 @@ Validation rules, all reported together with field paths
 - unknown keys are errors in every table;
 - addresses in canonical spelling only; refused: host names, IPv4 leading
   zeros and shortened forms, zones, non-canonical IPv6, IPv6 forms carrying
-  IPv4 (mapped, compatible, NAT64), unspecified, multicast, broadcast,
+  IPv4 (mapped, compatible, NAT64, and the transition forms 6to4, Teredo,
+  ISATAP, SIIT-translated), unspecified, multicast, broadcast,
   `240.0.0.0/4`, link-local; networks with host bits set or overlapping any
   refused range; loopback only when listed;
 - networks broader than /24 (IPv4) or /64 (IPv6) need
@@ -121,13 +122,20 @@ In this order, stopping at the first refusal:
 1. the window, as `check_window(now, needed)`: `revoked`, `not-yet-valid`,
    `expired`, `window-too-short`;
 2. a target address that is an IPv6 form carrying IPv4 (mapped, compatible,
-   NAT64) → `embedded-ipv4` (ask with the IPv4 address);
-3. the first destination, in file order, whose network contains the
+   NAT64, 6to4 `2002::/16`, Teredo `2001::/32`, an ISATAP interface
+   identifier `…:0:5efe:a.b.c.d` or `…:200:5efe:a.b.c.d` under any prefix,
+   SIIT-translated `::ffff:0:0:0/96`) → `embedded-ipv4`; the message names
+   the IPv4 address (for Teredo, the client's);
+3. the network address or the all-ones (directed broadcast) address of a
+   listed IPv4 network of /30 or broader → `network-or-broadcast`, unless
+   some destination lists that address on its own (`address`, or a /32
+   network); /31 and /32 networks have no such addresses;
+4. the first destination, in file order, whose network contains the
    address, whose protocol matches and whose ports contain the port →
    **allowed**, naming that destination's label;
-4. some destination contains the address but none with this protocol and
+5. some destination contains the address but none with this protocol and
    port → `port-not-listed` (the message lists what is allowed for it);
-5. otherwise → `address-not-listed`.
+6. otherwise → `address-not-listed`.
 
 ### `spend(pass, counter, n, note, expected digest, needed, now)`
 
@@ -353,7 +361,7 @@ fields are null except the one that applies. Times are UTC, whole seconds,
 `YYYY-MM-DDTHH:MM:SSZ`.
 
 Refusal codes: `not-yet-valid`, `expired`, `revoked`, `window-too-short`,
-`embedded-ipv4`, `address-not-listed`, `port-not-listed`,
+`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`, `port-not-listed`,
 `unknown-counter`, `ceiling-reached`, `pass-changed`.
 
 ### Test clock
@@ -386,7 +394,7 @@ Crate `hallpass` (re-exports `time`):
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `ledger_path(path)` | `<pass>.ledger` |
 | `write_template(path)`, `TEMPLATE` | `init` |
-| `parse_address`, `parse_network`, `embedded_ipv4`, `Target` (`FromStr`), `Network`, `Protocol`, `PortSet` | strict parsing |
+| `parse_address`, `parse_network`, `embedded_ipv4`, `ipv6_transition` (`Ipv6Transition`), `Target` (`FromStr`), `Network` (with `is_network_or_broadcast(ip)`), `Protocol`, `PortSet` | strict parsing |
 | `Digest` (`Display`/`FromStr` as `sha256:<hex>`), `Refusal`, `RefusalCode`, `WindowState`, `Problem`, `Error` (with `code()`; `LedgerMissing` boxes a `MissingLedger`) | value types |
 | `stamp`, `span` | time formatting used in messages |
 | constants: `FORMAT_VERSION`, `IPV4_CAP`, `IPV6_CAP`, `IPV4_FLOOR`, `IPV6_FLOOR`, `MAX_CEILING`, `MAX_COUNTERS`, `MAX_DESTINATIONS`, `MAX_NOTE`, `MAX_PASS_BYTES` | documented limits |
@@ -415,10 +423,12 @@ answer; anyone determined to cheat with write access to their own files
 (they can edit the pass, and delete or rewrite both the ledger and the
 witness consistently; the witness catches accidents and casual edits, not
 that); a pass used from two machines or users, whose witnesses do not see
-each other; a wrong system clock; unreliable `flock` on network file systems; symbolic links in
-parent directories; directed broadcast addresses inside a listed network;
-relay-embedding IPv6 (6to4, Teredo); and work already running when a pass
-is revoked. [DESIGN.md](DESIGN.md) explains each.
+each other; a wrong system clock; unreliable `flock` on network file
+systems; symbolic links in parent directories; the network or broadcast
+address of a listed IPv6 network or of an IPv4 network whose real size is
+larger than listed; IPv6 transition prefixes chosen by a provider (6rd,
+MAP, NAT64 network-specific prefixes); and work already running when a
+pass is revoked. [DESIGN.md](DESIGN.md) explains each.
 
 ## Not yet built (planned)
 

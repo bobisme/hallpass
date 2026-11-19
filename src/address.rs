@@ -5,7 +5,8 @@
 //! one that [`std::net`] prints), so a reviewer reads the address that is
 //! used. They refuse spellings that different tools read differently
 //! (`010.0.0.1`, `10.1`, `2130706433`), IPv6 forms that carry an IPv4
-//! address past the list (`::ffff:192.0.2.1`, NAT64 prefixes), and addresses
+//! address past the list (`::ffff:192.0.2.1`, NAT64 prefixes, and the
+//! transition forms 6to4, Teredo, ISATAP and SIIT-translated), and addresses
 //! that are not one unicast host (unspecified, multicast, broadcast and the
 //! reserved IPv4 block) or that are ambiguous without an interface
 //! (link-local).
@@ -62,6 +63,17 @@ pub enum AddressError {
         /// The IPv4 address it carries.
         ipv4: Ipv4Addr,
     },
+    /// An IPv6 address of a transition mechanism that tunnels or translates
+    /// to an IPv4 address (6to4, Teredo, ISATAP, SIIT-translated).
+    #[error("{}", transition_message(given, *mechanism, *ipv4))]
+    Transition {
+        /// What was written.
+        given: String,
+        /// The mechanism.
+        mechanism: Ipv6Transition,
+        /// The IPv4 address it carries.
+        ipv4: Ipv4Addr,
+    },
     /// The unspecified ("any") address, or a network that contains it.
     #[error("`{0}` is or contains the unspecified (any) address; name the service's own addresses")]
     Unspecified(String),
@@ -110,6 +122,97 @@ pub enum AddressError {
     )]
     UnexpectedPrefix(String),
 }
+
+/// An IPv6 transition mechanism whose addresses carry an IPv4 address that
+/// the traffic is tunnelled or translated to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Ipv6Transition {
+    /// 6to4, `2002::/16` (RFC 3056): the IPv4 address of the 6to4 router is
+    /// in bits 16-47; packets are tunnelled to it inside IPv4.
+    SixToFour,
+    /// Teredo, `2001::/32` (RFC 4380): the client's public IPv4 address is in
+    /// the last 32 bits, inverted; the Teredo server's in bits 32-63.
+    /// Packets are tunnelled inside UDP over IPv4.
+    Teredo,
+    /// An ISATAP interface identifier, `…:0:5efe:a.b.c.d` or
+    /// `…:200:5efe:a.b.c.d` (RFC 5214), under any prefix: packets are
+    /// tunnelled to that IPv4 address.
+    Isatap,
+    /// SIIT IPv4-translated, `::ffff:0:0:0/96` (RFC 2765): a translator
+    /// delivers packets to the IPv4 address in the last 32 bits.
+    Translated,
+}
+
+impl Ipv6Transition {
+    /// The mechanism's name, with its prefix.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SixToFour => "a 6to4 address (2002::/16)",
+            Self::Teredo => "a Teredo address (2001::/32)",
+            Self::Isatap => "an ISATAP address (interface identifier ...:5efe:a.b.c.d)",
+            Self::Translated => "an IPv4-translated address (::ffff:0:0:0/96)",
+        }
+    }
+}
+
+fn transition_message(given: &str, mechanism: Ipv6Transition, ipv4: Ipv4Addr) -> String {
+    format!(
+        "`{given}` is {} that carries the IPv4 address {ipv4}: packets to it are tunnelled or translated over IPv4, past an IPv6-only reading of the list. A pass names native addresses only: name {ipv4} itself, or the host's native IPv6 address",
+        mechanism.name()
+    )
+}
+
+/// The IPv6 transition mechanism an address belongs to, with the IPv4
+/// address it carries: for Teredo the client's (de-inverted), for the
+/// others the one in the address.
+///
+/// These are refused in a pass and in a query, like [`embedded_ipv4`]'s
+/// forms. Not covered (they cannot be recognized from the address alone):
+/// 6rd and MAP prefixes, which are chosen by each provider, and NAT64
+/// network-specific prefixes.
+#[must_use]
+pub fn ipv6_transition(ip: Ipv6Addr) -> Option<(Ipv6Transition, Ipv4Addr)> {
+    let s = ip.segments();
+    let low = Ipv4Addr::from(u32::from(s[6]) << 16 | u32::from(s[7]));
+    if s[0] == 0x2002 {
+        let v4 = Ipv4Addr::from(u32::from(s[1]) << 16 | u32::from(s[2]));
+        return Some((Ipv6Transition::SixToFour, v4));
+    }
+    if s[0] == 0x2001 && s[1] == 0 {
+        return Some((Ipv6Transition::Teredo, Ipv4Addr::from(!u32::from(low))));
+    }
+    if s[..6] == [0, 0, 0, 0, 0xffff, 0] {
+        return Some((Ipv6Transition::Translated, low));
+    }
+    if is_isatap(&s) {
+        return Some((Ipv6Transition::Isatap, low));
+    }
+    None
+}
+
+/// An ISATAP interface identifier: `0000:5efe` or `0200:5efe` (the
+/// universal/local and group bits may be set) before the IPv4 address.
+const fn is_isatap(s: &[u16; 8]) -> bool {
+    s[4] & !0x0300 == 0 && s[5] == 0x5efe
+}
+
+/// The transition prefixes, for networks.
+const TRANSITION: [(Network, Ipv6Transition); 3] = [
+    (
+        net(v6([0x2002, 0, 0, 0, 0, 0, 0, 0]), 16),
+        Ipv6Transition::SixToFour,
+    ),
+    (
+        net(v6([0x2001, 0, 0, 0, 0, 0, 0, 0]), 32),
+        Ipv6Transition::Teredo,
+    ),
+    (
+        net(v6([0, 0, 0, 0, 0xffff, 0, 0, 0]), 96),
+        Ipv6Transition::Translated,
+    ),
+];
 
 /// An IPv4 or IPv6 network: an address and a prefix length.
 ///
@@ -161,6 +264,23 @@ impl Network {
             (IpAddr::V6(net), IpAddr::V6(ip)) => {
                 let mask = mask128(self.prefix);
                 u128::from(ip) & mask == u128::from(net) & mask
+            }
+            _ => false,
+        }
+    }
+
+    /// True when `ip` is the network address or the all-ones (directed
+    /// broadcast) address of this network, and this is an IPv4 network of
+    /// /30 or broader. Those two addresses are not hosts: a packet to the
+    /// all-ones address may reach every host on the network. /31 (RFC 3021)
+    /// and /32 networks have no such addresses; IPv6 has no broadcast.
+    #[must_use]
+    pub fn is_network_or_broadcast(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) if self.prefix <= 30 && self.contains(ip.into()) => {
+                let host_bits = !mask32(self.prefix);
+                let ip = u32::from(ip);
+                ip == u32::from(net) || ip == u32::from(net) | host_bits
             }
             _ => false,
         }
@@ -315,12 +435,44 @@ fn check_special(network: &Network, text: &str) -> Result<(), AddressError> {
                 });
             }
         }
+        let segments = addr.segments();
+        let teredo_server = Ipv4Addr::from(u32::from(segments[2]) << 16 | u32::from(segments[3]));
+        for (range, mechanism) in &TRANSITION {
+            if network.overlaps(range) {
+                let ipv4 = match (mechanism, network.is_host()) {
+                    // A Teredo network has no one client: name its server.
+                    (Ipv6Transition::Teredo, false) => teredo_server,
+                    _ => ipv6_transition(addr).map_or(Ipv4Addr::UNSPECIFIED, |(_, v4)| v4),
+                };
+                return Err(AddressError::Transition {
+                    given: text.to_owned(),
+                    mechanism: *mechanism,
+                    ipv4,
+                });
+            }
+        }
+        // Every address of a network of /96 or longer shares its interface
+        // identifier's first 32 bits; a shorter one is checked per address
+        // when it is asked about.
+        if network.prefix >= 96 && is_isatap(&segments) {
+            return Err(AddressError::Transition {
+                given: text.to_owned(),
+                mechanism: Ipv6Transition::Isatap,
+                ipv4: Ipv4Addr::from(u32::from(segments[6]) << 16 | u32::from(segments[7])),
+            });
+        }
     }
     Ok(())
 }
 
 /// Parse one address in its canonical spelling, without range checks.
 fn parse_literal(text: &str) -> Result<IpAddr, AddressError> {
+    parse_literal_as(text, true)
+}
+
+/// As [`parse_literal`]; `transitions` false leaves the transition forms to
+/// [`check_special`] (for the address part of a network).
+fn parse_literal_as(text: &str, transitions: bool) -> Result<IpAddr, AddressError> {
     if text.is_empty() {
         return Err(AddressError::Empty);
     }
@@ -357,6 +509,16 @@ fn parse_literal(text: &str) -> Result<IpAddr, AddressError> {
     {
         return Err(AddressError::EmbedsIpv4 {
             given: text.to_owned(),
+            ipv4,
+        });
+    }
+    if let IpAddr::V6(addr) = ip
+        && transitions
+        && let Some((mechanism, ipv4)) = ipv6_transition(addr)
+    {
+        return Err(AddressError::Transition {
+            given: text.to_owned(),
+            mechanism,
             ipv4,
         });
     }
@@ -404,7 +566,7 @@ pub fn parse_network(text: &str) -> Result<Network, AddressError> {
     let prefix: u8 = prefix_text
         .parse()
         .map_err(|_| AddressError::Prefix(text.to_owned()))?;
-    let addr = parse_literal(addr_text)?;
+    let addr = parse_literal_as(addr_text, false)?;
     let max = width(addr);
     if prefix > max {
         return Err(AddressError::PrefixTooLong {
@@ -554,7 +716,7 @@ fn parse_query_address(text: &str) -> Result<IpAddr, AddressError> {
         Err(AddressError::NotCanonical { canonical, .. }) => canonical
             .parse()
             .map_err(|_| AddressError::NotAnAddress(text.to_owned())),
-        Err(AddressError::EmbedsIpv4 { .. }) => {
+        Err(AddressError::EmbedsIpv4 { .. } | AddressError::Transition { .. }) => {
             IpAddr::from_str(text).map_err(|_| AddressError::NotAnAddress(text.to_owned()))
         }
         Err(other) => Err(other),
@@ -679,6 +841,108 @@ mod tests {
         assert!(matches!(net_err("::/0"), AddressError::Unspecified(_)));
     }
 
+    fn transition(text: &str) -> (Ipv6Transition, Ipv4Addr) {
+        match parse_network(text) {
+            Err(AddressError::Transition {
+                mechanism, ipv4, ..
+            }) => (mechanism, ipv4),
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_transition_forms_naming_the_ipv4_address() {
+        let v4 = |s: &str| s.parse::<Ipv4Addr>().expect("v4");
+        // 6to4: 192.0.2.10 is c000:020a.
+        assert_eq!(
+            transition("2002:c000:20a::1"),
+            (Ipv6Transition::SixToFour, v4("192.0.2.10"))
+        );
+        assert_eq!(
+            transition("2002:c000:200::/48"),
+            (Ipv6Transition::SixToFour, v4("192.0.2.0"))
+        );
+        // Teredo: server 198.51.100.1, client 203.0.113.5 inverted
+        // (cb00:7105 -> 34ff:8efa).
+        assert_eq!(
+            transition("2001:0:c633:6401:8000:f227:34ff:8efa"),
+            (Ipv6Transition::Teredo, v4("203.0.113.5"))
+        );
+        assert_eq!(
+            transition("2001:0:c633:6401::/64"),
+            (Ipv6Transition::Teredo, v4("198.51.100.1"))
+        );
+        // ISATAP under any prefix, with or without the u/l bit.
+        assert_eq!(
+            transition("2001:db8::5efe:c000:20a"),
+            (Ipv6Transition::Isatap, v4("192.0.2.10"))
+        );
+        assert_eq!(
+            transition("2001:db8::200:5efe:c000:20a"),
+            (Ipv6Transition::Isatap, v4("192.0.2.10"))
+        );
+        assert_eq!(
+            transition("2001:db8::5efe:c000:200/120"),
+            (Ipv6Transition::Isatap, v4("192.0.2.0"))
+        );
+        // SIIT IPv4-translated.
+        assert_eq!(
+            transition("::ffff:0:c000:20a"),
+            (Ipv6Transition::Translated, v4("192.0.2.10"))
+        );
+        let message = parse_address("2002:c000:20a::1")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            message.contains("6to4") && message.contains("192.0.2.10"),
+            "{message}"
+        );
+        // A /64 holds ISATAP identifiers among others: allowed, and each
+        // ISATAP address in it is refused when asked about.
+        assert!(parse_network("2001:db8::/64").is_ok());
+        assert!(parse_network("2001:db8::/96").is_ok());
+        // Neighbours of the prefixes are ordinary.
+        for ok in [
+            "2001:db8::1",
+            "2001:1::1",
+            "2003::1",
+            "2001:db8::5eff:c000:20a",
+        ] {
+            assert!(parse_address(ok).is_ok(), "{ok}");
+        }
+        // NAT64, both prefixes, were already refused as embedded IPv4.
+        assert!(matches!(
+            net_err("64:ff9b:1::/48"),
+            AddressError::EmbedsIpv4 { .. }
+        ));
+        // A query accepts the spelling, so the decision can refuse it with
+        // its own code.
+        let t: Target = "[2002:c000:20a::1]:443/tcp".parse().expect("query");
+        assert_eq!(t.ip, "2002:c000:20a::1".parse::<IpAddr>().expect("ip"));
+    }
+
+    #[test]
+    fn network_and_broadcast_addresses() {
+        let ip = |s: &str| s.parse::<IpAddr>().expect("ip");
+        let n24 = parse_network("192.0.2.0/24").expect("net");
+        assert!(n24.is_network_or_broadcast(ip("192.0.2.0")));
+        assert!(n24.is_network_or_broadcast(ip("192.0.2.255")));
+        assert!(!n24.is_network_or_broadcast(ip("192.0.2.1")));
+        assert!(!n24.is_network_or_broadcast(ip("192.0.3.255")));
+        let n30 = parse_network("192.0.2.4/30").expect("net");
+        assert!(n30.is_network_or_broadcast(ip("192.0.2.4")));
+        assert!(n30.is_network_or_broadcast(ip("192.0.2.7")));
+        assert!(!n30.is_network_or_broadcast(ip("192.0.2.5")));
+        let n31 = parse_network("192.0.2.4/31").expect("net");
+        assert!(!n31.is_network_or_broadcast(ip("192.0.2.4")));
+        assert!(!n31.is_network_or_broadcast(ip("192.0.2.5")));
+        let host = parse_network("192.0.2.255/32").expect("net");
+        assert!(!host.is_network_or_broadcast(ip("192.0.2.255")));
+        let v6 = parse_network("2001:db8::/120").expect("net");
+        assert!(!v6.is_network_or_broadcast(ip("2001:db8::")));
+        assert!(!v6.is_network_or_broadcast(ip("2001:db8::ff")));
+    }
+
     #[test]
     fn refuses_special_addresses() {
         assert!(matches!(addr_err("0.0.0.0"), AddressError::Unspecified(_)));
@@ -782,6 +1046,68 @@ mod tests {
             if let Ok(parsed) = parse_address(&text) {
                 prop_assert_eq!(parsed, IpAddr::V6(ip));
                 prop_assert!(embedded_ipv4(ip).is_none());
+                prop_assert!(ipv6_transition(ip).is_none());
+            }
+        }
+
+        #[test]
+        fn six_to_four_always_refused(v4: u32, subnet: u16, iid: u64) {
+            let ip = Ipv6Addr::from(0x2002u128 << 112 | u128::from(v4) << 80 | u128::from(subnet) << 64 | u128::from(iid));
+            let want = Ipv4Addr::from(v4);
+            prop_assert_eq!(ipv6_transition(ip), Some((Ipv6Transition::SixToFour, want)));
+            match parse_address(&ip.to_string()) {
+                Err(e) => prop_assert!(e.to_string().contains(&want.to_string()), "{}", e),
+                Ok(_) => prop_assert!(false, "{} accepted", ip),
+            }
+        }
+
+        #[test]
+        fn teredo_always_refused(server: u32, flags: u16, port: u16, client: u32) {
+            let ip = Ipv6Addr::from(
+                0x2001u128 << 112
+                    | u128::from(server) << 64
+                    | u128::from(flags) << 48
+                    | u128::from(!port) << 32
+                    | u128::from(!client),
+            );
+            let want = Ipv4Addr::from(client);
+            prop_assert_eq!(ipv6_transition(ip), Some((Ipv6Transition::Teredo, want)));
+            match parse_address(&ip.to_string()) {
+                Err(e) => prop_assert!(e.to_string().contains(&want.to_string()), "{}", e),
+                Ok(_) => prop_assert!(false, "{} accepted", ip),
+            }
+        }
+
+        #[test]
+        fn isatap_always_refused(prefix: u64, ul in 0u16..4, v4: u32) {
+            let ip = Ipv6Addr::from(u128::from(prefix) << 64 | u128::from(ul << 8) << 48 | 0x5efeu128 << 32 | u128::from(v4));
+            prop_assert!(parse_address(&ip.to_string()).is_err(), "{} accepted", ip);
+            prop_assert!(ipv6_transition(ip).is_some() || embedded_ipv4(ip).is_some());
+        }
+
+        #[test]
+        fn translated_always_refused(v4: u32) {
+            let ip = Ipv6Addr::from(0xffffu128 << 48 | u128::from(v4));
+            prop_assert_eq!(ipv6_transition(ip), Some((Ipv6Transition::Translated, Ipv4Addr::from(v4))));
+            prop_assert!(parse_address(&ip.to_string()).is_err());
+        }
+
+        #[test]
+        fn edges_of_a_network(bits: u32, prefix in 0u8..=32, offset: u32) {
+            let net_addr = bits & mask32(prefix);
+            let network = Network { addr: IpAddr::V4(Ipv4Addr::from(net_addr)), prefix };
+            let all_ones = net_addr | !mask32(prefix);
+            let first = IpAddr::V4(Ipv4Addr::from(net_addr));
+            let last = IpAddr::V4(Ipv4Addr::from(all_ones));
+            prop_assert_eq!(network.is_network_or_broadcast(first), prefix <= 30);
+            prop_assert_eq!(network.is_network_or_broadcast(last), prefix <= 30);
+            let inside = net_addr | (offset & !mask32(prefix));
+            if inside != net_addr && inside != all_ones {
+                prop_assert!(!network.is_network_or_broadcast(IpAddr::V4(Ipv4Addr::from(inside))));
+            }
+            let outside = all_ones.wrapping_add(1);
+            if prefix > 0 && !network.contains(IpAddr::V4(Ipv4Addr::from(outside))) {
+                prop_assert!(!network.is_network_or_broadcast(IpAddr::V4(Ipv4Addr::from(outside))));
             }
         }
 

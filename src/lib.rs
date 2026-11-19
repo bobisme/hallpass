@@ -59,7 +59,8 @@ mod template;
 mod witness;
 
 pub use address::{
-    AddressError, Network, Protocol, Target, embedded_ipv4, parse_address, parse_network,
+    AddressError, Ipv6Transition, Network, Protocol, Target, embedded_ipv4, ipv6_transition,
+    parse_address, parse_network,
 };
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
 pub use error::{Error, MissingLedger};

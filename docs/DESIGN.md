@@ -52,9 +52,54 @@ six commands. hallpass closes that gap with the ledger.
 - IPv6 forms that carry IPv4 (mapped, compatible, NAT64) are refused in a
   pass and refused in a `permits` query (`embedded-ipv4`). On a dual-stack
   socket, `::ffff:192.0.2.1` is 192.0.2.1; a list read only as IPv6 would
-  miss that. The caller must ask with the IPv4 address. 6to4 (`2002::/16`)
-  and Teredo also embed IPv4 but route through relays, not to the embedded
-  host; they are not refused (see "Residual risks").
+  miss that. The caller must ask with the IPv4 address.
+- **Transition forms** are refused the same way (pass: an address problem
+  naming the mechanism and the IPv4 address; query: `embedded-ipv4`). Each
+  can carry traffic over IPv4 to an address the IPv6 list does not show,
+  or broaden an approval to whatever sits behind a relay:
+  - 6to4 `2002::/16`: tunnelled to the IPv4 router in bits 16-47;
+  - Teredo `2001::/32`: tunnelled in UDP to the client's public IPv4
+    address (the last 32 bits, inverted; named in the message); for a
+    network, the Teredo server's address (bits 32-63) is named, since a
+    network has no one client;
+  - ISATAP interface identifiers (`0:5efe` or `200:5efe` followed by an
+    IPv4 address, RFC 5214) under any prefix: tunnelled to that IPv4
+    address. Refused as an address and as a network of /96 or longer
+    (whose every address has that identifier). A /64 contains such
+    addresses among ordinary ones and is accepted; the ISATAP-form ones are
+    refused when asked about. A real host whose random interface identifier
+    happens to start with `0:5efe` is refused too; the chance is about one
+    in 2^30 for a random identifier;
+  - SIIT IPv4-translated `::ffff:0:0:0/96` (RFC 2765): not refused before
+    (the IPv4-mapped check needs `ffff` in the sixth group, this has it in
+    the fifth); a translator delivers it to the IPv4 address.
+  NAT64 `64:ff9b::/96` and the local-use `64:ff9b:1::/48` were already
+  refused. The IPv4 address named for `64:ff9b:1::/48` is the last 32 bits,
+  which is right for a /96 translation prefix inside it; a translator
+  using a shorter prefix (RFC 6052 allows /32 to /96) puts it elsewhere, so
+  the named address can be wrong even though the refusal is right.
+  **Left alone**, because they cannot be recognized from the address: 6rd
+  (RFC 5969) and MAP-E/MAP-T (RFC 7597, 7599), whose prefixes each provider
+  chooses, and NAT64 network-specific prefixes. Also left: the old Teredo
+  prefix `3ffe:831f::/32`, in the 6bone space that was returned in 2006 and
+  is not routed.
+- **Network and broadcast addresses.** `permits` refuses the first and the
+  last address of a listed IPv4 network of /30 or broader
+  (`network-or-broadcast`): the last is the directed broadcast address,
+  which can reach every host on the network (a classic amplification), and
+  the first is the network itself, which some stacks also treat as a
+  broadcast. /31 networks (RFC 3021 point-to-point) and /32 have no such
+  addresses. An address that a destination lists on its own (`address`,
+  or a /32 network) is permitted even when it is the edge of another listed
+  network: the owner named that exact address, which is the strongest form
+  of approval the format has, and it covers the case of an owner whose
+  real network is larger than the piece listed. The rule is in
+  `Pass::permits`, not in the pass: hallpass cannot tell from a pass alone
+  how large the owner's real network is. `Network::is_network_or_broadcast`
+  is public so a consumer (for example an egress filter) can apply the
+  same rule. IPv6 has no broadcast; the subnet-router anycast address (the
+  first address of an IPv6 network) reaches a router of that network, not
+  all hosts, and is left alone.
 - A `permits` query accepts any unambiguous spelling of an address
   (`2001:DB8::1` is the same address as `2001:db8::1`), but not host names,
   zones, shortened or leading-zero IPv4.
@@ -275,10 +320,12 @@ No locking crate: the standard library has file locks.
   the window. Keep NTP on.
 - **Parent directories are not checked for links**; only the pass and
   ledger file names themselves, and the state directory itself.
-- **Subnet broadcast**: in a listed network such as `192.0.2.0/24`,
-  hallpass cannot know whether `192.0.2.255` is a directed broadcast
-  address on the owner's network. It is permitted like any other address in
-  the network.
-- **Relay-embedding IPv6** (6to4, Teredo) is not refused.
+- **Broadcast addresses of the owner's real network**: hallpass refuses
+  the edges of each listed network, but when the listed network is smaller
+  than the owner's real one (a /25 listed inside a /24), the real broadcast
+  address can be a listed host. hallpass cannot know the real size.
+- **Provider-chosen IPv6 transition prefixes** (6rd, MAP, NAT64
+  network-specific prefixes) cannot be recognized from the address and are
+  not refused; see "Addresses".
 - **Revocation reaches a tool only when it asks.** A long step that is
   already running is not interrupted. Tools should ask before each step.

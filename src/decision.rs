@@ -6,7 +6,7 @@ use std::net::IpAddr;
 
 use time::{Duration, OffsetDateTime};
 
-use crate::address::{Target, embedded_ipv4};
+use crate::address::{Target, embedded_ipv4, ipv6_transition};
 use crate::pass::Pass;
 
 /// Where an instant falls relative to the approval window.
@@ -66,8 +66,12 @@ pub enum RefusalCode {
     Revoked,
     /// The window ends before the work could finish.
     WindowTooShort,
-    /// An IPv6 form that carries an IPv4 address.
+    /// An IPv6 form that carries an IPv4 address (mapped, compatible,
+    /// NAT64, or a transition form: 6to4, Teredo, ISATAP, SIIT-translated).
     EmbeddedIpv4,
+    /// The network address or the directed broadcast (all-ones) address of
+    /// a listed IPv4 network of /30 or broader: not a host.
+    NetworkOrBroadcast,
     /// No entry lists this address.
     AddressNotListed,
     /// The address is listed, but not with this protocol and port.
@@ -90,6 +94,7 @@ impl RefusalCode {
             Self::Revoked => "revoked",
             Self::WindowTooShort => "window-too-short",
             Self::EmbeddedIpv4 => "embedded-ipv4",
+            Self::NetworkOrBroadcast => "network-or-broadcast",
             Self::AddressNotListed => "address-not-listed",
             Self::PortNotListed => "port-not-listed",
             Self::UnknownCounter => "unknown-counter",
@@ -248,6 +253,44 @@ impl Pass {
                 ),
             });
         }
+        if let IpAddr::V6(v6) = target.ip
+            && let Some((mechanism, ipv4)) = ipv6_transition(v6)
+        {
+            return Decision::Refused(Refusal {
+                code: RefusalCode::EmbeddedIpv4,
+                message: format!(
+                    "{} is {} that carries the IPv4 address {ipv4}: packets to it are tunnelled or translated over IPv4. A pass names native addresses only; ask about {ipv4} or the host's native IPv6 address",
+                    target.ip,
+                    mechanism.name()
+                ),
+            });
+        }
+        // An address listed on its own is a host, whatever network it is
+        // also in; otherwise the two edge addresses of a listed IPv4 network
+        // are not hosts.
+        let listed_alone = self
+            .destinations
+            .iter()
+            .any(|d| d.network.is_host() && d.network.contains(target.ip));
+        if !listed_alone
+            && let Some(d) = self
+                .destinations
+                .iter()
+                .find(|d| d.network.is_network_or_broadcast(target.ip))
+        {
+            let which = if target.ip == d.network.addr() {
+                "the network address"
+            } else {
+                "the broadcast (all-ones) address"
+            };
+            return Decision::Refused(Refusal {
+                code: RefusalCode::NetworkOrBroadcast,
+                message: format!(
+                    "{} is {which} of the listed network {} (destination {}), not a host: a packet to it may reach every host on that network; do not send to it. If the owner's network is larger and this is one host, the owner must list it as its own address in writing",
+                    target.ip, d.network, d.label
+                ),
+            });
+        }
         if let Some(d) = self.destination_for(target.ip, target.port, target.protocol) {
             return Decision::Allowed {
                 label: d.label.clone(),
@@ -323,6 +366,93 @@ mod tests {
             revoked.window_at(datetime!(2026-11-20 09:00 UTC)),
             WindowState::Revoked { .. }
         ));
+    }
+
+    /// A pass whose one destination is `network` (whole network approved).
+    fn network_pass(network: &str, extra: &str) -> Pass {
+        let text = GOOD.replace(
+            "network = \"2001:db8::/120\"",
+            &format!("network = \"{network}\"\nwhole_network_approved = true"),
+        );
+        let text = format!("{text}{extra}");
+        let text = text.replace("[ceilings]\ncalls = 6\nrequests = 500\n", "");
+        Pass::parse(&format!("{text}\n[ceilings]\ncalls = 6\n")).expect("valid")
+    }
+
+    #[test]
+    fn network_and_broadcast_addresses_are_not_hosts() {
+        let now = datetime!(2026-11-20 09:00 UTC);
+        let p = network_pass("198.51.100.0/24", "");
+        let decide = |p: &Pass, t: &str| p.permits(&target(t), now, Duration::ZERO);
+        for edge in ["198.51.100.0:443/tcp", "198.51.100.255:443/tcp"] {
+            match decide(&p, edge) {
+                Decision::Refused(r) => {
+                    assert_eq!(r.code, RefusalCode::NetworkOrBroadcast, "{edge}");
+                    assert!(r.message.contains("198.51.100.0/24"), "{}", r.message);
+                    assert!(r.message.contains("not a host"), "{}", r.message);
+                }
+                other @ Decision::Allowed { .. } => panic!("{edge}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            decide(&p, "198.51.100.1:443/tcp"),
+            Decision::Allowed { .. }
+        ));
+        // Listed on its own, the address is a host after all.
+        let explicit = network_pass(
+            "198.51.100.0/24",
+            "\n[[destination]]\nlabel = \"bcast-host\"\naddress = \"198.51.100.255\"\nprotocol = \"udp\"\nports = 9\n",
+        );
+        assert!(matches!(
+            decide(&explicit, "198.51.100.255:9/udp"),
+            Decision::Allowed { .. }
+        ));
+        // /31 and /32 have no network or broadcast address.
+        let p31 = network_pass("198.51.100.4/31", "");
+        for host in ["198.51.100.4:443/tcp", "198.51.100.5:443/tcp"] {
+            assert!(
+                matches!(decide(&p31, host), Decision::Allowed { .. }),
+                "{host}"
+            );
+        }
+        // Transition forms are refused in a query, naming the IPv4 address.
+        let p = pass();
+        match decide(&p, "[2002:c000:20a::1]:5060/udp") {
+            Decision::Refused(r) => {
+                assert_eq!(r.code, RefusalCode::EmbeddedIpv4);
+                assert!(r.message.contains("6to4") && r.message.contains("192.0.2.10"));
+            }
+            other @ Decision::Allowed { .. } => panic!("{other:?}"),
+        }
+        match decide(&p, "[2001:db8::5efe:c000:20a]:443/tcp") {
+            Decision::Refused(r) => assert!(r.message.contains("ISATAP"), "{}", r.message),
+            other @ Decision::Allowed { .. } => panic!("{other:?}"),
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn edges_refused_hosts_allowed(bits: u32, prefix in 8u8..=32, offset: u32) {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            // Inside 10.0.0.0/8, which has no special ranges.
+            let base = (0x0a00_0000 | (bits & 0x00ff_ffff)) & mask;
+            let last = base | !mask;
+            let network = format!("{}/{prefix}", std::net::Ipv4Addr::from(base));
+            let p = network_pass(&network, "");
+            let now = datetime!(2026-11-20 09:00 UTC);
+            let ask = |a: u32| p.permits(&target(&format!("{}:443/tcp", std::net::Ipv4Addr::from(a))), now, Duration::ZERO);
+            for edge in [base, last] {
+                match ask(edge) {
+                    Decision::Refused(r) => proptest::prop_assert!(prefix <= 30 && r.code == RefusalCode::NetworkOrBroadcast),
+                    Decision::Allowed { .. } => proptest::prop_assert!(prefix >= 31),
+                }
+            }
+            let inside = base | (offset & !mask);
+            if inside != base && inside != last {
+                let allowed = matches!(ask(inside), Decision::Allowed { .. });
+                proptest::prop_assert!(allowed, "host {} refused", std::net::Ipv4Addr::from(inside));
+            }
+        }
     }
 
     #[test]
