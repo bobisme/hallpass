@@ -332,7 +332,10 @@ fn parse_literal(text: &str) -> Result<IpAddr, AddressError> {
     }
     if text.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
         let parts: Vec<&str> = text.split('.').collect();
-        if parts.len() != 4 || parts.iter().any(|p| p.is_empty()) {
+        if parts.len() > 4 {
+            return Err(AddressError::NotAnAddress(text.to_owned()));
+        }
+        if parts.len() < 4 || parts.iter().any(|p| p.is_empty()) {
             return Err(AddressError::Shortened(text.to_owned()));
         }
         if parts.iter().any(|p| p.len() > 1 && p.starts_with('0')) {
@@ -609,6 +612,10 @@ mod tests {
         assert!(matches!(addr_err("10.1.2"), AddressError::Shortened(_)));
         assert!(matches!(addr_err("2130706433"), AddressError::Shortened(_)));
         assert!(matches!(addr_err("10..0.1"), AddressError::Shortened(_)));
+        assert!(matches!(
+            addr_err("1.2.3.4.5"),
+            AddressError::NotAnAddress(_)
+        ));
         assert!(matches!(
             addr_err("256.0.0.1"),
             AddressError::NotAnAddress(_)
