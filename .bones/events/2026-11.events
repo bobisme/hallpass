@@ -1,2 +1,5 @@
 # bones event log v1
 # fields: timestamp	agent	type	item_id	data
+1795057095776305	sippycup-2u2m2v	itc:AQ		item.create	bn-136	{"description":"status shows totals only; an operator reviewing a run needs the entries with time, counter, amount, note and digest.","kind":"task","size":"s","title":"Add a command to list ledger entries (hallpass ledger FILE)"}	blake3:uvscJ_u0kli6-UcbuEBba9HhODvwKBOUfBmoJeMZQWs
+1795057095879805	sippycup-2u2m2v	itc:AQ		item.create	bn-ju3	{"description":"Documented in docs/DESIGN.md as residual risks. Consider a sealed tail (digest of the last line stored separately) and refusing to create a ledger for a pass whose window opened long ago without an explicit flag.","kind":"bug","size":"s","title":"The last ledger entry can be altered without detection, and deleting the ledger resets the count"}	blake3:soa6JdddlZQzzpv9d7BjuIhkHfmCy0r3fnXchpat5xE
+1795057095968818	sippycup-2u2m2v	itc:AQ		item.create	bn-2bf	{"description":"From the v0.1 builder's known limits.","kind":"task","size":"s","title":"Refuse 6to4 and Teredo addresses and directed broadcast inside a listed network"}	blake3:inU4IIri7kiqV7AfPhKaMklMnz_TzGwxCAAFsIBu_lM
