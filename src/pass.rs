@@ -13,6 +13,7 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use toml::{Table, Value};
 
 use crate::address::{Network, Protocol, parse_address, parse_network};
+use crate::name::{HostName, MAX_NAMES};
 use crate::ports::PortSet;
 
 /// The one pass format version this library reads.
@@ -86,6 +87,9 @@ pub struct Destination {
     pub ports: PortSet,
     /// What the owner calls it. Informational only: it grants nothing.
     pub hostname: Option<String>,
+    /// The only host names this destination is approved for. Empty: no
+    /// name restriction. A name narrows and never grants.
+    pub names: Vec<HostName>,
     /// The owner approved the whole network beyond the breadth cap.
     pub whole_network_approved: bool,
 }
@@ -351,6 +355,7 @@ impl Pass {
     }
 
     /// The first destination entry that allows `ip`, `port` and `protocol`.
+    /// It does not look at `names`; [`Pass::permits_named`] does.
     #[must_use]
     pub fn destination_for(
         &self,
@@ -523,6 +528,7 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
             "protocol",
             "ports",
             "hostname",
+            "names",
             "whole_network_approved",
         ],
     );
@@ -594,14 +600,75 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
             name
         }
     });
+    let names = parse_names(w, t, p);
     Some(Destination {
         label: label?,
         network: network?,
         protocol: protocol?,
         ports: ports?,
         hostname,
+        names: names?,
         whole_network_approved: whole?,
     })
+}
+
+/// The optional `names` list: canonical host names, no duplicates.
+fn parse_names(w: &mut Walker, t: &Table, p: &str) -> Option<Vec<HostName>> {
+    let field = join(p, "names");
+    let example = "for example `names = [\"app.example.com\"]`";
+    let items = match t.get("names") {
+        None => return Some(Vec::new()),
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            w.problem(
+                field,
+                format!(
+                    "must be a list of host names ({example}), not {}",
+                    kind(other)
+                ),
+            );
+            return None;
+        }
+    };
+    if items.is_empty() {
+        w.problem(
+            field,
+            "is an empty list, which could mean \"no names\" or \"any name\"; list the approved names, or remove the key for no name restriction",
+        );
+        return None;
+    }
+    if items.len() > MAX_NAMES {
+        w.problem(
+            field,
+            format!("lists more than {MAX_NAMES} names; split the destination"),
+        );
+        return None;
+    }
+    let mut out: Vec<HostName> = Vec::new();
+    let mut complete = true;
+    for (i, item) in items.iter().enumerate() {
+        let at = format!("{field}[{}]", i + 1);
+        let Some(text) = item.as_str() else {
+            w.problem(
+                at,
+                format!("must be a quoted host name, not {}", kind(item)),
+            );
+            complete = false;
+            continue;
+        };
+        match HostName::canonical(text) {
+            Ok(name) if out.contains(&name) => {
+                w.problem(at, format!("`{name}` is listed twice; remove one"));
+                complete = false;
+            }
+            Ok(name) => out.push(name),
+            Err(message) => {
+                w.problem(at, message);
+                complete = false;
+            }
+        }
+    }
+    complete.then_some(out)
 }
 
 fn parse_target_field(w: &mut Walker, t: &Table, p: &str, whole: bool) -> Option<Network> {
@@ -990,5 +1057,55 @@ requests = 500
         assert_eq!(fields(&text), vec!["id"]);
         let text = GOOD.replace("format = 1", "format = 1\nformat = 1");
         assert_eq!(fields(&text), vec!["(file)"]);
+    }
+
+    fn with_names(value: &str) -> Result<Pass, Vec<Problem>> {
+        let text = GOOD.replacen(
+            "hostname = \"sip.example.net\"",
+            &format!("hostname = \"sip.example.net\"\nnames = {value}"),
+            1,
+        );
+        assert!(
+            text.contains("names = "),
+            "GOOD has no hostname line to anchor on"
+        );
+        Pass::parse(&text)
+    }
+
+    #[test]
+    fn names_are_read_in_order_and_default_to_none() {
+        let pass = Pass::parse(GOOD).expect("valid");
+        assert!(pass.destinations.iter().all(|d| d.names.is_empty()));
+        let pass = with_names("[\"app.example.com\", \"xn--bcher-kva.example\"]").expect("valid");
+        let names: Vec<&str> = pass.destinations[0]
+            .names
+            .iter()
+            .map(HostName::as_str)
+            .collect();
+        assert_eq!(names, vec!["app.example.com", "xn--bcher-kva.example"]);
+    }
+
+    #[test]
+    fn bad_names_are_refused_with_their_position() {
+        for (value, field) in [
+            ("[]", "destination[1].names"),
+            ("\"app.example.com\"", "destination[1].names"),
+            ("[\"app.example.com\", 5]", "destination[1].names[2]"),
+            ("[\"App.example.com\"]", "destination[1].names[1]"),
+            ("[\"app.example.com.\"]", "destination[1].names[1]"),
+            ("[\"*.example.com\"]", "destination[1].names[1]"),
+            ("[\"192.0.2.10\"]", "destination[1].names[1]"),
+            ("[\"a.example\", \"a.example\"]", "destination[1].names[2]"),
+            ("[\"https://app.example.com\"]", "destination[1].names[1]"),
+            ("[\"app.example.com:443\"]", "destination[1].names[1]"),
+        ] {
+            let problems = with_names(value).expect_err(value);
+            let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+            assert_eq!(fields, vec![field], "{value}: {problems:?}");
+        }
+        let many: Vec<String> = (0..=MAX_NAMES)
+            .map(|i| format!("\"h{i}.example\""))
+            .collect();
+        assert!(with_names(&format!("[{}]", many.join(", "))).is_err());
     }
 }

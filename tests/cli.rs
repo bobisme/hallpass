@@ -1299,3 +1299,139 @@ fn usage_errors_exit_one() {
     assert_eq!(code(&run(&["spend"], None)), 1);
     assert_eq!(code(&run(&["--help"], None)), 0);
 }
+
+// ---- names -------------------------------------------------------------
+
+const NAMED: &str = r#"
+[[destination]]
+label = "shared-web"
+address = "198.51.100.7"
+protocol = "tcp"
+ports = 443
+names = ["app.example.com", "admin.example.com"]
+
+[ceilings]
+"#;
+
+fn named_pass(case: &Case) -> PathBuf {
+    let text = PASS.replacen("\n[ceilings]\n", NAMED, 1);
+    assert!(text.contains("shared-web"));
+    case.pass("p.toml", &text)
+}
+
+fn permits_as(file: &Path, to: &str, name: &str) -> (i32, Value) {
+    json(&["permits", s(file), "--to", to, "--name", name], Some(NOW))
+}
+
+#[test]
+fn permits_with_names() {
+    let case = Case::new();
+    let file = named_pass(&case);
+    assert_eq!(json(&["check", s(&file)], None).0, 0);
+    let to = "198.51.100.7:443/tcp";
+
+    let (rc, out) = permits_as(&file, to, "App.Example.com.");
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["label"], "shared-web");
+    assert_eq!(out["name"], "app.example.com");
+
+    let (rc, out) = permits_as(&file, to, "other.example.org");
+    assert_eq!(
+        (rc, out["refusal"]["code"].as_str()),
+        (2, Some("name-not-listed"))
+    );
+    assert!(
+        out["refusal"]["message"]
+            .as_str()
+            .expect("m")
+            .contains("admin.example.com"),
+        "{out}"
+    );
+
+    let (rc, out) = permits(&file, to, NOW);
+    assert_eq!(
+        (rc, out["refusal"]["code"].as_str()),
+        (2, Some("name-required"))
+    );
+    assert_eq!(out["name"], Value::Null);
+
+    // A name never grants: an approved name on an unlisted address.
+    let (rc, out) = permits_as(&file, "198.51.100.9:443/tcp", "app.example.com");
+    assert_eq!(
+        (rc, out["refusal"]["code"].as_str()),
+        (2, Some("address-not-listed"))
+    );
+
+    // A destination without names takes any name.
+    let (rc, out) = permits_as(&file, "192.0.2.10:5060/udp", "whatever.example.org");
+    assert_eq!((rc, out["label"].as_str()), (0, Some("sip-edge")));
+
+    let text = run(
+        &["permits", s(&file), "--to", to, "--name", "app.example.com"],
+        Some(NOW),
+    );
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(
+        text.starts_with(
+            "ALLOWED: 198.51.100.7:443/tcp as app.example.com by destination shared-web"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn permits_bad_name_is_an_error() {
+    let case = Case::new();
+    let file = named_pass(&case);
+    for name in [
+        "*.example.com",
+        "192.0.2.10",
+        "a b",
+        "",
+        "https://app.example.com",
+    ] {
+        let (rc, out) = permits_as(&file, "198.51.100.7:443/tcp", name);
+        assert_eq!(rc, 1, "{name:?} {out}");
+        assert_eq!(out["error"]["code"], "usage", "{name:?}");
+    }
+}
+
+#[test]
+fn status_shows_names() {
+    let case = Case::new();
+    let file = named_pass(&case);
+    let (rc, out) = json(&["status", s(&file)], Some(NOW));
+    assert_eq!(rc, 0, "{out}");
+    let destinations = out["destinations"].as_array().expect("list");
+    let shared = destinations
+        .iter()
+        .find(|d| d["label"] == "shared-web")
+        .expect("shared-web");
+    assert_eq!(
+        shared["names"],
+        serde_json::json!(["app.example.com", "admin.example.com"])
+    );
+    let plain = destinations
+        .iter()
+        .find(|d| d["label"] == "sip-edge")
+        .expect("sip-edge");
+    assert_eq!(plain["names"], serde_json::json!([]));
+    let text = run(&["status", s(&file)], Some(NOW));
+    assert!(
+        String::from_utf8_lossy(&text.stdout)
+            .contains("[only as: app.example.com, admin.example.com]")
+    );
+}
+
+#[test]
+fn check_refuses_a_bad_names_list() {
+    let case = Case::new();
+    let text = PASS.replacen("\n[ceilings]\n", NAMED, 1).replace(
+        "names = [\"app.example.com\", \"admin.example.com\"]",
+        "names = [\"*.example.com\"]",
+    );
+    let file = case.pass("p.toml", &text);
+    let (rc, out) = json(&["check", s(&file)], None);
+    assert_eq!(rc, 1, "{out}");
+    assert_eq!(out["problems"][0]["field"], "destination[3].names[1]");
+}

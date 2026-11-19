@@ -6,3 +6,5 @@
 1795105251311924	sippycup-2u2m2v	itc:AQ		item.move	bn-136	{"state":"done"}	blake3:vYjbyWtDg2qEqnvoH2Q2dOAwEcIG8WMSVv6nYS2N58U
 1795106065031799	sippycup-2u2m2v	itc:AQ		item.move	bn-ju3	{"state":"done"}	blake3:fJyn4UTut1D2FyElgeNTX3R3IWG3-CkGRgbrL800PaE
 1795106306658182	sippycup-2u2m2v	itc:AQ		item.move	bn-2bf	{"state":"done"}	blake3:0AP1qlypHNsdDGfr0k8Rb2CmPjNBtxJc_gznOLO1Q00
+1795115974472072	sippycup-2u2m2v	itc:AQ		item.create	bn-1uq	{"description":"A destination may list names; permits then needs --name with one of them. For addresses shared with other parties (CDN, shared hosting).","kind":"task","size":"s","title":"Optional per-destination names restriction (narrows, never grants)"}	blake3:JiEhHzhEGB2L-d0QZp9G9W_olJulLqQdfiQa-X9TqyY
+1795115974497553	sippycup-2u2m2v	itc:AQ		item.move	bn-1uq	{"state":"done"}	blake3:xPHg_mi80MZl0GinApu0n5MtwbRPXB4PfrL15PNWDiQ

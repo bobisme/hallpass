@@ -78,6 +78,10 @@ $ hallpass permits engagement.pass.toml --to 192.0.2.11:5060/udp; echo $?
 REFUSED: 192.0.2.11:5060/udp: 192.0.2.11 is not in any destination of this pass; do not touch it. …
 2
 
+$ hallpass permits web.pass.toml --to 198.51.100.7:443/tcp --name other.example.org; echo $?
+REFUSED: 198.51.100.7:443/tcp as other.example.org: … is not approved for the name other.example.org, only for: web (app.example.com). …
+2
+
 $ hallpass spend engagement.pass.toml calls --note "first call"
 RECORDED: 1 calls (1 of 6 spent, 5 left; ledger entry 1)
 

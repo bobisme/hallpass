@@ -7,7 +7,8 @@ use std::net::IpAddr;
 use time::{Duration, OffsetDateTime};
 
 use crate::address::{Target, embedded_ipv4, ipv6_transition};
-use crate::pass::Pass;
+use crate::name::HostName;
+use crate::pass::{Destination, Pass};
 
 /// Where an instant falls relative to the approval window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +77,12 @@ pub enum RefusalCode {
     AddressNotListed,
     /// The address is listed, but not with this protocol and port.
     PortNotListed,
+    /// The destination is approved only for listed host names, and the
+    /// query named none.
+    NameRequired,
+    /// The destination is approved only for listed host names, and the
+    /// query's name is not one of them.
+    NameNotListed,
     /// The counter is not one of the pass's ceilings.
     UnknownCounter,
     /// The spend would exceed the ceiling.
@@ -97,6 +104,8 @@ impl RefusalCode {
             Self::NetworkOrBroadcast => "network-or-broadcast",
             Self::AddressNotListed => "address-not-listed",
             Self::PortNotListed => "port-not-listed",
+            Self::NameRequired => "name-required",
+            Self::NameNotListed => "name-not-listed",
             Self::UnknownCounter => "unknown-counter",
             Self::CeilingReached => "ceiling-reached",
             Self::PassChanged => "pass-changed",
@@ -237,8 +246,28 @@ impl Pass {
 
     /// Whether `target` is permitted at `now`, for work that may take up to
     /// `needed`: the window and revocation first, then the destinations.
+    ///
+    /// The query carries no host name, so a destination that lists `names`
+    /// does not allow it: see [`Pass::permits_named`].
     #[must_use]
     pub fn permits(&self, target: &Target, now: OffsetDateTime, needed: Duration) -> Decision {
+        self.permits_named(target, None, now, needed)
+    }
+
+    /// As [`Pass::permits`], for a request that will carry the host name
+    /// `name` (as the TLS server name and the `Host` header, for example).
+    ///
+    /// A name never grants: the address, protocol and port must be listed.
+    /// A destination with `names` allows only a query that carries one of
+    /// them; a destination without `names` allows any name or none.
+    #[must_use]
+    pub fn permits_named(
+        &self,
+        target: &Target,
+        name: Option<&HostName>,
+        now: OffsetDateTime,
+        needed: Duration,
+    ) -> Decision {
         if let Err(refusal) = self.check_window(now, needed) {
             return Decision::Refused(refusal);
         }
@@ -291,10 +320,25 @@ impl Pass {
                 ),
             });
         }
-        if let Some(d) = self.destination_for(target.ip, target.port, target.protocol) {
+        let matching: Vec<&Destination> = self
+            .destinations
+            .iter()
+            .filter(|d| {
+                d.network.contains(target.ip)
+                    && d.protocol == target.protocol
+                    && d.ports.contains(target.port)
+            })
+            .collect();
+        if let Some(d) = matching
+            .iter()
+            .find(|d| d.names.is_empty() || name.is_some_and(|n| d.names.contains(n)))
+        {
             return Decision::Allowed {
                 label: d.label.clone(),
             };
+        }
+        if !matching.is_empty() {
+            return Decision::Refused(name_refusal(target, name, &matching));
         }
         let listed: Vec<String> = self
             .destinations
@@ -323,6 +367,33 @@ impl Pass {
             })
         }
     }
+}
+
+/// The refusal for a target whose every matching destination lists
+/// `names`, none of them the query's.
+fn name_refusal(target: &Target, name: Option<&HostName>, matching: &[&Destination]) -> Refusal {
+    let approved = matching
+        .iter()
+        .map(|d| {
+            let names: Vec<&str> = d.names.iter().map(HostName::as_str).collect();
+            format!("{} ({})", d.label, names.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    name.map_or_else(
+        || Refusal {
+            code: RefusalCode::NameRequired,
+            message: format!(
+                "{target} is approved only for named hosts: {approved}. Ask again with the host name the request will carry, and send only that name"
+            ),
+        },
+        |n| Refusal {
+            code: RefusalCode::NameNotListed,
+            message: format!(
+                "{target} is not approved for the name {n}, only for: {approved}. Do not send that name to it; another party may answer for it on this address. If the owner approved it, they must add it to the pass in writing"
+            ),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -527,5 +598,168 @@ mod tests {
             stamp(datetime!(2026-11-20 09:00 +01:00)),
             "2026-11-20T08:00:00Z"
         );
+    }
+
+    const NAMED: &str = r#"
+[[destination]]
+label = "shared-web"
+address = "198.51.100.7"
+protocol = "tcp"
+ports = 443
+names = ["app.example.com", "admin.example.com"]
+
+[[destination]]
+label = "shared-api"
+address = "198.51.100.7"
+protocol = "tcp"
+ports = [443, 8443]
+names = ["api.example.com"]
+
+[[destination]]
+label = "plain"
+address = "198.51.100.8"
+protocol = "tcp"
+ports = 443
+"#;
+
+    fn named_pass() -> Pass {
+        let text = GOOD.replacen("[ceilings]", &format!("{NAMED}\n[ceilings]"), 1);
+        assert!(
+            text.contains("shared-web"),
+            "GOOD has no [ceilings] to anchor on"
+        );
+        Pass::parse(&text).expect("valid")
+    }
+
+    fn ask(pass: &Pass, to: &str, name: Option<&str>) -> Result<String, RefusalCode> {
+        let name: Option<HostName> = name.map(|n| n.parse().expect("name"));
+        match pass.permits_named(
+            &target(to),
+            name.as_ref(),
+            datetime!(2026-11-20 09:00 UTC),
+            Duration::ZERO,
+        ) {
+            Decision::Allowed { label } => Ok(label),
+            Decision::Refused(r) => Err(r.code),
+        }
+    }
+
+    #[test]
+    fn a_named_destination_allows_only_its_names() {
+        let p = named_pass();
+        let to = "198.51.100.7:443/tcp";
+        assert_eq!(
+            ask(&p, to, Some("app.example.com")),
+            Ok("shared-web".to_owned())
+        );
+        assert_eq!(
+            ask(&p, to, Some("ADMIN.example.com.")),
+            Ok("shared-web".to_owned())
+        );
+        // A later destination on the same address and port may list more names.
+        assert_eq!(
+            ask(&p, to, Some("api.example.com")),
+            Ok("shared-api".to_owned())
+        );
+        assert_eq!(
+            ask(&p, to, Some("other.example.org")),
+            Err(RefusalCode::NameNotListed)
+        );
+        assert_eq!(
+            ask(&p, to, Some("evil-app.example.com")),
+            Err(RefusalCode::NameNotListed)
+        );
+        assert_eq!(
+            ask(&p, to, Some("example.com")),
+            Err(RefusalCode::NameNotListed)
+        );
+        assert_eq!(ask(&p, to, None), Err(RefusalCode::NameRequired));
+        // `permits` is the query without a name.
+        assert!(matches!(
+            p.permits(&target(to), datetime!(2026-11-20 09:00 UTC), Duration::ZERO),
+            Decision::Refused(Refusal {
+                code: RefusalCode::NameRequired,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn names_are_per_port() {
+        let p = named_pass();
+        let to = "198.51.100.7:8443/tcp";
+        assert_eq!(
+            ask(&p, to, Some("api.example.com")),
+            Ok("shared-api".to_owned())
+        );
+        assert_eq!(
+            ask(&p, to, Some("app.example.com")),
+            Err(RefusalCode::NameNotListed)
+        );
+    }
+
+    #[test]
+    fn a_name_never_grants() {
+        let p = named_pass();
+        // An approved name on an address, port or protocol that is not listed.
+        assert_eq!(
+            ask(&p, "198.51.100.9:443/tcp", Some("app.example.com")),
+            Err(RefusalCode::AddressNotListed)
+        );
+        assert_eq!(
+            ask(&p, "198.51.100.7:80/tcp", Some("app.example.com")),
+            Err(RefusalCode::PortNotListed)
+        );
+        assert_eq!(
+            ask(&p, "198.51.100.7:443/udp", Some("app.example.com")),
+            Err(RefusalCode::PortNotListed)
+        );
+        // Nor does it get past the window.
+        let name: HostName = "app.example.com".parse().expect("name");
+        assert!(matches!(
+            p.permits_named(
+                &target("198.51.100.7:443/tcp"),
+                Some(&name),
+                datetime!(2026-11-20 18:00 UTC),
+                Duration::ZERO
+            ),
+            Decision::Refused(Refusal {
+                code: RefusalCode::Expired,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_destination_without_names_takes_any_name_or_none() {
+        let p = named_pass();
+        let to = "198.51.100.8:443/tcp";
+        assert_eq!(ask(&p, to, None), Ok("plain".to_owned()));
+        assert_eq!(
+            ask(&p, to, Some("anything.example.org")),
+            Ok("plain".to_owned())
+        );
+    }
+
+    #[test]
+    fn name_refusals_list_the_approved_names() {
+        let p = named_pass();
+        let other: HostName = "other.example.org".parse().expect("name");
+        for name in [None, Some(&other)] {
+            let Decision::Refused(r) = p.permits_named(
+                &target("198.51.100.7:443/tcp"),
+                name,
+                datetime!(2026-11-20 09:00 UTC),
+                Duration::ZERO,
+            ) else {
+                panic!("allowed");
+            };
+            for expected in [
+                "shared-web (app.example.com, admin.example.com)",
+                "shared-api (api.example.com)",
+            ] {
+                assert!(r.message.contains(expected), "{}", r.message);
+            }
+        }
     }
 }

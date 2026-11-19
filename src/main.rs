@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
-    Decision, Digest, Error, LoadedPass, Pass, Problem, Refusal, SpendRequest, StateDir, Target,
-    WindowState, span, stamp,
+    Decision, Digest, Error, HostName, LoadedPass, Pass, Problem, Refusal, SpendRequest, StateDir,
+    Target, WindowState, span, stamp,
 };
 use serde_json::{Value, json};
 
@@ -65,6 +65,9 @@ enum Command {
         /// `ADDRESS:PORT/PROTOCOL`, for example `192.0.2.10:5060/udp` or `[2001:db8::1]:443/tcp`.
         #[arg(long, value_name = "ADDR:PORT/PROTO")]
         to: String,
+        /// The host name the request will carry (TLS server name, `Host` header). Needed when the destination lists `names`; it never grants anything.
+        #[arg(long, value_name = "HOSTNAME")]
+        name: Option<String>,
         /// Refuse unless the window stays open this many seconds more.
         #[arg(long, value_name = "SECONDS", default_value_t = 0)]
         duration: u32,
@@ -320,7 +323,7 @@ fn status_text(
     for d in &pass.destinations {
         let _ = writeln!(
             text,
-            "  {:<16} {:<24} {} {}{}{}",
+            "  {:<16} {:<24} {} {}{}{}{}",
             d.label,
             d.network.to_string(),
             d.protocol,
@@ -329,6 +332,18 @@ fn status_text(
                 "  (owner calls it {}; grants nothing)",
                 safe(h)
             )),
+            if d.names.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  [only as: {}]",
+                    d.names
+                        .iter()
+                        .map(HostName::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
             if d.whole_network_approved {
                 "  [whole network approved]"
             } else {
@@ -390,6 +405,7 @@ fn status(file: &Path, clock: &Clock) -> Output {
                 "ports": d.ports.ranges().iter().map(|(s, e)| json!({"start": s, "end": e})).collect::<Vec<_>>(),
                 "ports_text": d.ports.to_string(),
                 "hostname": d.hostname,
+                "names": d.names.iter().map(HostName::as_str).collect::<Vec<_>>(),
                 "whole_network_approved": d.whole_network_approved,
             })
         })
@@ -444,7 +460,7 @@ fn status(file: &Path, clock: &Clock) -> Output {
     }
 }
 
-fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
+fn permits(file: &Path, to: &str, name: Option<&str>, duration: u32, clock: &Clock) -> Output {
     let target: Target = match to.parse() {
         Ok(t) => t,
         Err(message) => {
@@ -452,6 +468,16 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
                 "permits",
                 Some(file),
                 &Error::Usage(format!("--to: {message}")),
+            );
+        }
+    };
+    let name: Option<HostName> = match name.map(str::parse).transpose() {
+        Ok(n) => n,
+        Err(message) => {
+            return error_output(
+                "permits",
+                Some(file),
+                &Error::Usage(format!("--name: {message}")),
             );
         }
     };
@@ -466,7 +492,15 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
         Err(e) => return error_output("permits", Some(file), &e),
     };
     let pass = &loaded.pass;
-    let decision = pass.permits(&target, clock.now, Duration::seconds(i64::from(duration)));
+    let decision = pass.permits_named(
+        &target,
+        name.as_ref(),
+        clock.now,
+        Duration::seconds(i64::from(duration)),
+    );
+    let asked = name
+        .as_ref()
+        .map_or_else(|| target.to_string(), |n| format!("{target} as {n}"));
     let state = pass.window_at(clock.now);
     let (code, result, label, refusal, text) = match &decision {
         Decision::Allowed { label } => (
@@ -475,7 +509,7 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
             Some(label.clone()),
             None,
             format!(
-                "ALLOWED: {target} by destination {label} of pass {} (window: {})\n",
+                "ALLOWED: {asked} by destination {label} of pass {} (window: {})\n",
                 pass.id,
                 window_text(pass, &state)
             ),
@@ -485,7 +519,7 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
             "refused",
             None,
             Some(refusal_json(r)),
-            format!("REFUSED: {target}: {}.\n", safe(&r.message)),
+            format!("REFUSED: {asked}: {}.\n", safe(&r.message)),
         ),
     };
     Output {
@@ -499,6 +533,7 @@ fn permits(file: &Path, to: &str, duration: u32, clock: &Clock) -> Output {
             "now": stamp(clock.now),
             "test_clock": clock.test,
             "target": target.to_string(),
+            "name": name.as_ref().map(HostName::as_str),
             "label": label,
             "refusal": refusal,
             "window": window_json(pass, &state),
@@ -890,7 +925,12 @@ fn run(cli: &Cli) -> Output {
         Command::Init { file } => init(file),
         Command::Check { file } => check(file),
         Command::Status { file } => status(file, &clock),
-        Command::Permits { file, to, duration } => permits(file, to, *duration, &clock),
+        Command::Permits {
+            file,
+            to,
+            name,
+            duration,
+        } => permits(file, to, name.as_deref(), *duration, &clock),
         Command::Spend {
             file,
             counter,

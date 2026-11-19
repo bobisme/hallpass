@@ -83,6 +83,17 @@ six commands. hallpass closes that gap with the ledger.
   chooses, and NAT64 network-specific prefixes. Also left: the old Teredo
   prefix `3ffe:831f::/32`, in the 6bone space that was returned in 2006 and
   is not routed.
+- **Names narrow and never grant.** One address can answer for many
+  parties (a CDN, shared hosting), and the host name a request carries
+  decides which. A destination may list `names`; then `permits` allows it
+  only for a query that carries one of them (`--name`,
+  `Pass::permits_named`), and a query with no name is refused rather than
+  assumed harmless. A name is looked at only after the address, protocol
+  and port matched, hallpass never resolves one, and the informational
+  `hostname` stays informational. Names are exact: a wildcard would approve
+  names the owner never saw. A tool that does not speak names (a packet
+  filter such as playpen) cannot honour the list and enforces the address
+  only; the tool that writes the request is the one that must keep to it.
 - **Network and broadcast addresses.** `permits` refuses the first and the
   last address of a listed IPv4 network of /30 or broader
   (`network-or-broadcast`): the last is the directed broadcast address,

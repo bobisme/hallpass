@@ -96,7 +96,33 @@ spend of every running tool that asks.
 | `protocol` | yes | `"tcp"` or `"udp"` |
 | `ports` | yes | `443`, `[80, 443]`, `"8000-8100"`, or a list mixing ports and range strings: `[5060, "10000-10100"]` |
 | `hostname` | no | what the owner calls this destination. **Informational only: it grants nothing**, and hallpass never resolves it. A value that is an IP address is refused (put it in `address`) |
+| `names` | no | the only host names this destination is approved for, as a list: `names = ["app.example.com", "admin.example.com"]`. **It narrows and never grants**: see below |
 | `whole_network_approved` | no | `true` only when the written approval names this whole network; needed for a network broader than the cap. Not allowed with `address` |
+
+### Names
+
+One address often answers for many sites: a CDN, shared hosting, a reverse
+proxy. Which site a request reaches is decided by the host name it carries
+(the TLS server name and the HTTP `Host` header), so approving the address
+alone would also approve every other party on it. `names` closes that gap.
+
+- A destination with `names` allows only a query that carries one of the
+  listed names: `hallpass permits FILE --to ADDR:PORT/PROTO --name NAME`.
+  A query without a name is refused (`name-required`); a query with another
+  name is refused (`name-not-listed`).
+- A destination without `names` has no name restriction.
+- A name never grants anything. The address, protocol and port must be
+  listed, and hallpass never resolves a name. The tool resolves the name
+  itself, asks about each address, connects to an address that was allowed,
+  and sends exactly the name it asked about.
+- Names are written in full, in lower case, without a trailing dot. There
+  are no wildcards. An internationalized name is written in its `xn--`
+  form. At most 64 names per destination; an empty list is refused.
+- A query's name is compared without regard to case, and one trailing dot
+  is ignored.
+- hallpass is advisory, and this check more than most: nothing on the
+  network can see the name inside an encrypted request, so only the tool
+  that sends it can keep to it.
 
 ### Address spelling
 

@@ -57,6 +57,11 @@ revoked = false
 # ports = [5060, "10000-10100"]   # a port, a list, or "start-end" ranges
 # hostname = "sip.example.net"    # informational only; grants nothing
 #
+# When the address also serves other parties (a CDN, shared hosting), list
+# the only host names the owner approved on it. This narrows and never
+# grants: a tool must ask with one of these names and send only that name.
+# names = ["app.example.net"]
+#
 # A network broader than /24 (IPv4) or /64 (IPv6) is refused unless the
 # written approval names that whole network; then add:
 # whole_network_approved = true

@@ -115,7 +115,9 @@ Evaluated in this order:
 refuses **window-too-short** when `needed > 0` and the time remaining is
 `<= needed`.
 
-### `permits(target, now, needed)`
+### `permits(target, now, needed)` and `permits_named(target, name, now, needed)`
+
+`permits` is `permits_named` with no name.
 
 In this order, stopping at the first refusal:
 
@@ -132,10 +134,19 @@ In this order, stopping at the first refusal:
    network); /31 and /32 networks have no such addresses;
 4. the first destination, in file order, whose network contains the
    address, whose protocol matches and whose ports contain the port →
+   and which either lists no `names` or lists the query's name →
    **allowed**, naming that destination's label;
-5. some destination contains the address but none with this protocol and
+5. some destination matches the address, protocol and port, but each one
+   lists `names` and none lists the query's name → `name-required` when the
+   query has no name, `name-not-listed` when it has one (the message lists
+   the approved names);
+6. some destination contains the address but none with this protocol and
    port → `port-not-listed` (the message lists what is allowed for it);
-6. otherwise → `address-not-listed`.
+7. otherwise → `address-not-listed`.
+
+A name never grants: it is looked at only after the address, protocol and
+port matched. Names compare in canonical form (ASCII lower case, no
+trailing dot); the pass must spell them that way, a query need not.
 
 ### `spend(pass, counter, n, note, expected digest, needed, now)`
 
@@ -265,7 +276,7 @@ hallpass [--format text|json] <command>
   init FILE
   check FILE
   status FILE
-  permits FILE --to ADDR:PORT/PROTO [--duration SECONDS]
+  permits FILE --to ADDR:PORT/PROTO [--name HOSTNAME] [--duration SECONDS]
   spend FILE COUNTER [--n N] [--note TEXT] [--digest DIGEST] [--duration SECONDS]
   digest FILE
   ledger FILE [--counter NAME]
@@ -323,14 +334,14 @@ Every object has `command` and `result` (`ok`, `allowed`, `refused`,
 - **status**: `digest`, `now`, `test_clock`, `pass` `{id, name, owner,
   reference, operator}`, `window`, `destinations` (list of `{label, kind`
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
-  end}`)`, ports_text, hostname, whole_network_approved}`), `counters` (list
+  end}`)`, ports_text, hostname, names, whole_network_approved}`), `counters` (list
   of `{name, total, spent, remaining}`), `unlisted_spends` (list of `{name,
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
   `not-checked`; `moved_from` the path the witness last saw, or null),
   `refusal` (`{code, message}` or null).
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
-  (normalized), `label` (or null), `refusal` (or null), `window`.
+  (normalized), `name` (normalized, or null), `label` (or null), `refusal` (or null), `window`.
 - **spend**: `digest`, `pass_id`, `now`, `test_clock`, `counter`, `n`,
   `total` (null for an unknown counter), `spent` (after the spend if
   recorded, else current), `remaining` (or null), `seq` (the new entry's
@@ -361,7 +372,7 @@ fields are null except the one that applies. Times are UTC, whole seconds,
 `YYYY-MM-DDTHH:MM:SSZ`.
 
 Refusal codes: `not-yet-valid`, `expired`, `revoked`, `window-too-short`,
-`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`, `port-not-listed`,
+`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`, `port-not-listed`, `name-required`, `name-not-listed`,
 `unknown-counter`, `ceiling-reached`, `pass-changed`.
 
 ### Test clock
@@ -384,7 +395,9 @@ Crate `hallpass` (re-exports `time`):
 | `Pass::window_at(now) -> WindowState` | window state |
 | `Pass::check_window(now, needed) -> Result<(), Refusal>` | window rule |
 | `Pass::permits(&Target, now, needed) -> Decision` | `Allowed { label }` or `Refused(Refusal)` |
-| `Pass::destination_for(ip, port, protocol)` | the matching destination, window not checked |
+| `Pass::permits_named(&Target, Option<&HostName>, now, needed) -> Decision` | the same for a request that carries a host name; needed when the destination lists `names` |
+| `HostName` | a canonical DNS name; `str::parse` normalizes a query, `HostName::canonical` requires the pass spelling |
+| `Pass::destination_for(ip, port, protocol)` | the matching destination, window and `names` not checked |
 | `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend with the witness in `StateDir::from_env()`; `SpendOutcome.refusal` is `None` when recorded; `SpendOutcome.warnings` |
 | `spend_in(path, &SpendRequest, now, &StateDir)` | the same with an explicit state directory |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |

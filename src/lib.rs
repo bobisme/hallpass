@@ -53,6 +53,7 @@ mod decision;
 mod error;
 mod files;
 mod ledger;
+mod name;
 mod pass;
 mod ports;
 mod template;
@@ -70,6 +71,7 @@ pub use ledger::{
     SpendRequest, Tally, WitnessStatus, adopt, display_safe, ledger_path, read_ledger, spend,
     spend_in, tally,
 };
+pub use name::{HostName, MAX_NAMES};
 pub use pass::{
     Approval, Destination, FORMAT_VERSION, IPV4_CAP, IPV4_FLOOR, IPV6_CAP, IPV6_FLOOR, MAX_CEILING,
     MAX_COUNTERS, MAX_DESTINATIONS, Pass, Problem, is_counter_name,
