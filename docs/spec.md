@@ -267,6 +267,11 @@ Crate `hallpass` (re-exports `time`):
 
 The library is Unix-only.
 
+Cargo features: `cli` (on by default) builds the `hallpass` binary and is
+the only user of clap. A program that uses only the library depends on
+hallpass with `default-features = false` (playpen does). `test-clock` is
+described under "Test clock"; it affects only the binary.
+
 ## Threat model and known limits
 
 hallpass protects against mistakes and drift in the approval record and
@@ -287,10 +292,16 @@ is revoked. [DESIGN.md](DESIGN.md) explains each.
 
 ## Not yet built (planned)
 
-- **Consumers** (planned, none exist yet): the SIP assessment toolbox
-  calling `hallpass ... --format json` before each send and `spend` per
-  call; the web tester using the library per request; the playpen egress
-  guard taking `--pass FILE` to derive its allowlist from the destinations.
+- **Consumers.** Built: the playpen egress guard consumes passes through
+  the library (`playpen run --pass FILE`). It loads the pass with `load`,
+  refuses to start unless `check_window(now, 0)` passes, allows exactly the
+  destinations (optionally narrowed by label), ends the run at
+  `valid_until`, and re-reads the pass every few seconds to stop the
+  command when it is revoked, expired, unreadable, invalid or a destination
+  in use changes. playpen does not spend: it limits where packets go, not
+  how many. Planned: the SIP assessment toolbox calling `hallpass ...
+  --format json` before each send and `spend` per call; the web tester
+  using the library per request.
 - **A ledger inspection command** (planned): listing entries; today read
   the JSON Lines file directly.
 - **Protocols beyond tcp and udp**, and link-local destinations with an
