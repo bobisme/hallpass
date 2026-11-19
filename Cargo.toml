@@ -14,8 +14,20 @@ nursery = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 unnecessary_wraps = "allow"
 
+[[bin]]
+name = "hallpass"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+required-features = ["cli"]
+
 [dependencies]
-clap = { version = "4.6.8", features = ["derive"] }
+# Only the command-line tool needs clap; library users can turn it off with
+# `default-features = false`.
+clap = { version = "4.6.8", features = ["derive"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -28,6 +40,10 @@ proptest = "1.12.0"
 tempfile = "3.27.0"
 
 [features]
+default = ["cli"]
+# The `hallpass` binary. On by default; a program that only uses the library
+# can depend on hallpass with `default-features = false` and skip clap.
+cli = ["dep:clap"]
 # Honour HALLPASS_UNSAFE_TEST_CLOCK in release builds too (debug builds always do).
 # Only for running the integration tests with --release; never for operators.
 test-clock = []
