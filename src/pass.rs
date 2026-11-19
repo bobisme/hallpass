@@ -162,11 +162,14 @@ impl Walker {
         let field = join(prefix, key);
         let example = "for example 2026-11-20T08:00:00Z or 2026-11-20T09:00:00+01:00";
         let Some(value) = table.get(key) else {
-            self.problem(field, format!("missing; add `{key} = {example}`"));
+            self.problem(field, format!("missing; add `{key} = ...`, {example}"));
             return None;
         };
         let parsed = match value {
             Value::Datetime(dt) => from_toml_datetime(dt),
+            Value::String(text) if text.is_empty() => Err(format!(
+                "is empty; write the timestamp from the written approval, {example}"
+            )),
             Value::String(text) => OffsetDateTime::parse(text, &Rfc3339).map_err(|_| {
                 format!("`{text}` is not an RFC 3339 timestamp with an explicit offset ({example})")
             }),
