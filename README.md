@@ -1,5 +1,7 @@
 # hallpass
 
+![Two faceless, cloaked figures exchange a paper pass beside a stone bridge leading through mist to a lit archway.](docs/hallpass.webp)
+
 A pass is the written permission slip for an authorized test: who approved
 it, which literal network destinations may be touched, from when until
 when, and how much. hallpass reads a pass, says whether something is
