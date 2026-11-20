@@ -1879,40 +1879,63 @@ fn caller_kit_consumes_genuine_production_decisions() {
             "2026-11-20T17:00:00Z",
             &hallpass::stamp(real + hallpass::time::Duration::days(1)),
         )
-        .replace("calls = 6", "calls = 1");
+        .replace("calls = 6", "calls = 1\nbandwidth_units = 100");
     let p = case.pass("real.pass", &window);
     let loaded = hallpass::load(&p).expect("expected request from validated pass");
     let digest = loaded.digest.to_string();
-    let expected = serde_json::json!({
-        "pass_id": loaded.pass.id, "digest": digest, "counter": "calls", "n": 1,
-    });
-    let args = [
-        "--format",
-        "json",
-        "spend",
-        s(&p),
-        "calls",
-        "--n",
-        "1",
-        "--digest",
-        &digest,
-    ];
+    let targets = serde_json::json!([
+        {"target":"192.0.2.10:5060/udp","name":"sip.example.net"},
+        {"target":"[2001:db8::1]:443/tcp","name":null}
+    ]);
     let mut samples = Vec::new();
-    for action in ["proceed", "stop"] {
+    for (mode, with_receipt, charges, action) in [
+        ("scalar", false, vec![("calls", 1)], "proceed"),
+        ("scalar", false, vec![("calls", 1)], "stop"),
+        ("scalar", true, vec![("requests", 1)], "proceed"),
+        (
+            "charges",
+            true,
+            vec![("requests", 2), ("bandwidth_units", 3)],
+            "proceed",
+        ),
+    ] {
+        let mut args = vec![
+            "--json",
+            "spend",
+            s(&p),
+            "--digest",
+            &digest,
+            "--to",
+            "192.0.2.10:5060/udp@SIP.EXAMPLE.NET.",
+            "--to",
+            "[2001:db8::1]:443/tcp",
+        ];
+        let costs: Vec<_> = charges
+            .iter()
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        if mode == "scalar" {
+            args.push(charges[0].0);
+        } else {
+            for cost in &costs {
+                args.extend(["--charge", cost]);
+            }
+        }
+        if with_receipt {
+            args.extend(["--record-target", "--caller-ref", "run-A"]);
+        }
         let output = run(&args, None);
-        let exit = code(&output);
-        let stdout = String::from_utf8(output.stdout).expect("utf8");
-        samples.push(serde_json::json!({
-            "id": action, "exit": exit, "stdout": stdout, "expected": expected,
-            "action": action,
-        }));
+        let expected = serde_json::json!({
+            "file":s(&p), "pass_id": loaded.pass.id, "digest": digest, "mode":mode, "targets":targets,
+            "charges":charges.iter().map(|(c,n)| serde_json::json!({"counter":c,"n":n})).collect::<Vec<_>>(),
+            "caller_ref":with_receipt.then_some("run-A"), "record_targets":with_receipt
+        });
+        let stdout = String::from_utf8(output.stdout.clone()).expect("utf8");
+        samples.push(serde_json::json!({"id":mode,"expected":expected,"exit":code(&output),"stdout":stdout,"action":action}));
         if action == "proceed" {
-            let mut mismatched = expected.clone();
-            mismatched["counter"] = "requests".into();
-            samples.push(serde_json::json!({
-                "id": "genuine-success-for-other-request", "exit": exit,
-                "stdout": stdout, "expected": mismatched, "action": "stop",
-            }));
+            let mut wrong = expected;
+            wrong["targets"][1]["target"] = "[2001:db8::2]:443/tcp".into();
+            samples.push(serde_json::json!({"id":"other endpoint","expected":wrong,"exit":code(&output),"stdout":stdout,"action":"stop"}));
         }
     }
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/conformance/check.py");

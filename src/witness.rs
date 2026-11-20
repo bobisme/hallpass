@@ -170,7 +170,11 @@ impl StateDir {
     /// Take the exclusive lock that serializes every writer of the witness
     /// for `pass_id` (held until the returned file is dropped). Creates the
     /// directory and the lock file as needed.
-    pub(crate) fn lock(&self, pass_id: &str) -> Result<File, Error> {
+    pub(crate) fn lock(
+        &self,
+        pass_id: &str,
+        wait: crate::files::WriterWait,
+    ) -> Result<File, Error> {
         let dir = self.ensure(pass_id)?;
         let path = dir.join(format!("{pass_id}.lock"));
         let file = match OpenOptions::new()
@@ -191,7 +195,7 @@ impl StateDir {
                 ));
             }
         };
-        file.lock().map_err(|e| {
+        wait.exclusive(&file, &path, |e| {
             self.unavailable(
                 pass_id,
                 format!("{} cannot be locked ({e})", path.display()),
@@ -467,7 +471,7 @@ mod tests {
             path: resolve(None, None),
         };
         assert!(matches!(
-            none.lock("x"),
+            none.lock("x", crate::files::WriterWait::default()),
             Err(Error::WitnessUnavailable { .. })
         ));
         assert!(matches!(
@@ -482,7 +486,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = StateDir::new(tmp.path().join("a").join("hallpass"));
         assert_eq!(state.read("p1").expect("read"), None);
-        let lock = state.lock("p1").expect("lock");
+        let lock = state
+            .lock("p1", crate::files::WriterWait::default())
+            .expect("lock");
         let dir = state.path().expect("dir");
         assert_eq!(
             fs::metadata(dir).expect("dir").permissions().mode() & 0o777,
@@ -516,7 +522,7 @@ mod tests {
         ));
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod");
         assert!(matches!(
-            state.lock("p1"),
+            state.lock("p1", crate::files::WriterWait::default()),
             Err(Error::WitnessUnavailable { .. })
         ));
     }

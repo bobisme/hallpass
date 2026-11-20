@@ -108,6 +108,9 @@ enum Command {
         /// One named cost of this unit. Repeat for each counter.
         #[arg(long = "charge", value_name = "COUNTER=N", conflicts_with_all = ["counter", "amount"])]
         charges: Vec<String>,
+        /// Maximum milliseconds to acquire both writer locks. Zero tries each once.
+        #[arg(long, value_name = "MILLISECONDS", conflicts_with = "dry_run")]
+        lock_timeout_ms: Option<u64>,
         /// Retain this caller/run reference with the debit.
         #[arg(long, value_name = "TEXT")]
         caller_ref: Option<String>,
@@ -333,7 +336,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
             "file": file.map(|f| f.display().to_string()),
             "error": {
                 "code": error.code(),
-                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), _=>None },
+                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), Error::LockTimeout{..}=>Some("not-recorded"), _=>None },
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
                 "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
                 "message": error.to_string(),
@@ -875,6 +878,7 @@ struct SpendArgs<'a> {
     counter: Option<&'a str>,
     amount: u64,
     charges: &'a [String],
+    lock_timeout_ms: Option<u64>,
     caller_ref: Option<&'a str>,
     record_target: bool,
     to: &'a [String],
@@ -905,6 +909,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
     let target = first.map(|t| t.target);
     let name = first.and_then(|t| t.name.as_ref());
     let mut request = SpendRequest::new(args.counter.unwrap_or_default(), args.amount);
+    request.lock_timeout = args.lock_timeout_ms.map(std::time::Duration::from_millis);
     request.note = args.note;
     request.expect_digest = expect_digest;
     request.needed = Duration::seconds(i64::from(args.duration));
@@ -1594,6 +1599,7 @@ fn run(cli: &Cli, format: Format) -> Output {
             counter,
             amount,
             charges,
+            lock_timeout_ms,
             caller_ref,
             record_target,
             dry_run,
@@ -1608,6 +1614,7 @@ fn run(cli: &Cli, format: Format) -> Output {
                 counter: counter.as_deref(),
                 amount: amount.unwrap_or(1),
                 charges,
+                lock_timeout_ms: *lock_timeout_ms,
                 caller_ref: caller_ref.as_deref(),
                 record_target: *record_target,
                 dry_run: *dry_run,

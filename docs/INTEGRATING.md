@@ -232,6 +232,15 @@ by `error.ledger` and `error.seq`. With `"uncertain"`, the append or sync
 failed. Stop and inspect the ledger before deciding whether another spend is
 appropriate. Never automatically retry either outcome.
 
+A real spend can bound writer lock acquisition with `--lock-timeout-ms N`
+or `SpendRequest::lock_timeout` (also on the policy of a multi-charge request).
+Both locks share one monotonic deadline. Zero tries each immediately and
+omission waits indefinitely. Exit 1 with `error.code = "lock-timeout"` and
+`recording = "not-recorded"` means this attempt appended no debit. Initial
+state files or a ledger header may exist. The limit ends at lock acquisition.
+An external process timeout, an uncertain append, or a failed witness update
+still calls for reconciliation. Subsequent requests reevaluate live policy.
+
 ### Test a subprocess wrapper
 
 Run `python3 docs/conformance/check.py` from the checkout. The reference
@@ -242,17 +251,21 @@ denotes launch failure. Both stop and reconcile must invoke zero callbacks.
 The integration suite also supplies real CLI output acquired with the
 production clock. [Fixtures](conformance/cases.json) · [Reference decoder](conformance/check.py)
 
-The reference adapter takes `expected` from the caller before invoking
-hallpass. It contains the validated pass ID, byte digest, counter name and
-positive integer amount under `pass_id`, `digest`, `counter` and `n`.
-Pin the command with `--digest` and pass the exact counter and amount
-to `spend`. The decoder requires all four response fields to match in
-value and JSON type before it calls the send callback. Unknown response fields
-remain compatible. The callback spy only counts calls.
+Build the version 3 `expected` object from the outgoing request before running
+the CLI. Record the exact pass path argument in `file`. Pin the reviewed `digest` with `--digest`, record its `pass_id`,
+and set `mode` to `scalar` for positional COUNTER or `charges` for --charge.
+List the ordered costs as `charges` with `counter` and positive integer `n`,
+including the scalar cost. List ordered `targets` with a canonical literal
+`target` (IPv6 in brackets) and canonical `name` (lowercase, trailing dot
+removed, or null for an unnamed endpoint). Supply `record_targets` and
+any `caller_ref` or `note` from the request. A targetless unit uses an empty
+array. The decoder checks repeated scalar fields and receipt data against
+the matching array entries. The requested duration is evaluated by Hallpass
+and is absent from the spend reply. A sequence identifies the committed debit.
+The caller retains responsibility for correlating each subprocess with its request.
 
-This adapter covers scalar `spend PASS COUNTER [--n N]`. A multi-charge caller
-should check the same pass identity and digest and validate its complete
-requested `charges` array against the response before proceeding.
+The reference runner also runs the [version 2 scalar fixtures](conformance/cases-v2.json).
+New integrations should use version 3 for complete request checking.
 
 ## Charge all known costs at the first send
 

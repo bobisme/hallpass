@@ -225,6 +225,9 @@ impl<'a> SpendChargesRequest<'a> {
         )
         .map_err(usage)?;
         validate_spend_policy(&self.policy)?;
+        if self.dry_run && self.policy.lock_timeout.is_some() {
+            return Err(usage("a lock timeout applies only to a committing spend"));
+        }
         if self.policy.target.is_none() && self.record_targets {
             return Err(usage("recording a target requires a target"));
         }
@@ -348,7 +351,7 @@ fn spend_using(
     if request.dry_run {
         return preview(pass_path, request, state, clock);
     }
-    let mut locked = lock_for_writing(pass_path, state, false, None)?;
+    let mut locked = lock_for_writing(pass_path, state, false, None, request.policy.lock_timeout)?;
     let (identity, warnings) = prepare_witness(pass_path, &locked, state)?;
     let now = clock();
     check_clock(now)?;

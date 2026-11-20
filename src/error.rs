@@ -158,6 +158,9 @@ pub enum Error {
         event: String,
         detail: String,
     },
+    /// The lock-wait budget expired before any debit was appended.
+    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit", path.display())]
+    LockTimeout { path: PathBuf },
     /// The file already exists (`init` never overwrites).
     #[error("{} already exists; hallpass init never overwrites. Choose another path", path.display())]
     Exists {
@@ -175,6 +178,7 @@ impl Error {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Io { .. } => "io",
+            Self::LockTimeout { .. } => "lock-timeout",
             Self::AppendUncertain { .. } => "ledger-append-uncertain",
             Self::Symlink { .. } => "symlink",
             Self::NotRegular { .. } => "not-regular-file",

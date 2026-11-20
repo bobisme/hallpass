@@ -1,188 +1,171 @@
 {
-  "version": 2,
+  "version": 3,
   "expected": {
     "pass_id": "example-2026-11",
     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "counter": "calls",
-    "n": 1
+    "mode": "charges",
+    "targets": [
+      {
+        "target": "192.0.2.10:5060/udp",
+        "name": "sip.example.net"
+      },
+      {
+        "target": "[2001:db8::1]:443/tcp",
+        "name": null
+      }
+    ],
+    "charges": [
+      {
+        "counter": "calls",
+        "n": 1
+      },
+      {
+        "counter": "bytes",
+        "n": 100
+      }
+    ],
+    "caller_ref": "unit-42",
+    "record_targets": true,
+    "file": "review.pass.toml"
   },
   "cases": [
     {
-      "id": "counted",
+      "id": "two-costs-two-targets",
       "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "proceed"
     },
     {
-      "id": "extra-field-and-warning",
+      "id": "second-target",
       "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [\"moved ledger\"], \"new_field\": 42, \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "proceed",
-      "warnings": [
-        "moved ledger"
-      ]
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::2]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
+      "action": "stop"
     },
     {
-      "id": "help",
+      "id": "second-name",
       "exit": 0,
-      "stdout": "Usage: hallpass",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":\"other.test\",\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "stop"
     },
     {
-      "id": "truncated",
+      "id": "wrong-charge",
       "exit": 0,
-      "stdout": "{",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":101,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "stop"
     },
     {
-      "id": "empty",
+      "id": "boolean-cost",
       "exit": 0,
-      "stdout": "",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":true,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "stop"
     },
     {
-      "id": "spawn-failure",
-      "exit": null,
-      "stdout": null,
-      "action": "stop"
-    },
-    {
-      "id": "contradictory",
-      "exit": 2,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "permits",
+      "id": "reference",
       "exit": 0,
-      "stdout": "{\"command\": \"permits\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-24\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "stop"
+    },
+    {
+      "id": "retained-label",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"wrong\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
+      "action": "stop"
+    },
+    {
+      "id": "scalar-target",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.11:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
+      "action": "stop"
+    },
+    {
+      "id": "missing-charge",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
+      "action": "stop"
+    },
+    {
+      "id": "extra-target",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"},{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
+      "action": "stop"
+    },
+    {
+      "id": "unknown-extension",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"new_field\":42,\"file\":\"review.pass.toml\"}",
+      "action": "proceed"
     },
     {
       "id": "preview",
       "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"would-allow\", \"test_clock\": false, \"seq\": null, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "stdout": "{\"command\":\"spend\",\"result\":\"would-allow\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
       "action": "stop"
     },
     {
-      "id": "test-clock",
+      "id": "scalar-with-receipt",
       "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": true, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0,\"file\":\"review.pass.toml\"}",
+      "action": "proceed",
+      "expected": {
+        "pass_id": "example-2026-11",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mode": "scalar",
+        "targets": [
+          {
+            "target": "192.0.2.10:5060/udp",
+            "name": "sip.example.net"
+          },
+          {
+            "target": "[2001:db8::1]:443/tcp",
+            "name": null
+          }
+        ],
+        "charges": [
+          {
+            "counter": "calls",
+            "n": 1
+          }
+        ],
+        "caller_ref": "unit-42",
+        "record_targets": true,
+        "file": "review.pass.toml"
+      }
     },
     {
-      "id": "missing-test-clock",
+      "id": "conflicting-scalar-balance",
       "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "missing-sequence",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": null, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "bool-sequence",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": true, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "refusal",
-      "exit": 2,
-      "stdout": "{\"command\": \"spend\", \"result\": \"refused\"}",
-      "action": "stop"
-    },
-    {
-      "id": "error",
-      "exit": 1,
-      "stdout": "{\"command\": \"spend\", \"result\": \"error\"}",
-      "action": "stop"
-    },
-    {
-      "id": "reconcile-recorded",
-      "exit": 1,
-      "stdout": "{\"command\": \"spend\", \"result\": \"error\", \"error\": {\"recording\": \"recorded\"}}",
-      "action": "reconcile"
-    },
-    {
-      "id": "reconcile-uncertain",
-      "exit": 1,
-      "stdout": "{\"command\": \"spend\", \"result\": \"error\", \"error\": {\"recording\": \"uncertain\"}}",
-      "action": "reconcile"
-    },
-    {
-      "id": "wrong-pass_id",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"other-engagement\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "wrong-digest",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "wrong-counter",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"requests\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "wrong-n",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 2}",
-      "action": "stop"
-    },
-    {
-      "id": "bool-amount",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": true}",
-      "action": "stop"
-    },
-    {
-      "id": "float-amount",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1.0}",
-      "action": "stop"
-    },
-    {
-      "id": "string-amount",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": \"1\"}",
-      "action": "stop"
-    },
-    {
-      "id": "missing-identity",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": []}",
-      "action": "stop"
-    },
-    {
-      "id": "missing-digest",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"counter\": \"calls\", \"n\": 1}",
-      "action": "stop"
-    },
-    {
-      "id": "invalid-expectation-bool-amount",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":99,\"file\":\"review.pass.toml\"}",
       "action": "stop",
       "expected": {
         "pass_id": "example-2026-11",
         "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "counter": "calls",
-        "n": true
+        "mode": "scalar",
+        "targets": [
+          {
+            "target": "192.0.2.10:5060/udp",
+            "name": "sip.example.net"
+          },
+          {
+            "target": "[2001:db8::1]:443/tcp",
+            "name": null
+          }
+        ],
+        "charges": [
+          {
+            "counter": "calls",
+            "n": 1
+          }
+        ],
+        "caller_ref": "unit-42",
+        "record_targets": true,
+        "file": "review.pass.toml"
       }
     },
     {
-      "id": "multi-charge-shape",
-      "exit": 0,
-      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"charges\": [{\"counter\": \"calls\", \"n\": 1}, {\"counter\": \"bytes\", \"n\": 100}]}",
-      "action": "stop"
+      "id": "committed-with-witness-error",
+      "exit": 1,
+      "stdout": "{\"command\":\"spend\",\"result\":\"error\",\"error\":{\"recording\":\"recorded\"},\"file\":\"review.pass.toml\"}",
+      "action": "reconcile"
     }
   ]
 }

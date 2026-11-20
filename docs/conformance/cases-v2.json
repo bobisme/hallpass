@@ -1,0 +1,188 @@
+{
+  "version": 2,
+  "expected": {
+    "pass_id": "example-2026-11",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "counter": "calls",
+    "n": 1
+  },
+  "cases": [
+    {
+      "id": "counted",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "proceed"
+    },
+    {
+      "id": "extra-field-and-warning",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [\"moved ledger\"], \"new_field\": 42, \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "proceed",
+      "warnings": [
+        "moved ledger"
+      ]
+    },
+    {
+      "id": "help",
+      "exit": 0,
+      "stdout": "Usage: hallpass",
+      "action": "stop"
+    },
+    {
+      "id": "truncated",
+      "exit": 0,
+      "stdout": "{",
+      "action": "stop"
+    },
+    {
+      "id": "empty",
+      "exit": 0,
+      "stdout": "",
+      "action": "stop"
+    },
+    {
+      "id": "spawn-failure",
+      "exit": null,
+      "stdout": null,
+      "action": "stop"
+    },
+    {
+      "id": "contradictory",
+      "exit": 2,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "permits",
+      "exit": 0,
+      "stdout": "{\"command\": \"permits\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "preview",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"would-allow\", \"test_clock\": false, \"seq\": null, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "test-clock",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": true, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "missing-test-clock",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "missing-sequence",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": null, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "bool-sequence",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": true, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "refusal",
+      "exit": 2,
+      "stdout": "{\"command\": \"spend\", \"result\": \"refused\"}",
+      "action": "stop"
+    },
+    {
+      "id": "error",
+      "exit": 1,
+      "stdout": "{\"command\": \"spend\", \"result\": \"error\"}",
+      "action": "stop"
+    },
+    {
+      "id": "reconcile-recorded",
+      "exit": 1,
+      "stdout": "{\"command\": \"spend\", \"result\": \"error\", \"error\": {\"recording\": \"recorded\"}}",
+      "action": "reconcile"
+    },
+    {
+      "id": "reconcile-uncertain",
+      "exit": 1,
+      "stdout": "{\"command\": \"spend\", \"result\": \"error\", \"error\": {\"recording\": \"uncertain\"}}",
+      "action": "reconcile"
+    },
+    {
+      "id": "wrong-pass_id",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"other-engagement\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "wrong-digest",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "wrong-counter",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"requests\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "wrong-n",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 2}",
+      "action": "stop"
+    },
+    {
+      "id": "bool-amount",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": true}",
+      "action": "stop"
+    },
+    {
+      "id": "float-amount",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1.0}",
+      "action": "stop"
+    },
+    {
+      "id": "string-amount",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": \"1\"}",
+      "action": "stop"
+    },
+    {
+      "id": "missing-identity",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": []}",
+      "action": "stop"
+    },
+    {
+      "id": "missing-digest",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop"
+    },
+    {
+      "id": "invalid-expectation-bool-amount",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"counter\": \"calls\", \"n\": 1}",
+      "action": "stop",
+      "expected": {
+        "pass_id": "example-2026-11",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "counter": "calls",
+        "n": true
+      }
+    },
+    {
+      "id": "multi-charge-shape",
+      "exit": 0,
+      "stdout": "{\"command\": \"spend\", \"result\": \"allowed\", \"test_clock\": false, \"seq\": 1, \"warnings\": [], \"pass_id\": \"example-2026-11\", \"digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"charges\": [{\"counter\": \"calls\", \"n\": 1}, {\"counter\": \"bytes\", \"n\": 100}]}",
+      "action": "stop"
+    }
+  ]
+}

@@ -12,6 +12,46 @@ use sha2::{Digest as _, Sha256};
 use crate::error::Error;
 use crate::pass::Pass;
 
+/// One monotonic budget for the witness and ledger writer locks.
+#[derive(Clone, Copy, Default)]
+pub struct WriterWait(Option<(std::time::Instant, std::time::Duration)>);
+
+impl WriterWait {
+    pub(crate) fn new(limit: Option<std::time::Duration>) -> Self {
+        Self(limit.map(|limit| (std::time::Instant::now(), limit)))
+    }
+
+    pub(crate) fn exclusive(
+        self,
+        file: &File,
+        path: &Path,
+        io_error: impl FnOnce(&std::io::Error) -> Error,
+    ) -> Result<(), Error> {
+        use std::fs::TryLockError;
+        let Some((start, limit)) = self.0 else {
+            return file.lock().map_err(|e| io_error(&e));
+        };
+        loop {
+            if !limit.is_zero() && start.elapsed() >= limit {
+                break;
+            }
+            match file.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(TryLockError::Error(e)) => return Err(io_error(&e)),
+                Err(TryLockError::WouldBlock) => {}
+            }
+            let left = limit.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+        }
+        Err(Error::LockTimeout {
+            path: path.to_owned(),
+        })
+    }
+}
+
 /// The largest pass file hallpass reads (1 MiB).
 pub const MAX_PASS_BYTES: u64 = 1 << 20;
 

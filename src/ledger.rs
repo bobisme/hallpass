@@ -30,7 +30,7 @@ use time::{Duration, OffsetDateTime};
 use crate::address::Target;
 use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
 use crate::error::{Error, MissingLedger};
-use crate::files::{Digest, LoadedPass, load, open_no_follow};
+use crate::files::{Digest, LoadedPass, WriterWait, load, open_no_follow};
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
 use crate::request::decide_targets;
@@ -107,6 +107,9 @@ pub struct SpendRequest<'a> {
     /// the work this spend pays for may take. Zero means "right now"; a
     /// negative duration is a usage error.
     pub needed: Duration,
+    /// Maximum total wait for the writer locks on a real spend. Zero asks once
+    /// per lock; None waits indefinitely. This excludes post-lock I/O.
+    pub lock_timeout: Option<std::time::Duration>,
     /// What is about to be touched. When set, the spend is also refused,
     /// and nothing is recorded, unless the pass permits this target now
     /// (as [`crate::Pass::permits_named`] decides, with `name` and
@@ -132,6 +135,7 @@ impl<'a> SpendRequest<'a> {
             note: None,
             expect_digest: None,
             needed: Duration::ZERO,
+            lock_timeout: None,
             target: None,
             name: None,
             additional_targets: &[],
@@ -1151,9 +1155,11 @@ fn lock_for_writing(
     state: &StateDir,
     adopting: bool,
     guard: Option<&str>,
+    lock_timeout: Option<std::time::Duration>,
 ) -> Result<Locked, Error> {
     let id = load(pass_path)?.pass.id;
-    let witness_lock = state.lock(&id)?;
+    let wait = WriterWait::new(lock_timeout);
+    let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
     if let Some(expected) = guard {
         let current = preview_adopt(pass_path, state)
@@ -1193,7 +1199,7 @@ fn lock_for_writing(
     }
     let file = open_no_follow(&path, OpenOptions::new().read(true).append(true))?;
     check_private(&path, &file)?;
-    file.lock().map_err(|e| Error::io(&path, &e))?;
+    wait.exclusive(&file, &path, |e| Error::io(&path, e))?;
 
     // Everything below holds both locks. The pass is read again: what counts
     // is the pass as it is now, not as it was a moment ago.
@@ -1361,7 +1367,7 @@ pub fn spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
-    let mut locked = lock_for_writing(pass_path, state, false, None)?;
+    let mut locked = lock_for_writing(pass_path, state, false, None, request.lock_timeout)?;
     let id = locked.loaded.pass.id.clone();
     let (here, warnings) = prepare_witness(pass_path, &locked, state)?;
     let now = clock();
@@ -1500,6 +1506,11 @@ pub fn preview_spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
+    if request.lock_timeout.is_some() {
+        return Err(Error::Usage(
+            "a lock timeout applies only to a committing spend".into(),
+        ));
+    }
     let (loaded, mut view) = preview_snapshot(path, state)?;
     let now = clock();
     check_clock(now)?;
@@ -1809,7 +1820,7 @@ pub fn adopt_guarded(
 ) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
-    let mut locked = lock_for_writing(pass_path, state, true, token)?;
+    let mut locked = lock_for_writing(pass_path, state, true, token, None)?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
     let case = if locked.created {
@@ -2103,7 +2114,7 @@ mod tests {
         let id = &loaded.pass.id;
         let ledger = ledger_path(&path);
         let witness_path = state.witness_path(id).expect("witness");
-        let fixture_lock = state.lock(id).expect("fixture witness lock");
+        let fixture_lock = state.lock(id, WriterWait::default()).expect("lock");
         let mut witness = Witnessed {
             ledger: ledger_identity(&ledger),
             seq: 1,
