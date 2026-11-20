@@ -1435,6 +1435,46 @@ fn usage_errors_exit_one() {
     assert_eq!(code(&run(&["--help"], None)), 0);
 }
 
+#[test]
+fn usage_errors_are_json_when_json_was_asked_for() {
+    // A caller that reads JSON gets one object for a command line that
+    // could not be read too, never empty output.
+    let case = Case::new();
+    let file = case.pass("p.toml", PASS);
+    for args in [
+        vec!["frobnicate"],
+        vec!["spend"],
+        vec!["permits", s(&file)],
+        vec!["spend", s(&file), "calls", "--n", "many"],
+        vec!["spend", s(&file), "calls", "--name", "app.example.com"],
+        vec![
+            "permits",
+            s(&file),
+            "--to",
+            "192.0.2.10:5060/udp",
+            "--to",
+            "192.0.2.10:5060/udp",
+        ],
+    ] {
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(rc, 1, "{args:?}: {out}");
+        assert_eq!(out["result"], "error", "{args:?}");
+        assert_eq!(out["error"]["code"], "usage", "{args:?}");
+        assert_ne!(out["error"]["message"], "", "{args:?}");
+        assert_eq!(out["warnings"], serde_json::json!([]));
+    }
+    // The other spelling of the option, and the text on standard error.
+    let output = run(&["--format=json", "spend"], None);
+    assert_eq!(code(&output), 1);
+    let out: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(out["error"]["code"], "usage");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    // Text mode prints nothing on standard output.
+    let output = run(&["spend"], None);
+    assert_eq!(output.stdout, b"");
+    assert!(!case.path("p.toml.ledger").exists());
+}
+
 // ---- names -------------------------------------------------------------
 
 const NAMED: &str = r#"

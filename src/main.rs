@@ -1001,12 +1001,48 @@ fn run(cli: &Cli) -> Output {
     }
 }
 
+/// Whether the raw command line asks for JSON (`--format json` or
+/// `--format=json` before any `--`). Used only when the command line could
+/// not be parsed.
+fn asked_for_json() -> bool {
+    let args: Vec<_> = std::env::args_os()
+        .skip(1)
+        .take_while(|a| a != "--")
+        .collect();
+    args.iter().any(|a| a == "--format=json")
+        || args
+            .windows(2)
+            .any(|pair| pair[0] == "--format" && pair[1] == "json")
+}
+
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
+            // Help and version are not errors; anything else is exit 1
+            // (never clap's 2, which means "refused by the pass" here).
             let code = if e.use_stderr() { ERROR } else { OK };
             let _ = e.print();
+            if code == ERROR && asked_for_json() {
+                // The command line could not be read, so `--format json`
+                // was not parsed either: honour it by hand, so a caller
+                // that reads JSON always gets one object.
+                println!(
+                    "{}",
+                    json!({
+                        "command": Value::Null,
+                        "result": "error",
+                        "file": Value::Null,
+                        "error": {
+                            "code": "usage",
+                            "message": e.render().to_string().trim_end(),
+                            "line": Value::Null,
+                        },
+                        "problems": [],
+                        "warnings": [],
+                    })
+                );
+            }
             return ExitCode::from(code);
         }
     };
