@@ -98,19 +98,53 @@ pub fn open_no_follow(path: &Path, options: &OpenOptions) -> Result<File, Error>
     Ok(file)
 }
 
+pub fn writable_directory(path: &Path) -> Result<(), Error> {
+    use rustix::fs::{Access, AtFlags, CWD, accessat};
+    if !path.is_dir() {
+        return Err(Error::io(
+            path,
+            &std::io::Error::other("expected a directory"),
+        ));
+    }
+    accessat(
+        CWD,
+        path,
+        Access::WRITE_OK | Access::EXEC_OK,
+        AtFlags::EACCESS,
+    )
+    .map_err(|e| Error::io(path, &std::io::Error::from(e)))
+}
+
+fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> Result<(), Error> {
+    if owner != effective && owner != 0 {
+        return Err(Error::UntrustedOwner {
+            path: path.to_owned(),
+            owner,
+            effective,
+        });
+    }
+    if mode & 0o022 != 0 {
+        return Err(Error::Insecure {
+            path: path.to_path_buf(),
+            mode: mode & 0o7777,
+            who: "other users can change the approval",
+            fix: "600",
+        });
+    }
+    Ok(())
+}
+
 /// Read a pass file: not a link, a regular file, not writable by others,
 /// at most [`MAX_PASS_BYTES`].
 pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
-    if meta.mode() & 0o022 != 0 {
-        return Err(Error::Insecure {
-            path: path.to_path_buf(),
-            mode: meta.mode() & 0o7777,
-            who: "other users can change the approval",
-            fix: "600",
-        });
-    }
+    check_pass_owner_mode(
+        path,
+        meta.uid(),
+        rustix::process::geteuid().as_raw(),
+        meta.mode(),
+    )?;
     let mut bytes = Vec::new();
     file.take(MAX_PASS_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -166,5 +200,29 @@ mod tests {
         assert_eq!(d.to_string().parse::<Digest>(), Ok(d));
         assert!("sha256:BA7816".parse::<Digest>().is_err());
         assert!("md5:00".parse::<Digest>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod ownership {
+    use super::*;
+    #[test]
+    fn owner_and_mode_are_independent_requirements() {
+        let p = Path::new("example");
+        for owner in [0, 1001] {
+            for mode in [0o600, 0o644] {
+                assert!(check_pass_owner_mode(p, owner, 1001, mode).is_ok());
+            }
+            for mode in [0o620, 0o602] {
+                assert!(matches!(
+                    check_pass_owner_mode(p, owner, 1001, mode),
+                    Err(Error::Insecure { .. })
+                ));
+            }
+        }
+        assert!(matches!(
+            check_pass_owner_mode(p, 1002, 1001, 0o644),
+            Err(Error::UntrustedOwner { .. })
+        ));
     }
 }

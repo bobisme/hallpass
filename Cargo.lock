@@ -280,10 +280,11 @@ dependencies = [
 
 [[package]]
 name = "hallpass"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

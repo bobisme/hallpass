@@ -6,7 +6,9 @@ use crate::pass::Problem;
 
 /// Something went wrong that is not a policy refusal: a file could not be
 /// read, a pass is invalid, a ledger is damaged. Every variant fails
-/// closed: nothing is permitted and nothing is recorded.
+/// closed.
+///
+/// An append error may leave a debit; a witness update error after sync identifies a durable debit.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -59,6 +61,13 @@ pub enum Error {
         who: &'static str,
         /// The mode to set.
         fix: &'static str,
+    },
+    /// A mutable approval must be controlled by the caller or system administrator.
+    #[error("{} is owned by UID {owner}; use an approval owned by effective UID {effective} or root after verifying its content", path.display())]
+    UntrustedOwner {
+        path: PathBuf,
+        owner: u32,
+        effective: u32,
     },
     /// The pass does not validate.
     #[error("{} is not a valid pass ({} problem(s)); fix each one, then run `hallpass check`", path.display(), problems.len())]
@@ -142,6 +151,13 @@ pub enum Error {
         /// What went wrong.
         detail: String,
     },
+    /// Append or sync failed. Reconcile the ledger before another attempt.
+    #[error("could not confirm the {event} in {} ({detail}); inspect the ledger before continuing", path.display())]
+    AppendUncertain {
+        path: PathBuf,
+        event: String,
+        detail: String,
+    },
     /// The file already exists (`init` never overwrites).
     #[error("{} already exists; hallpass init never overwrites. Choose another path", path.display())]
     Exists {
@@ -159,11 +175,13 @@ impl Error {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::Io { .. } => "io",
+            Self::AppendUncertain { .. } => "ledger-append-uncertain",
             Self::Symlink { .. } => "symlink",
             Self::NotRegular { .. } => "not-regular-file",
             Self::TooLarge { .. } => "too-large",
             Self::Insecure { .. } => "insecure-permissions",
             Self::Invalid { .. } => "invalid-pass",
+            Self::UntrustedOwner { .. } => "untrusted-owner",
             Self::LedgerCorrupt { .. } => "ledger-corrupt",
             Self::LedgerForeign { .. } => "ledger-foreign",
             Self::LedgerMissing(_) => "ledger-missing",

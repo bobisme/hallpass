@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
-    Decision, Digest, Error, HostName, LoadedPass, Pass, Problem, Refusal, SpendRequest, StateDir,
-    Target, WindowState, span, stamp,
+    Digest, Error, LoadedPass, NamedTarget, Pass, Problem, Refusal, SpendRequest, StateDir,
+    WindowState, span, stamp,
 };
 use serde_json::{Value, json};
 
@@ -63,8 +63,11 @@ enum Command {
         /// The pass file.
         file: PathBuf,
         /// `ADDRESS:PORT/PROTOCOL`, for example `192.0.2.10:5060/udp` or `[2001:db8::1]:443/tcp`.
-        #[arg(long, value_name = "ADDR:PORT/PROTO")]
-        to: String,
+        #[arg(long, required = true, value_name = "ADDR:PORT/PROTO[@NAME]")]
+        to: Vec<String>,
+        /// Require this exact pass revision.
+        #[arg(long)]
+        digest: Option<String>,
         /// The host name the request will carry (TLS server name, `Host` header). Needed when the destination lists `names`; it never grants anything.
         #[arg(long, value_name = "HOSTNAME")]
         name: Option<String>,
@@ -87,7 +90,10 @@ enum Command {
         amount: u64,
         /// What the spend pays for: `ADDRESS:PORT/PROTOCOL`. Refuse, and record nothing, unless the pass permits it now. Without it only the window and the ceiling are checked.
         #[arg(long, value_name = "ADDR:PORT/PROTO")]
-        to: Option<String>,
+        to: Vec<String>,
+        /// Preview this request without recording a debit.
+        #[arg(long)]
+        dry_run: bool,
         /// The host name the request will carry, as for `permits --name`. Only with --to.
         #[arg(long, value_name = "HOSTNAME", requires = "to")]
         name: Option<String>,
@@ -207,7 +213,10 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         Error::WitnessNotUpdated { .. } => {
             "Nothing was permitted. The spend was recorded and counts against the ceiling.\n"
         }
-        _ => "Nothing was permitted and nothing was recorded.\n",
+        Error::AppendUncertain { .. } => {
+            "Do not proceed or retry automatically. Inspect the ledger.\n"
+        }
+        _ => "Nothing was permitted.\n",
     });
     Output {
         code: ERROR,
@@ -217,6 +226,9 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
             "file": file.map(|f| f.display().to_string()),
             "error": {
                 "code": error.code(),
+                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), _=>None },
+                "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
+                "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
                 "message": error.to_string(),
                 "line": match error {
                     Error::LedgerCorrupt { line, .. } => Some(*line),
@@ -349,7 +361,7 @@ fn status_text(
                     "  [only as: {}]",
                     d.names
                         .iter()
-                        .map(HostName::as_str)
+                        .map(hallpass::HostName::as_str)
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -415,7 +427,7 @@ fn status(file: &Path, clock: &Clock) -> Output {
                 "ports": d.ports.ranges().iter().map(|(s, e)| json!({"start": s, "end": e})).collect::<Vec<_>>(),
                 "ports_text": d.ports.to_string(),
                 "hostname": d.hostname,
-                "names": d.names.iter().map(HostName::as_str).collect::<Vec<_>>(),
+                "names": d.names.iter().map(hallpass::HostName::as_str).collect::<Vec<_>>(),
                 "whole_network_approved": d.whole_network_approved,
             })
         })
@@ -470,86 +482,96 @@ fn status(file: &Path, clock: &Clock) -> Output {
     }
 }
 
-fn permits(file: &Path, to: &str, name: Option<&str>, duration: u32, clock: &Clock) -> Output {
-    let target: Target = match to.parse() {
-        Ok(t) => t,
-        Err(message) => {
-            return error_output(
-                "permits",
-                Some(file),
-                &Error::Usage(format!("--to: {message}")),
-            );
+fn parse_targets(values: &[String], name: Option<&str>) -> Result<Vec<NamedTarget>, Error> {
+    if values.len() > hallpass::MAX_TARGETS {
+        return Err(Error::Usage(format!(
+            "at most {} targets can be checked per question",
+            hallpass::MAX_TARGETS
+        )));
+    }
+    let mut targets = values
+        .iter()
+        .map(|v| {
+            v.parse::<NamedTarget>()
+                .map_err(|e| Error::Usage(format!("--to: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(name) = name {
+        let [target] = targets.as_mut_slice() else {
+            return Err(Error::Usage("--name requires exactly one --to; use --to ADDRESS:PORT/PROTO@NAME for per-target names".into()));
+        };
+        if target.name.is_some() {
+            return Err(Error::Usage("supply the name once per target".into()));
         }
+        target.name = Some(name.parse().map_err(Error::Usage)?);
+    }
+    Ok(targets)
+}
+
+fn targets_json(targets: &[NamedTarget], labels: &[String]) -> Value {
+    json!(targets.iter().enumerate().map(|(i,t)|json!({"target": t.target.to_string(),"name": t.name.as_ref().map(hallpass::HostName::as_str),"label":labels.get(i)})).collect::<Vec<_>>())
+}
+
+fn permits(
+    file: &Path,
+    to: &[String],
+    name: Option<&str>,
+    digest: Option<&str>,
+    duration: u32,
+    clock: &Clock,
+) -> Output {
+    let call = || {
+        let targets = parse_targets(to, name)?;
+        let expected = digest
+            .map(str::parse::<Digest>)
+            .transpose()
+            .map_err(Error::Usage)?;
+        let result = hallpass::permits_in(
+            file,
+            &targets,
+            expected,
+            clock.now,
+            Duration::seconds(i64::from(duration)),
+            &StateDir::from_env(),
+        )?;
+        Ok::<_, Error>((targets, result))
     };
-    let name: Option<HostName> = match name.map(str::parse).transpose() {
-        Ok(n) => n,
-        Err(message) => {
-            return error_output(
-                "permits",
-                Some(file),
-                &Error::Usage(format!("--name: {message}")),
-            );
-        }
-    };
-    let loaded: LoadedPass = match hallpass::load(file) {
-        Ok(l) => l,
+    let (targets, outcome) = match call() {
+        Ok(value) => value,
         Err(e) => return error_output("permits", Some(file), &e),
     };
-    // The ledger and its witness are checked too: a lost or changed record
-    // fails closed here as everywhere else.
-    let view = match hallpass::read_ledger(&loaded, &StateDir::from_env()) {
-        Ok(v) => v,
-        Err(e) => return error_output("permits", Some(file), &e),
-    };
-    let pass = &loaded.pass;
-    let decision = pass.permits_named(
-        &target,
-        name.as_ref(),
-        clock.now,
-        Duration::seconds(i64::from(duration)),
-    );
-    let asked = name
-        .as_ref()
-        .map_or_else(|| target.to_string(), |n| format!("{target} as {n}"));
-    let state = pass.window_at(clock.now);
-    let (code, result, label, refusal, text) = match &decision {
-        Decision::Allowed { label } => (
-            OK,
-            "allowed",
-            Some(label.clone()),
-            None,
+    let first = &targets[0];
+    let asked = targets
+        .iter()
+        .map(|t| {
+            t.name
+                .as_ref()
+                .map_or_else(|| t.target.to_string(), |n| format!("{} as {n}", t.target))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let loaded = outcome.loaded;
+    let state = loaded.pass.window_at(clock.now);
+    let labels = outcome.decision.as_deref().unwrap_or(&[]);
+    let refused = outcome.decision.as_ref().err();
+    let text = refused.map_or_else(
+        || {
             format!(
-                "ALLOWED: {asked} by destination {label} of pass {} (window: {})\n",
-                pass.id,
-                window_text(pass, &state)
-            ),
-        ),
-        Decision::Refused(r) => (
-            REFUSED,
-            "refused",
-            None,
-            Some(refusal_json(r)),
-            format!("REFUSED: {asked}: {}.\n", safe(&r.message)),
-        ),
-    };
+                "ALLOWED: {asked} by destination {} of pass {} (window: {})\n",
+                labels.join(", "),
+                loaded.pass.id,
+                window_text(&loaded.pass, &state)
+            )
+        },
+        |r| format!("REFUSED: {asked}: {}.\n", safe(&r.reason.message)),
+    );
     Output {
-        code,
-        json: json!({
-            "command": "permits",
-            "result": result,
-            "file": file.display().to_string(),
-            "digest": loaded.digest.to_string(),
-            "pass_id": pass.id,
-            "now": stamp(clock.now),
-            "test_clock": clock.test,
-            "target": target.to_string(),
-            "name": name.as_ref().map(HostName::as_str),
-            "label": label,
-            "refusal": refusal,
-            "window": window_json(pass, &state),
-            "warnings": view.warnings,
-        }),
+        code: if refused.is_some() { REFUSED } else { OK },
         text,
+        json: json!({
+            "command":"permits","result":if refused.is_some(){"refused"}else{"allowed"},"file":file.display().to_string(),"digest":loaded.digest.to_string(),"pass_id":loaded.pass.id,
+            "now":stamp(clock.now),"test_clock":clock.test,"target":first.target.to_string(),"name":first.name.as_ref().map(hallpass::HostName::as_str),"label":labels.first(),"refusal":refused.map(|r|refusal_json(&r.reason)),"refused_target":refused.and_then(|r|r.index),"targets":targets_json(&targets,labels),"window":window_json(&loaded.pass,&state),"warnings":outcome.warnings
+        }),
     }
 }
 
@@ -557,7 +579,8 @@ struct SpendArgs<'a> {
     file: &'a Path,
     counter: &'a str,
     amount: u64,
-    to: Option<&'a str>,
+    to: &'a [String],
+    dry_run: bool,
     name: Option<&'a str>,
     note: Option<&'a str>,
     digest: Option<&'a str>,
@@ -576,33 +599,33 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             );
         }
     };
-    let target: Option<Target> = match args.to.map(str::parse).transpose() {
-        Ok(t) => t,
-        Err(message) => {
-            return error_output(
-                "spend",
-                Some(file),
-                &Error::Usage(format!("--to: {message}")),
-            );
-        }
+    let targets = match parse_targets(args.to, args.name) {
+        Ok(ts) => ts,
+        Err(e) => return error_output("spend", Some(file), &e),
     };
-    let name: Option<HostName> = match args.name.map(str::parse).transpose() {
-        Ok(n) => n,
-        Err(message) => {
-            return error_output(
-                "spend",
-                Some(file),
-                &Error::Usage(format!("--name: {message}")),
-            );
-        }
-    };
+    let first = targets.first();
+    let target = first.map(|t| t.target);
+    let name = first.and_then(|t| t.name.as_ref());
     let mut request = SpendRequest::new(args.counter, args.amount);
     request.note = args.note;
     request.expect_digest = expect_digest;
     request.needed = Duration::seconds(i64::from(args.duration));
     request.target = target;
-    request.name = name.as_ref();
-    let outcome = match hallpass::spend(file, &request, clock.now) {
+    request.name = name;
+    request.additional_targets = targets.get(1..).unwrap_or_default();
+    let state = StateDir::from_env();
+    let answer = if args.dry_run {
+        hallpass::preview_spend_in(file, &request, clock.now, &state)
+    } else {
+        hallpass::spend_with_clock_in(file, &request, &state, || {
+            if clock.test {
+                clock.now
+            } else {
+                OffsetDateTime::now_utc()
+            }
+        })
+    };
+    let outcome = match answer {
         Ok(o) => o,
         Err(e) => return error_output("spend", Some(file), &e),
     };
@@ -623,6 +646,10 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             outcome.spent,
             remaining.unwrap_or(0)
         ),
+        (None, Some(_), None) if args.dry_run => format!(
+            "WOULD ALLOW: {} {}; no debit recorded.\n",
+            outcome.amount, outcome.counter
+        ),
         (Some(r), _, _) => format!("REFUSED: {}.\n", safe(&r.message)),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
@@ -634,12 +661,15 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
         },
         json: json!({
             "command": "spend",
-            "result": if outcome.refusal.is_some() { "refused" } else { "allowed" },
+            "result": if outcome.refusal.is_some() { "refused" } else if args.dry_run {"would-allow"} else { "allowed" },
             "file": file.display().to_string(),
             "digest": outcome.digest.to_string(),
             "pass_id": outcome.pass_id,
-            "now": stamp(clock.now),
+            "now": stamp(outcome.now),
             "test_clock": clock.test,
+            "projected_spent": if args.dry_run && outcome.refusal.is_none(){ Some(outcome.spent+outcome.amount) }else{None},
+            "refused_target":outcome.refused_target,
+            "targets":targets_json(&targets,&outcome.labels),
             "counter": outcome.counter,
             "n": outcome.amount,
             "total": outcome.total,
@@ -648,7 +678,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "seq": outcome.seq,
             "note": args.note,
             "target": target.map(|t| t.to_string()),
-            "name": name.as_ref().map(HostName::as_str),
+            "name": name.map(hallpass::HostName::as_str),
             "label": outcome.label,
             "refusal": outcome.refusal.as_ref().map(refusal_json),
             "warnings": outcome.warnings,
@@ -972,7 +1002,15 @@ fn run(cli: &Cli) -> Output {
             to,
             name,
             duration,
-        } => permits(file, to, name.as_deref(), *duration, &clock),
+            digest,
+        } => permits(
+            file,
+            to,
+            name.as_deref(),
+            digest.as_deref(),
+            *duration,
+            &clock,
+        ),
         Command::Spend {
             file,
             counter,
@@ -982,12 +1020,14 @@ fn run(cli: &Cli) -> Output {
             note,
             digest,
             duration,
+            dry_run,
         } => spend(
             &SpendArgs {
                 file,
                 counter,
                 amount: *amount,
-                to: to.as_deref(),
+                to,
+                dry_run: *dry_run,
                 name: name.as_deref(),
                 note: note.as_deref(),
                 digest: digest.as_deref(),

@@ -1,6 +1,6 @@
 [package]
 name = "hallpass"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A written permission slip for authorized testing: who approved what, to which literal addresses, until when, and how much"
@@ -30,6 +30,7 @@ path = "tests/integrating.rs"
 required-features = ["cli"]
 
 [dependencies]
+rustix = { version = "1", features = ["process", "fs"] }
 # Only the command-line tool needs clap; library users can turn it off with
 # `default-features = false`.
 clap = { version = "4.6.8", features = ["derive"], optional = true }

@@ -364,7 +364,12 @@ No locking crate: the standard library has file locks.
 - **Locks are advisory and local.** `flock` does not work reliably on some
   network file systems. Keep the pass on a local disk.
 - **The window uses the caller's clock.** Changing the system clock moves
-  the window. Keep NTP on.
+  the window. CLI spends sample time after acquiring the writer locks. A
+  decision instant strictly earlier than the most recent ledger event
+  produces a warning, including a difference of one nanosecond. Equal times
+  are valid. A historical advanced clock cannot indefinitely block legitimate
+  spending. Correct the system clock and review the timestamp and totals;
+  the ledger stays intact. Explicit-time Rust callers control their instant.
 - **Parent directories are not checked for links**; only the pass and
   ledger file names themselves, and the state directory itself.
 - **Broadcast addresses of the owner's real network**: hallpass refuses
@@ -376,3 +381,14 @@ No locking crate: the standard library has file locks.
   not refused; see "Addresses".
 - **Revocation reaches a tool only when it asks.** A long step that is
   already running is not interrupted. Tools should ask before each step.
+
+## Ownership of the pass
+
+The effective user and UID 0 may own the pass. This supports both a private
+operator copy and a centrally provisioned, root-owned approval. An arbitrary
+peer's 0644 file remains mutable by that peer, so loading it returns
+`untrusted-owner` with both UIDs. Group/other write bits are rejected for
+either trusted owner. UID and mode are checked on the opened file.
+Read-only permission checks report unavailable witness evidence as a warning
+because they answer a scope question. A counted operation and its preview
+require usable witness evidence.

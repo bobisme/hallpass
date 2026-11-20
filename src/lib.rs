@@ -54,6 +54,8 @@ mod literal;
 mod name;
 mod pass;
 mod ports;
+mod request;
+pub use request::{MAX_TARGETS, NamedTarget, PermitOutcome, TargetRefusal, permits_in};
 mod template;
 mod witness;
 
@@ -66,8 +68,8 @@ pub use error::{Error, MissingLedger};
 pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load};
 pub use ledger::{
     AdoptCase, AdoptOutcome, Adoption, LedgerEntry, LedgerView, MAX_NOTE, SpendOutcome,
-    SpendRequest, Tally, WitnessStatus, adopt, display_safe, ledger_path, read_ledger, spend,
-    spend_in, tally,
+    SpendRequest, Tally, WitnessStatus, adopt, display_safe, ledger_path, preview_spend_in,
+    read_ledger, spend, spend_in, spend_with_clock_in, tally,
 };
 pub use name::{HostName, MAX_NAMES};
 pub use pass::{

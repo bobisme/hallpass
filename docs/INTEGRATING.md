@@ -170,6 +170,36 @@ exit 0
   warning and `"witness": "not-checked"`. Only a `spend` is the permission
   to send a counted unit.
 
+## Preflight and follow-up checks
+
+Use `spend --dry-run` with the same arguments as the counted operation. Its
+positive result is `would-allow`, with the current balance, a projected
+spent value and a null sequence. Another process may consume the balance
+immediately. Only a subsequent recorded spend permits the counted operation.
+Use `permits --digest DIGEST` for later uncounted destinations in the same
+unit so a pass edit requires fresh review.
+
+To check several known destinations together, repeat `--to` up to 64 times.
+Attach a name to its endpoint as `--to 192.0.2.10:443/tcp@app.example.org`.
+The separate `--name` form takes exactly one target. One refused target
+refuses the whole unit and `refused_target` gives its one-based position.
+The Rust path is `permits_in` with an ordered slice of `NamedTarget` values.
+
+A spend error with `error.recording = "recorded"` identifies a durable debit
+by `error.ledger` and `error.seq`. With `"uncertain"`, the append or sync
+failed. Stop and inspect the ledger before deciding whether another spend is
+appropriate. Never automatically retry either outcome.
+
+### Test a subprocess wrapper
+
+Run `python3 docs/conformance/check.py` from the checkout. The reference
+decoder exercises a callback spy over a versioned JSON corpus. To test your
+own wrapper, feed each case's exit status and raw stdout to its normal
+decoder and compare the action, callback count and warnings. A null exit
+denotes launch failure. Both stop and reconcile must invoke zero callbacks.
+The integration suite also supplies real CLI output acquired with the
+production clock. [Fixtures](conformance/cases.json) · [Reference decoder](conformance/check.py)
+
 ## The library
 
 For Rust callers the same decision is `hallpass::spend` with
@@ -196,7 +226,9 @@ fn may_send_one_call(
     request.target = Some(target);
     request.needed = longest_call;
     request.expect_digest = Some(confirmed);
-    let outcome = hallpass::spend(pass_file, &request, OffsetDateTime::now_utc())?;
+    let outcome = hallpass::spend_with_clock_in(
+        pass_file, &request, &hallpass::StateDir::from_env(), OffsetDateTime::now_utc,
+    )?;
     for warning in &outcome.warnings {
         eprintln!("hallpass: {warning}");
     }
@@ -255,7 +287,7 @@ the file again.
   hallpass checks that it is complete and unambiguous, not that the owner
   agreed.
 - **A correct clock.** The window is checked against the caller's clock. A
-  clock set back is not noticed.
+  spend warns if the decision instant precedes the most recent entry. An incorrect clock can still make the window appear open.
 - **Protection from the operator's own account.** The ledger and the
   witness belong to the same user; someone who deletes both starts from
   zero. The witness catches accidents (a copied pass, a cleaned directory,
@@ -267,9 +299,7 @@ the file again.
   the ledger holds counter, amount, time, pass digest and the note, not the
   target. Put your own run reference in `--note` and keep the returned
   `seq`.
-- **Time spent waiting.** The decision is for the instant the command
-  started. A spend that waits long for the lock is still decided for that
-  instant; `--duration` must cover it.
+- **Time after the decision.** The CLI samples its spend clock under the writer locks. Time between return and the end of work must still fit the approved window. Rust callers using explicit-time `spend_in` supply their own decision instant.
 
 ## Not offered yet
 
@@ -277,8 +307,6 @@ These are needs of known callers that hallpass does not meet; each is a
 bone in this repository (`bn list`):
 
 - giving back a spend whose traffic never left (reserve, then release);
-- a dry run of `spend` that decides and records nothing;
 - practice passes whose id is reused in many directories;
-- several `--to` in one question;
 - the target and a caller reference in the ledger entry;
 - a limit on the total breadth of all destinations together.

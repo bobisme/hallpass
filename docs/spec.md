@@ -312,7 +312,7 @@ call hallpass: [INTEGRATING.md](INTEGRATING.md).
 | `check` | the pass validates | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
 | `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
-| `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | any error, nothing recorded |
+| `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
 | `adopt` | adoption recorded | never | invalid pass, damaged ledger, nothing to adopt, missing reason, unusable state directory |
@@ -476,3 +476,37 @@ pass is revoked. [DESIGN.md](DESIGN.md) explains each.
   using the library per request.
 - **Protocols beyond tcp and udp**, and link-local destinations with an
   interface field: would need a new format version; not planned in detail.
+
+
+### Caller decision contract (0.2)
+
+Use `hallpass --version` for the binary version. Readers should accept extra
+JSON fields. Stable refusal/error codes and on-disk format versions are
+separate contracts. The CLI uses the clock after acquiring writer locks for
+spends. An instant earlier than the last ledger event produces a warning.
+
+The optional `permits --digest` precondition uses the byte digest and gives
+exit 2 / `pass-changed` on a mismatch after ledger verification. For permits
+and spend, repeat `--to ADDR:PORT/PROTO[@NAME]` up to 64 times. IPv6 uses
+brackets. A separate `--name` requires exactly one target without a suffix.
+All targets use one loaded pass. `targets` preserves input order and
+`refused_target` is a one-based index or null. Existing scalar target and
+label fields describe the first endpoint.
+
+`spend --dry-run` returns 0 / `would-allow`, 2 / `refused` or 1 / `error`.
+It reads a snapshot, checks observable write access and leaves the ledger
+and witness untouched. A positive preview has a null sequence, current spent
+and remaining amounts, and `projected_spent`. Concurrent changes and later
+filesystem failures can change the result of the real spend.
+
+| State evidence | permits | status / ledger | spend and spend preview |
+|---|---|---|---|
+| Fresh pass, no previous spend | evaluate policy | report fresh | evaluate policy |
+| Ledger without a witness | evaluate with warning | report missing witness | evaluate; only a real spend can establish the witness |
+| Unusable witness state | evaluate with warning | report not-checked | error |
+| Missing or divergent witnessed history | error | error | error |
+
+After `witness-not-updated`, `error.recording` is `recorded` and the JSON
+error contains `seq` and `ledger`. A `ledger-append-uncertain` error includes
+the ledger path and `recording = "uncertain"`. Both exit 1. Inspect the
+ledger and reconcile before retrying.

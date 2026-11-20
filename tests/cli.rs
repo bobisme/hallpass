@@ -1454,6 +1454,8 @@ fn usage_errors_are_json_when_json_was_asked_for() {
             "192.0.2.10:5060/udp",
             "--to",
             "192.0.2.10:5060/udp",
+            "--name",
+            "ambiguous.example",
         ],
     ] {
         let (rc, out) = json(&args, Some(NOW));
@@ -1609,4 +1611,176 @@ fn check_refuses_a_bad_names_list() {
     let (rc, out) = json(&["check", s(&file)], None);
     assert_eq!(rc, 1, "{out}");
     assert_eq!(out["problems"][0]["field"], "destination[3].names[1]");
+}
+
+#[test]
+fn a_planned_unit_then_a_pinned_followup_uses_one_debit() {
+    let case = Case::new();
+    let pass = case.pass(
+        "unit.toml",
+        &PASS.replace("ports = 443", "ports = 443\nnames = [\"edge.example\"]"),
+    );
+    let file = s(&pass);
+    let a = "192.0.2.10:5060/udp";
+    let b = "[2001:db8::1]:443/tcp@edge.example";
+    let pin = json(&["digest", file], None).1["digest"]
+        .as_str()
+        .expect("pin")
+        .to_owned();
+    let mut args = vec![
+        "spend",
+        "--to",
+        a,
+        "--to",
+        b,
+        "--digest",
+        &pin,
+        "--dry-run",
+        "--",
+        file,
+        "calls",
+    ];
+    let (rc, preview) = json(&args, Some(NOW));
+    assert_eq!(rc, 0, "{preview}");
+    assert_eq!(preview["result"], "would-allow");
+    assert_eq!(preview["projected_spent"], 1);
+    assert!(preview["seq"].is_null());
+    assert!(!case.state().exists());
+    assert!(!hallpass::ledger_path(&pass).exists());
+    args.retain(|arg| *arg != "--dry-run");
+    let (rc, debit) = json(&args, Some(NOW));
+    assert_eq!(rc, 0, "{debit}");
+    assert_eq!(debit["seq"], 1);
+    assert_eq!(debit["targets"][1]["label"], "web");
+    let denied = json(
+        &[
+            "spend",
+            "--to",
+            a,
+            "--to",
+            "[2001:db8::1]:443/tcp",
+            "--",
+            file,
+            "calls",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(denied.0, 2);
+    assert_eq!(denied.1["refused_target"], 2);
+    assert_eq!(denied.1["refusal"]["code"], "name-required");
+    assert_eq!(
+        json(
+            &["permits", "--to", b, "--digest", &pin, "--", file],
+            Some(NOW)
+        )
+        .0,
+        0
+    );
+    let mut changed = fs::read_to_string(&pass).expect("read");
+    changed.push_str("\n# revised\n");
+    fs::write(&pass, changed).expect("edit");
+    let (rc, reply) = json(
+        &["permits", "--to", b, "--digest", &pin, "--", file],
+        Some(NOW),
+    );
+    assert_eq!(
+        (rc, reply["refusal"]["code"].as_str()),
+        (2, Some("pass-changed"))
+    );
+    assert_eq!(json(&["permits", "--to", b, "--", file], Some(NOW)).0, 0);
+    assert_eq!(
+        json(&["ledger", file], None).1["entries"]
+            .as_array()
+            .expect("entries")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn preview_uses_current_totals_and_requires_usable_evidence() {
+    let case = Case::new();
+    let pass = case.pass("p.toml", &PASS.replace("calls = 6", "calls = 1"));
+    let file = s(&pass);
+    let preview = ["spend", file, "calls", "--dry-run"];
+    assert_eq!(json(&preview, Some(NOW)).1["result"], "would-allow");
+    assert_eq!(json(&["spend", file, "calls"], Some(NOW)).0, 0);
+    let before = fs::read(hallpass::ledger_path(&pass)).expect("ledger");
+    assert_eq!(
+        json(&preview, Some(NOW)).1["refusal"]["code"],
+        "ceiling-reached"
+    );
+    assert_eq!(
+        fs::read(hallpass::ledger_path(&pass)).expect("ledger"),
+        before
+    );
+    fs::set_permissions(case.state(), fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(
+        json(&preview, Some(NOW)).1["error"]["code"],
+        "witness-unavailable"
+    );
+    fs::set_permissions(case.state(), fs::Permissions::from_mode(0o700)).expect("chmod");
+    fs::remove_file(hallpass::ledger_path(&pass)).expect("fixture removes ledger");
+    for args in [
+        vec!["spend", file, "calls", "--dry-run"],
+        vec!["permits", file, "--to", "192.0.2.10:5060/udp"],
+    ] {
+        assert_eq!(json(&args, Some(NOW)).1["error"]["code"], "ledger-missing");
+    }
+}
+
+#[test]
+fn cli_version_matches_package() {
+    let _case = Case::new();
+    assert_eq!(
+        String::from_utf8(run(&["--version"], None).stdout)
+            .expect("output")
+            .trim(),
+        concat!("hallpass ", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn caller_kit_consumes_genuine_production_decisions() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let case = Case::new();
+    let real = hallpass::time::OffsetDateTime::now_utc();
+    let window = PASS
+        .replace(
+            "2026-11-20T08:00:00Z",
+            &hallpass::stamp(real - hallpass::time::Duration::days(1)),
+        )
+        .replace(
+            "2026-11-20T17:00:00Z",
+            &hallpass::stamp(real + hallpass::time::Duration::days(1)),
+        )
+        .replace("calls = 6", "calls = 1");
+    let p = case.pass("real.pass", &window);
+    let mut samples = Vec::new();
+    for action in ["proceed", "stop"] {
+        let output = run(&["--format", "json", "spend", s(&p), "calls"], None);
+        samples.push(serde_json::json!({"id":"live","exit":code(&output),"stdout":String::from_utf8(output.stdout).expect("utf8"),"action":action}));
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/conformance/check.py");
+    assert!(
+        Command::new("python3")
+            .arg(&script)
+            .status()
+            .expect("run offline client corpus")
+            .success()
+    );
+    let mut reference = Command::new("python3")
+        .arg(script)
+        .arg("--stdin-cases")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("reference");
+    reference
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(serde_json::to_vec(&samples).expect("serialize").as_slice())
+        .expect("pipe genuine results");
+    assert!(reference.wait().expect("reference").success());
 }

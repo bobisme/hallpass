@@ -28,12 +28,14 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
 use crate::address::Target;
-use crate::decision::{Decision, Refusal, RefusalCode, in_utc, stamp};
+use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
 use crate::error::{Error, MissingLedger};
 use crate::files::{Digest, LoadedPass, load, open_no_follow};
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
+use crate::request::decide_targets;
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
+use crate::{MAX_TARGETS, NamedTarget};
 
 /// The ledger format version.
 const LEDGER_VERSION: u32 = 1;
@@ -111,6 +113,8 @@ pub struct SpendRequest<'a> {
     /// [`crate::Pass::permits_named`]). Only with `target`; a name without
     /// a target is a usage error.
     pub name: Option<&'a HostName>,
+    /// Further targets of this unit, checked in the supplied order.
+    pub additional_targets: &'a [NamedTarget],
 }
 
 impl<'a> SpendRequest<'a> {
@@ -126,6 +130,7 @@ impl<'a> SpendRequest<'a> {
             needed: Duration::ZERO,
             target: None,
             name: None,
+            additional_targets: &[],
         }
     }
 }
@@ -134,6 +139,12 @@ impl<'a> SpendRequest<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SpendOutcome {
+    /// Instant used for the decision under the lock.
+    pub now: OffsetDateTime,
+    /// All matched labels in order when allowed.
+    pub labels: Vec<String>,
+    /// One-based index of a target-specific refusal.
+    pub refused_target: Option<usize>,
     /// `None` when recorded; the refusal otherwise. Nothing is recorded on a
     /// refusal.
     pub refusal: Option<Refusal>,
@@ -865,44 +876,15 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
 /// The policy part of a spend: the refusal when it may not be recorded,
 /// otherwise the label of the destination that permits the target (when
 /// the request has one).
-fn decide(
+fn decide_ceiling(
     loaded: &LoadedPass,
     request: &SpendRequest<'_>,
     total: Option<u64>,
     spent: u64,
-    now: OffsetDateTime,
-) -> Result<Option<String>, Refusal> {
+) -> Result<(), Refusal> {
     let refuse = |code, message: String| Refusal {
         code,
         message: format!("{message}. Nothing was recorded"),
-    };
-    if let Some(expected) = request.expect_digest
-        && expected != loaded.digest
-    {
-        return Err(refuse(
-            RefusalCode::PassChanged,
-            format!(
-                "the pass has changed since this run started (expected {expected}, now {}); stop, review the pass, and start again under the new one",
-                loaded.digest
-            ),
-        ));
-    }
-    if let Err(refusal) = loaded.pass.check_window(now, request.needed) {
-        return Err(refuse(refusal.code, refusal.message));
-    }
-    let label = match &request.target {
-        None => None,
-        Some(target) => {
-            match loaded
-                .pass
-                .permits_named(target, request.name, now, request.needed)
-            {
-                Decision::Allowed { label } => Some(label),
-                Decision::Refused(refusal) => {
-                    return Err(refuse(refusal.code, refusal.message));
-                }
-            }
-        }
     };
     let Some(total) = total else {
         let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
@@ -930,7 +912,7 @@ fn decide(
             ),
         ));
     }
-    Ok(label)
+    Ok(())
 }
 
 /// A ledger opened for writing under both locks.
@@ -1027,11 +1009,10 @@ fn append(locked: &mut Locked, line: &str, what: &str) -> Result<(), Error> {
         .file
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|()| locked.file.sync_data())
-        .map_err(|e| Error::Io {
+        .map_err(|e| Error::AppendUncertain {
             path: locked.path.clone(),
-            message: format!(
-                "the {what} could not be written ({e}); treat it as NOT permitted and check the ledger before continuing"
-            ),
+            event: what.to_owned(),
+            detail: e.to_string(),
         })
 }
 
@@ -1082,6 +1063,10 @@ pub fn spend_in(
     state: &StateDir,
 ) -> Result<SpendOutcome, Error> {
     check_clock(now)?;
+    spend_with_clock_in(pass_path, request, state, || now)
+}
+
+fn validate_request(request: &SpendRequest<'_>) -> Result<(), Error> {
     if request.needed.is_negative() {
         return Err(Error::Usage(
             "the duration the work may take is negative; pass zero for \"right now\", or how long the work may take. Nothing was recorded".to_owned(),
@@ -1100,6 +1085,27 @@ pub fn spend_in(
     if let Some(note) = request.note {
         check_new_note(note).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     }
+    if !request.additional_targets.is_empty() && request.target.is_none()
+        || request.additional_targets.len() >= MAX_TARGETS
+    {
+        return Err(Error::Usage(format!(
+            "provide a first target and at most {MAX_TARGETS} targets total"
+        )));
+    }
+    Ok(())
+}
+
+/// Sample the supplied clock after acquiring both writer locks and verifying the ledger.
+///
+/// # Errors
+/// As for [`spend_in`]. A failed append/sync has an uncertain outcome.
+pub fn spend_with_clock_in(
+    pass_path: &Path,
+    request: &SpendRequest<'_>,
+    state: &StateDir,
+    clock: impl FnOnce() -> OffsetDateTime,
+) -> Result<SpendOutcome, Error> {
+    validate_request(request)?;
     let mut locked = lock_for_writing(pass_path, state, false)?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
@@ -1111,6 +1117,8 @@ pub fn spend_in(
         state,
         &id,
     )?;
+    let now = clock();
+    check_clock(now)?;
     let mut warnings = warnings(&status, moved.as_ref(), &id, true);
     if locked.created && status == WitnessStatus::Missing {
         // This call started the ledger: it has no witness because it is
@@ -1129,28 +1137,28 @@ pub fn spend_in(
             },
         )?;
     }
-    let loaded = &locked.loaded;
-    let total = loaded.pass.ceilings.get(request.counter).copied();
-    let spent = locked.parsed.tally.spent(request.counter);
-    let mut outcome = SpendOutcome {
-        refusal: None,
-        counter: request.counter.to_owned(),
-        amount: request.amount,
-        total,
-        spent,
-        seq: None,
-        digest: loaded.digest,
-        pass_id: id.clone(),
-        label: None,
+    let last = locked
+        .parsed
+        .entries
+        .last()
+        .map(|e| (e.seq, e.time))
+        .into_iter()
+        .chain(locked.parsed.adoptions.last().map(|a| (a.seq, a.time)))
+        .max_by_key(|(seq, _)| *seq)
+        .map(|(_, time)| time);
+    let mut outcome = evaluate_spend(
+        &locked.loaded,
+        request,
+        &locked.parsed.tally,
+        now,
         warnings,
-    };
-    match decide(loaded, request, total, spent, now) {
-        Ok(label) => outcome.label = label,
-        Err(refusal) => {
-            outcome.refusal = Some(refusal);
-            return Ok(outcome);
-        }
+        last,
+    );
+    if outcome.refusal.is_some() {
+        return Ok(outcome);
     }
+    let loaded = &locked.loaded;
+    let spent = outcome.spent;
     let entry = Entry {
         seq: locked.parsed.seq + 1,
         time: rfc3339(now),
@@ -1183,6 +1191,107 @@ pub fn spend_in(
     outcome.spent = spent + request.amount;
     outcome.seq = Some(entry.seq);
     Ok(outcome)
+}
+
+fn evaluate_spend(
+    loaded: &LoadedPass,
+    request: &SpendRequest<'_>,
+    tally: &Tally,
+    now: OffsetDateTime,
+    mut warnings: Vec<String>,
+    last_time: Option<OffsetDateTime>,
+) -> SpendOutcome {
+    if let Some(previous) = last_time.filter(|t| now < *t) {
+        warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
+    }
+    let total = loaded.pass.ceilings.get(request.counter).copied();
+    let spent = tally.spent(request.counter);
+    let mut outcome = SpendOutcome {
+        now,
+        labels: Vec::new(),
+        refused_target: None,
+        refusal: None,
+        counter: request.counter.to_owned(),
+        amount: request.amount,
+        total,
+        spent,
+        seq: None,
+        digest: loaded.digest,
+        pass_id: loaded.pass.id.clone(),
+        label: None,
+        warnings,
+    };
+    let targets = request.target.into_iter().map(|t| (t, request.name)).chain(
+        request
+            .additional_targets
+            .iter()
+            .map(|t| (t.target, t.name.as_ref())),
+    );
+    match decide_targets(loaded, targets, request.expect_digest, now, request.needed) {
+        Ok(labels) => match decide_ceiling(loaded, request, total, spent) {
+            Ok(()) => {
+                outcome.label = labels.first().cloned();
+                outcome.labels = labels;
+            }
+            Err(reason) => outcome.refusal = Some(reason),
+        },
+        Err(mut r) => {
+            r.reason.message.push_str(". Nothing was recorded");
+            outcome.refused_target = r.index;
+            outcome.refusal = Some(r.reason);
+        }
+    }
+    outcome
+}
+
+/// Predict the policy decision from a verified read-only snapshot.
+/// The returned spent and remaining values reflect the snapshot, and seq is absent.
+///
+/// # Errors
+/// An unusable witness, invalid request/pass or ledger inconsistency.
+pub fn preview_spend_in(
+    path: &Path,
+    request: &SpendRequest<'_>,
+    now: OffsetDateTime,
+    state: &StateDir,
+) -> Result<SpendOutcome, Error> {
+    validate_request(request)?;
+    check_clock(now)?;
+    let loaded = load(path)?;
+    let view = read_ledger(&loaded, state)?;
+    if let WitnessStatus::NotChecked { reason } = view.witness {
+        return Err(Error::WitnessUnavailable {
+            pass_id: loaded.pass.id,
+            dir: state.path().ok().map(Path::to_path_buf),
+            detail: reason,
+        });
+    }
+    state.preview_write_access(&loaded.pass.id)?;
+    if view.exists {
+        open_no_follow(&view.path, OpenOptions::new().append(true))?;
+    } else {
+        crate::files::writable_directory(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+        )?;
+    }
+    let last = view
+        .entries
+        .last()
+        .map(|e| (e.seq, e.time))
+        .into_iter()
+        .chain(view.adoptions.last().map(|e| (e.seq, e.time)))
+        .max_by_key(|(seq, _)| *seq)
+        .map(|(_, time)| time);
+    Ok(evaluate_spend(
+        &loaded,
+        request,
+        &view.tally,
+        now,
+        view.warnings,
+        last,
+    ))
 }
 
 /// The result of an adoption.
@@ -1343,6 +1452,96 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
         let state = StateDir::new(dir.path().join("state").join("hallpass"));
         (dir, path, state)
+    }
+
+    #[test]
+    fn live_clock_is_sampled_with_writer_locks_held() {
+        let (_dir, path, state) = setup();
+        let req = request("calls", 1);
+        let out = spend_with_clock_in(&path, &req, &state, || {
+            let held = fs::File::open(ledger_path(&path)).expect("created");
+            assert!(matches!(
+                held.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            datetime!(2026-11-20 17:00 UTC)
+        })
+        .expect("decision");
+        assert_eq!(out.refusal.expect("expired").code, RefusalCode::Expired);
+        let mut boundary = req.clone();
+        boundary.needed = Duration::hours(8);
+        assert_eq!(
+            spend_with_clock_in(&path, &boundary, &state, || NOW)
+                .expect("decision")
+                .refusal
+                .expect("duration")
+                .code,
+            RefusalCode::WindowTooShort
+        );
+        let first = spend_with_clock_in(&path, &req, &state, || NOW).expect("spend");
+        assert_eq!((first.seq, first.now), (Some(1), NOW));
+        assert_eq!(
+            read_ledger(&load(&path).expect("pass"), &state)
+                .expect("ledger")
+                .entries[0]
+                .time,
+            NOW
+        );
+    }
+
+    #[test]
+    fn rollback_warns_only_before_the_latest_entry() {
+        let (_dir, path, state) = setup();
+        let req = request("calls", 1);
+        for (time, warn) in [
+            (NOW, false),
+            (NOW, false),
+            (NOW - Duration::nanoseconds(1), true),
+            (NOW, false),
+        ] {
+            let out = spend_in(&path, &req, time, &state).expect("record");
+            assert!(out.seq.is_some());
+            assert_eq!(
+                out.warnings
+                    .iter()
+                    .any(|s| s.contains("precedes the last ledger entry")),
+                warn
+            );
+        }
+    }
+
+    #[test]
+    fn debit_survives_failure_between_append_and_witness_update() {
+        let (_dir, path, state) = setup();
+        let req = request("calls", 1);
+        spend_in(&path, &req, NOW, &state).expect("baseline");
+        let witness = state.witness_path("acme-2026-11").expect("witness");
+        let saved = witness.with_extension("saved");
+        let result = spend_with_clock_in(&path, &req, &state, || {
+            fs::rename(&witness, &saved).expect("save witness");
+            fs::create_dir(&witness).expect("make rename fail");
+            NOW
+        });
+        assert!(matches!(
+            result,
+            Err(Error::WitnessNotUpdated { seq: 2, .. })
+        ));
+        fs::remove_dir(&witness).expect("remove fixture");
+        fs::rename(&saved, &witness).expect("restore prior evidence");
+        let loaded = load(&path).expect("pass");
+        let view = read_ledger(&loaded, &state).expect("extended");
+        assert_eq!(view.witness, WitnessStatus::Extended { added: 1 });
+        assert_eq!(view.tally.spent("calls"), 2);
+        assert_eq!(
+            spend_in(&path, &req, NOW, &state)
+                .expect("next independent spend")
+                .seq,
+            Some(3)
+        );
+        assert_eq!(
+            read_ledger(&loaded, &state).expect("read").witness,
+            WitnessStatus::Matches
+        );
     }
 
     fn request(counter: &str, amount: u64) -> SpendRequest<'_> {

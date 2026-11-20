@@ -167,7 +167,7 @@ What it guards against:
   `hallpass adopt FILE --reason TEXT`, which is recorded in the ledger and
   keeps the count.
 - **Link tricks**: the pass and the ledger are never read through a
-  symbolic link; a pass writable by others and a ledger readable by others
+  symbolic link; a pass owned by anyone except the effective user or root, a pass writable by group/others, and a ledger readable by others
   are refused.
 
 What it does not guard against:

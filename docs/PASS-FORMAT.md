@@ -55,7 +55,7 @@ requests = 500
   backslash, is refused (`"192.0.2.1\u0030"` is `192.0.2.10` to TOML). Only
   `\"` and `\\` are accepted; a single-quoted string has no escapes.
 - **The file** must be UTF-8, at most 1 MiB, a regular file (not a symbolic
-  link), and not writable by group or others (mode 0600 or 0644; `init`
+  link), owned by the effective user or root, and not writable by group or others (mode 0600 or 0644; `init`
   writes 0600).
 - **Field paths** in problems are dotted: `approval.valid_until`,
   `ceilings.calls`, `destination[2].ports`. Destinations count from 1, in

@@ -132,6 +132,38 @@ impl StateDir {
         Ok(())
     }
 
+    /// Inspect writability without creating the state directory, probe, or lock.
+    pub(crate) fn preview_write_access(&self, pass_id: &str) -> Result<(), Error> {
+        let dir = self
+            .path()
+            .map_err(|s| self.unavailable(pass_id, s.into()))?;
+        let mut ancestor = dir;
+        loop {
+            match fs::metadata(ancestor) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = ancestor
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                }
+                Err(e) => return Err(self.unavailable(pass_id, e.to_string())),
+            }
+        }
+        crate::files::writable_directory(ancestor)
+            .map_err(|e| self.unavailable(pass_id, e.to_string()))?;
+        let lock = dir.join(format!("{pass_id}.lock"));
+        match fs::symlink_metadata(&lock) {
+            Ok(_) => {
+                open_no_follow(&lock, OpenOptions::new().write(true))
+                    .map_err(|e| self.unavailable(pass_id, e.to_string()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(self.unavailable(pass_id, e.to_string())),
+        }
+        Ok(())
+    }
+
     /// Take the exclusive lock that serializes every writer of the witness
     /// for `pass_id` (held until the returned file is dropped). Creates the
     /// directory and the lock file as needed.
