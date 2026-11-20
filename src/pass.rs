@@ -298,10 +298,18 @@ impl Pass {
     /// reported alone, since nothing else can be read.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
         let table: Table = text.parse().map_err(|e: toml::de::Error| {
+            let at = e
+                .span()
+                .and_then(|span| text.get(..span.start))
+                .map_or_else(String::new, |before| {
+                    let line = before.matches('\n').count() + 1;
+                    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+                    format!(" at line {line}, column {column}")
+                });
             vec![Problem {
                 field: "(file)".to_owned(),
                 message: format!(
-                    "the file is not valid TOML: {}; fix the syntax",
+                    "the file is not valid TOML{at}: {}; fix the syntax there",
                     e.message().trim()
                 ),
             }]
@@ -364,8 +372,12 @@ impl Pass {
         }
     }
 
-    /// The first destination entry that allows `ip`, `port` and `protocol`.
-    /// It does not look at `names`; [`Pass::permits_named`] does.
+    /// The first destination entry that lists `ip`, `port` and `protocol`.
+    ///
+    /// This is a lookup, not a decision: it does not look at the window,
+    /// revocation, `names`, IPv6 forms that carry IPv4, or the network and
+    /// broadcast addresses of a listed network. To decide whether something
+    /// may be sent, use [`Pass::permits`] or [`Pass::permits_named`].
     #[must_use]
     pub fn destination_for(
         &self,
@@ -1075,6 +1087,9 @@ requests = 500
         assert_eq!(fields(&text), vec!["id"]);
         let text = GOOD.replace("format = 1", "format = 1\nformat = 1");
         assert_eq!(fields(&text), vec!["(file)"]);
+        // A syntax error says where it is.
+        let p = problems("format = 1\nid = \"x\"\nname = \n");
+        assert!(p[0].message.contains("line 3, column 8"), "{p:?}");
     }
 
     #[test]

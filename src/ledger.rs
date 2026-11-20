@@ -86,7 +86,9 @@ pub struct SpendRequest<'a> {
     pub note: Option<&'a str>,
     /// Refuse unless the pass on disk still has this digest.
     pub expect_digest: Option<Digest>,
-    /// Refuse unless the window stays open at least this long.
+    /// Refuse unless the window stays open at least this long: the longest
+    /// the work this spend pays for may take. Zero means "right now"; a
+    /// negative duration is a usage error.
     pub needed: Duration,
 }
 
@@ -422,7 +424,7 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<Parsed, Erro
     if header.hallpass_ledger != LEDGER_VERSION {
         return Err(corrupt(
             1,
-            "the ledger version is not one this hallpass reads",
+            "the ledger version is not one this hallpass reads (if a newer hallpass wrote it, use that one)",
         ));
     }
     if header.pass_id != pass_id {
@@ -850,7 +852,7 @@ fn decide(
         return Some(refuse(
             RefusalCode::UnknownCounter,
             format!(
-                "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent",
+                "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent: use one of those names, or ask the owner to add this ceiling to the pass in writing",
                 request.counter,
                 if known.is_empty() {
                     "none".to_owned()
@@ -1021,6 +1023,11 @@ pub fn spend_in(
     state: &StateDir,
 ) -> Result<SpendOutcome, Error> {
     check_clock(now)?;
+    if request.needed.is_negative() {
+        return Err(Error::Usage(
+            "the duration the work may take is negative; pass zero for \"right now\", or how long the work may take. Nothing was recorded".to_owned(),
+        ));
+    }
     if request.amount == 0 || request.amount > MAX_CEILING {
         return Err(Error::Usage(format!(
             "the amount must be a whole number from 1 to {MAX_CEILING}; nothing was recorded"
@@ -1360,6 +1367,16 @@ mod tests {
         )
         .expect("spend");
         assert_eq!(late.refusal.map(|r| r.code), Some(RefusalCode::Expired));
+        // A negative duration is a caller's mistake, not "right now".
+        let mut negative = request("calls", 1);
+        negative.needed = Duration::seconds(-1);
+        match spend_in(&path, &negative, NOW, &state) {
+            Err(Error::Usage(message)) => assert!(message.contains("negative"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        let out = spend_in(&path, &request("bogus", 1), NOW, &state).expect("spend");
+        let message = out.refusal.expect("refused").message;
+        assert!(message.contains("ask the owner"), "{message}");
         let mut changed = request("calls", 1);
         changed.expect_digest = Some(Digest::of(b"something else"));
         let out = spend_in(&path, &changed, NOW, &state).expect("spend");

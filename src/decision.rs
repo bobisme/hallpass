@@ -227,7 +227,8 @@ impl Pass {
 
     /// Refuse unless the window is valid at `now` and still open after
     /// `needed` (the longest the caller's next piece of work may take; pass
-    /// [`Duration::ZERO`] for "right now").
+    /// [`Duration::ZERO`] for "right now"; a negative duration is read as
+    /// zero here, and is a usage error in [`crate::spend`]).
     ///
     /// # Errors
     ///

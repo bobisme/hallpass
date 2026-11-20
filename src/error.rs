@@ -34,7 +34,10 @@ pub enum Error {
         path: PathBuf,
     },
     /// The file is larger than a pass can be.
-    #[error("{} is larger than {limit} bytes, too large for a pass", path.display())]
+    #[error(
+        "{} is larger than {limit} bytes, too large for a pass; a pass is a short text file: check that this is the pass file",
+        path.display()
+    )]
     TooLarge {
         /// The file.
         path: PathBuf,
