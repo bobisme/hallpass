@@ -1040,7 +1040,12 @@ pub fn spend_in(
         state,
         &id,
     )?;
-    let warnings = warnings(&status, moved.as_ref(), &id, true);
+    let mut warnings = warnings(&status, moved.as_ref(), &id, true);
+    if locked.created && status == WitnessStatus::Missing {
+        // This call started the ledger: it has no witness because it is
+        // new, not because it came from somewhere else.
+        warnings.clear();
+    }
     if status != WitnessStatus::Matches || moved.is_some() {
         state.write(
             &id,
@@ -1294,6 +1299,25 @@ mod tests {
         assert_eq!(meta.mode() & 0o777, 0o600);
         let loaded = load(&path).expect("load");
         assert_eq!(tally(&loaded).expect("tally").spent("calls"), 6);
+    }
+
+    #[test]
+    fn the_first_spend_of_a_new_pass_has_nothing_to_warn_about() {
+        // A new ledger has no witness yet because it is new, not because it
+        // was "brought from another machine".
+        let (_dir, path, state) = setup();
+        let out = ok(&path, &state, "calls", 1);
+        assert_eq!(out.warnings, Vec::<String>::new());
+        assert_eq!(ok(&path, &state, "calls", 1).warnings, Vec::<String>::new());
+        // The same when the first spend is refused.
+        let (_dir, path, state) = setup();
+        let out = spend_in(&path, &request("calls", 7), NOW, &state).expect("spend");
+        assert!(out.refusal.is_some());
+        assert_eq!(out.warnings, Vec::<String>::new());
+        assert_eq!(
+            view(&path, &state).expect("read").witness,
+            WitnessStatus::Matches
+        );
     }
 
     #[test]

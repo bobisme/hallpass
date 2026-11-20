@@ -545,6 +545,11 @@ fn spend_until_ceiling_reached() {
         (Some(4), Some(2))
     );
     assert_eq!(out["seq"], 1);
+    assert_eq!(
+        out["warnings"],
+        serde_json::json!([]),
+        "a first spend has nothing to warn about"
+    );
     assert_eq!(spend(&file, "calls", NOW).0, 0);
     assert_eq!(spend(&file, "calls", NOW).0, 0);
     let (rc, out) = spend(&file, "calls", NOW);
