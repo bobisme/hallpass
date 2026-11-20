@@ -20,19 +20,16 @@
 //!     Decision::Allowed { label } => println!("allowed by {label}"),
 //!     Decision::Refused(refusal) => println!("refused: {refusal}"),
 //! }
-//! let outcome = hallpass::spend(
-//!     path,
-//!     &SpendRequest {
-//!         counter: "calls",
-//!         amount: 1,
-//!         note: Some("first call"),
-//!         expect_digest: Some(loaded.digest),
-//!         needed: time::Duration::minutes(2),
-//!     },
-//!     now,
-//! )?;
+//! // One call that decides the destination, the window and the ceiling
+//! // together, and records the spend only if all three allow it.
+//! let mut request = SpendRequest::new("calls", 1);
+//! request.target = Some(target);
+//! request.note = Some("first call");
+//! request.expect_digest = Some(loaded.digest);
+//! request.needed = time::Duration::minutes(2);
+//! let outcome = hallpass::spend(path, &request, now)?;
 //! if let Some(refusal) = outcome.refusal {
-//!     println!("do not proceed: {refusal}");
+//!     println!("do not send: {refusal}");
 //! }
 //! # Ok::<(), hallpass::Error>(())
 //! ```

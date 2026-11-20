@@ -27,9 +27,11 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
+use crate::address::Target;
+use crate::decision::{Decision, Refusal, RefusalCode, in_utc, stamp};
 use crate::error::{Error, MissingLedger};
 use crate::files::{Digest, LoadedPass, load, open_no_follow};
+use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
 
@@ -75,8 +77,17 @@ impl Tally {
     }
 }
 
-/// A spend to record.
+/// A spend to record, and optionally the one thing it pays for.
+///
+/// With [`SpendRequest::target`] set, one call answers "may I send this
+/// much to this address, port and protocol now, and count it": the
+/// destination is checked under the same lock, against the same reading of
+/// the pass, as the window and the ceiling, and a refusal records nothing.
+///
+/// Build it with [`SpendRequest::new`] and set the fields you need; more
+/// fields may be added.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SpendRequest<'a> {
     /// The counter name (one of the pass's ceilings).
     pub counter: &'a str,
@@ -90,6 +101,33 @@ pub struct SpendRequest<'a> {
     /// the work this spend pays for may take. Zero means "right now"; a
     /// negative duration is a usage error.
     pub needed: Duration,
+    /// What is about to be touched. When set, the spend is also refused,
+    /// and nothing is recorded, unless the pass permits this target now
+    /// (as [`crate::Pass::permits_named`] decides, with `name` and
+    /// `needed`). `None` checks only the window and the ceiling: the caller
+    /// must then have asked about every destination itself.
+    pub target: Option<Target>,
+    /// The host name the request will carry (see
+    /// [`crate::Pass::permits_named`]). Only with `target`; a name without
+    /// a target is a usage error.
+    pub name: Option<&'a HostName>,
+}
+
+impl<'a> SpendRequest<'a> {
+    /// A spend of `amount` from `counter`: no note, no expected digest, no
+    /// duration ("right now"), no target.
+    #[must_use]
+    pub const fn new(counter: &'a str, amount: u64) -> Self {
+        Self {
+            counter,
+            amount,
+            note: None,
+            expect_digest: None,
+            needed: Duration::ZERO,
+            target: None,
+            name: None,
+        }
+    }
 }
 
 /// The result of a spend that was decided (recorded or refused).
@@ -114,6 +152,9 @@ pub struct SpendOutcome {
     pub digest: Digest,
     /// The pass id.
     pub pass_id: String,
+    /// The label of the destination that permits [`SpendRequest::target`],
+    /// when a target was given and the spend was recorded.
+    pub label: Option<String>,
     /// Things the operator should know about the ledger and its witness, in
     /// words (for example that a witness was recorded for a ledger that had
     /// none).
@@ -821,14 +862,16 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The policy part of a spend: `Some(refusal)` when it may not be recorded.
+/// The policy part of a spend: the refusal when it may not be recorded,
+/// otherwise the label of the destination that permits the target (when
+/// the request has one).
 fn decide(
     loaded: &LoadedPass,
     request: &SpendRequest<'_>,
     total: Option<u64>,
     spent: u64,
     now: OffsetDateTime,
-) -> Option<Refusal> {
+) -> Result<Option<String>, Refusal> {
     let refuse = |code, message: String| Refusal {
         code,
         message: format!("{message}. Nothing was recorded"),
@@ -836,7 +879,7 @@ fn decide(
     if let Some(expected) = request.expect_digest
         && expected != loaded.digest
     {
-        return Some(refuse(
+        return Err(refuse(
             RefusalCode::PassChanged,
             format!(
                 "the pass has changed since this run started (expected {expected}, now {}); stop, review the pass, and start again under the new one",
@@ -845,11 +888,25 @@ fn decide(
         ));
     }
     if let Err(refusal) = loaded.pass.check_window(now, request.needed) {
-        return Some(refuse(refusal.code, refusal.message));
+        return Err(refuse(refusal.code, refusal.message));
     }
+    let label = match &request.target {
+        None => None,
+        Some(target) => {
+            match loaded
+                .pass
+                .permits_named(target, request.name, now, request.needed)
+            {
+                Decision::Allowed { label } => Some(label),
+                Decision::Refused(refusal) => {
+                    return Err(refuse(refusal.code, refusal.message));
+                }
+            }
+        }
+    };
     let Some(total) = total else {
         let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
-        return Some(refuse(
+        return Err(refuse(
             RefusalCode::UnknownCounter,
             format!(
                 "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent: use one of those names, or ask the owner to add this ceiling to the pass in writing",
@@ -862,8 +919,8 @@ fn decide(
             ),
         ));
     };
-    (spent.saturating_add(request.amount) > total).then(|| {
-        refuse(
+    if spent.saturating_add(request.amount) > total {
+        return Err(refuse(
             RefusalCode::CeilingReached,
             format!(
                 "spending {} {} would exceed the ceiling: {spent} of {total} already spent, {} left; stop, or ask the owner to raise the ceiling in writing",
@@ -871,8 +928,9 @@ fn decide(
                 request.counter,
                 total.saturating_sub(spent)
             ),
-        )
-    })
+        ));
+    }
+    Ok(label)
 }
 
 /// A ledger opened for writing under both locks.
@@ -997,7 +1055,8 @@ pub fn spend(
 ///
 /// Under an exclusive lock on the witness and then on the ledger it re-reads
 /// the pass, checks the ledger against the witness, the expected digest, the
-/// window and revocation at `now`, and the remaining total, then appends the
+/// window and revocation at `now`, the destination (when the request names
+/// a target), and the remaining total, then appends the
 /// entry (and syncs it to disk) and updates the witness, or refuses and
 /// records nothing in the ledger. Two processes spending at once never
 /// together exceed the total.
@@ -1032,6 +1091,11 @@ pub fn spend_in(
         return Err(Error::Usage(format!(
             "the amount must be a whole number from 1 to {MAX_CEILING}; nothing was recorded"
         )));
+    }
+    if request.name.is_some() && request.target.is_none() {
+        return Err(Error::Usage(
+            "a host name was given without a target; a name is only checked together with the address, port and protocol it is sent to. Nothing was recorded".to_owned(),
+        ));
     }
     if let Some(note) = request.note {
         check_new_note(note).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
@@ -1077,11 +1141,15 @@ pub fn spend_in(
         seq: None,
         digest: loaded.digest,
         pass_id: id.clone(),
+        label: None,
         warnings,
     };
-    if let Some(refusal) = decide(loaded, request, total, spent, now) {
-        outcome.refusal = Some(refusal);
-        return Ok(outcome);
+    match decide(loaded, request, total, spent, now) {
+        Ok(label) => outcome.label = label,
+        Err(refusal) => {
+            outcome.refusal = Some(refusal);
+            return Ok(outcome);
+        }
     }
     let entry = Entry {
         seq: locked.parsed.seq + 1,
@@ -1278,13 +1346,7 @@ mod tests {
     }
 
     fn request(counter: &str, amount: u64) -> SpendRequest<'_> {
-        SpendRequest {
-            counter,
-            amount,
-            note: None,
-            expect_digest: None,
-            needed: Duration::ZERO,
-        }
+        SpendRequest::new(counter, amount)
     }
 
     #[test]
@@ -1325,6 +1387,122 @@ mod tests {
             view(&path, &state).expect("read").witness,
             WitnessStatus::Matches
         );
+    }
+
+    #[test]
+    fn a_spend_with_a_target_decides_the_destination_too() {
+        let (_dir, path, state) = setup();
+        let to = |text: &str| -> Target { text.parse().expect("target") };
+        let mut call = request("calls", 1);
+        call.target = Some(to("192.0.2.10:5060/udp"));
+        let out = spend_in(&path, &call, NOW, &state).expect("spend");
+        assert_eq!(out.refusal, None);
+        assert_eq!(out.label.as_deref(), Some("sip-edge"));
+        assert_eq!((out.spent, out.seq), (1, Some(1)));
+        // Without a target there is no label: only the window and the
+        // ceiling were checked.
+        assert_eq!(ok(&path, &state, "calls", 1).label, None);
+
+        // Every destination refusal refuses the spend and records nothing.
+        for (target, want) in [
+            ("192.0.2.11:5060/udp", RefusalCode::AddressNotListed),
+            ("192.0.2.10:5060/tcp", RefusalCode::PortNotListed),
+            ("[::ffff:192.0.2.10]:5060/udp", RefusalCode::EmbeddedIpv4),
+        ] {
+            let mut call = request("calls", 1);
+            call.target = Some(to(target));
+            let out = spend_in(&path, &call, NOW, &state).expect("spend");
+            let refusal = out.refusal.expect(target);
+            assert_eq!(refusal.code, want, "{target}");
+            assert!(
+                refusal.message.ends_with("Nothing was recorded"),
+                "{}",
+                refusal.message
+            );
+            assert_eq!((out.spent, out.seq, out.label), (2, None, None), "{target}");
+        }
+        // The window is asked for the duration of the work, as in permits.
+        let mut late = request("calls", 1);
+        late.target = Some(to("192.0.2.10:5060/udp"));
+        late.needed = Duration::minutes(10);
+        let out = spend_in(&path, &late, datetime!(2026-11-20 16:55 UTC), &state).expect("spend");
+        assert_eq!(
+            out.refusal.map(|r| r.code),
+            Some(RefusalCode::WindowTooShort)
+        );
+        // The destination is refused before the counter is looked at.
+        let mut both = request("bogus", 1);
+        both.target = Some(to("192.0.2.11:5060/udp"));
+        let out = spend_in(&path, &both, NOW, &state).expect("spend");
+        assert_eq!(
+            out.refusal.map(|r| r.code),
+            Some(RefusalCode::AddressNotListed)
+        );
+        // A listed target does not get past the ceiling.
+        let mut big = request("calls", 5);
+        big.target = Some(to("192.0.2.10:5060/udp"));
+        let out = spend_in(&path, &big, NOW, &state).expect("spend");
+        assert_eq!(
+            out.refusal.map(|r| r.code),
+            Some(RefusalCode::CeilingReached)
+        );
+        assert_eq!(view(&path, &state).expect("read").tally.spent("calls"), 2);
+    }
+
+    #[test]
+    fn a_spend_with_a_target_keeps_to_the_names() {
+        let (_dir, path, state) = setup();
+        let named = GOOD.replacen(
+            "[ceilings]",
+            "[[destination]]\nlabel = \"shared\"\naddress = \"198.51.100.7\"\nprotocol = \"tcp\"\nports = 443\nnames = [\"app.example.com\"]\n\n[ceilings]",
+            1,
+        );
+        fs::write(&path, named).expect("write");
+        let target: Target = "198.51.100.7:443/tcp".parse().expect("target");
+        let app: HostName = "App.Example.com.".parse().expect("name");
+        let other: HostName = "other.example.org".parse().expect("name");
+        for (name, want) in [
+            (None, Some(RefusalCode::NameRequired)),
+            (Some(&other), Some(RefusalCode::NameNotListed)),
+            (Some(&app), None),
+        ] {
+            let mut call = request("requests", 1);
+            call.target = Some(target);
+            call.name = name;
+            let out = spend_in(&path, &call, NOW, &state).expect("spend");
+            assert_eq!(out.refusal.map(|r| r.code), want, "{name:?}");
+        }
+        assert_eq!(
+            view(&path, &state).expect("read").tally.spent("requests"),
+            1
+        );
+        // A name without a target is a mistake in the request.
+        let mut lone = request("requests", 1);
+        lone.name = Some(&app);
+        assert!(matches!(
+            spend_in(&path, &lone, NOW, &state),
+            Err(Error::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn a_destination_removed_from_the_pass_stops_the_next_spend() {
+        // The pass is read again under the lock: an edit takes effect for
+        // the very next spend, with no second question in between.
+        let (_dir, path, state) = setup();
+        let mut call = request("calls", 1);
+        call.target = Some("192.0.2.10:5060/udp".parse().expect("target"));
+        assert_eq!(
+            spend_in(&path, &call, NOW, &state).expect("spend").refusal,
+            None
+        );
+        fs::write(&path, GOOD.replace("192.0.2.10", "192.0.2.20")).expect("edit");
+        let out = spend_in(&path, &call, NOW, &state).expect("spend");
+        assert_eq!(
+            out.refusal.map(|r| r.code),
+            Some(RefusalCode::AddressNotListed)
+        );
+        assert_eq!(out.spent, 1);
     }
 
     #[test]

@@ -73,6 +73,10 @@ enum Command {
         duration: u32,
     },
     /// Record a spend against a ceiling, atomically, or refuse and record nothing.
+    ///
+    /// With --to, one command answers "may I send N of COUNTER to this
+    /// destination now, and count it": the destination, the window and the
+    /// ceiling are decided together, and a refusal records nothing.
     Spend {
         /// The pass file.
         file: PathBuf,
@@ -81,6 +85,12 @@ enum Command {
         /// The amount to spend.
         #[arg(long = "n", value_name = "N", default_value_t = 1)]
         amount: u64,
+        /// What the spend pays for: `ADDRESS:PORT/PROTOCOL`. Refuse, and record nothing, unless the pass permits it now. Without it only the window and the ceiling are checked.
+        #[arg(long, value_name = "ADDR:PORT/PROTO")]
+        to: Option<String>,
+        /// The host name the request will carry, as for `permits --name`. Only with --to.
+        #[arg(long, value_name = "HOSTNAME", requires = "to")]
+        name: Option<String>,
         /// A note recorded with the entry.
         #[arg(long)]
         note: Option<String>,
@@ -547,6 +557,8 @@ struct SpendArgs<'a> {
     file: &'a Path,
     counter: &'a str,
     amount: u64,
+    to: Option<&'a str>,
+    name: Option<&'a str>,
     note: Option<&'a str>,
     digest: Option<&'a str>,
     duration: u32,
@@ -564,23 +576,50 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             );
         }
     };
-    let request = SpendRequest {
-        counter: args.counter,
-        amount: args.amount,
-        note: args.note,
-        expect_digest,
-        needed: Duration::seconds(i64::from(args.duration)),
+    let target: Option<Target> = match args.to.map(str::parse).transpose() {
+        Ok(t) => t,
+        Err(message) => {
+            return error_output(
+                "spend",
+                Some(file),
+                &Error::Usage(format!("--to: {message}")),
+            );
+        }
     };
+    let name: Option<HostName> = match args.name.map(str::parse).transpose() {
+        Ok(n) => n,
+        Err(message) => {
+            return error_output(
+                "spend",
+                Some(file),
+                &Error::Usage(format!("--name: {message}")),
+            );
+        }
+    };
+    let mut request = SpendRequest::new(args.counter, args.amount);
+    request.note = args.note;
+    request.expect_digest = expect_digest;
+    request.needed = Duration::seconds(i64::from(args.duration));
+    request.target = target;
+    request.name = name.as_ref();
     let outcome = match hallpass::spend(file, &request, clock.now) {
         Ok(o) => o,
         Err(e) => return error_output("spend", Some(file), &e),
     };
     let remaining = outcome.remaining();
+    let asked = target.map(|t| {
+        name.as_ref()
+            .map_or_else(|| t.to_string(), |n| format!("{t} as {n}"))
+    });
     let text = match (&outcome.refusal, outcome.total, outcome.seq) {
         (None, Some(total), Some(seq)) => format!(
-            "RECORDED: {} {} ({} of {total} spent, {} left; ledger entry {seq})\n",
+            "RECORDED: {} {}{} ({} of {total} spent, {} left; ledger entry {seq})\n",
             outcome.amount,
             outcome.counter,
+            match (&asked, &outcome.label) {
+                (Some(asked), Some(label)) => format!(" for {asked} by destination {label}"),
+                _ => String::new(),
+            },
             outcome.spent,
             remaining.unwrap_or(0)
         ),
@@ -608,6 +647,9 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "remaining": remaining,
             "seq": outcome.seq,
             "note": args.note,
+            "target": target.map(|t| t.to_string()),
+            "name": name.as_ref().map(HostName::as_str),
+            "label": outcome.label,
             "refusal": outcome.refusal.as_ref().map(refusal_json),
             "warnings": outcome.warnings,
         }),
@@ -935,6 +977,8 @@ fn run(cli: &Cli) -> Output {
             file,
             counter,
             amount,
+            to,
+            name,
             note,
             digest,
             duration,
@@ -943,6 +987,8 @@ fn run(cli: &Cli) -> Output {
                 file,
                 counter,
                 amount: *amount,
+                to: to.as_deref(),
+                name: name.as_deref(),
                 note: note.as_deref(),
                 digest: digest.as_deref(),
                 duration: *duration,

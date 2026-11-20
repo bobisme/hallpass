@@ -573,6 +573,115 @@ fn spend_until_ceiling_reached() {
 }
 
 #[test]
+fn spend_to_a_destination_is_one_decision() {
+    let case = Case::new();
+    let file = named_pass(&case);
+    let (rc, out) = json(
+        &[
+            "spend",
+            s(&file),
+            "calls",
+            "--to",
+            "192.0.2.10:5060/udp",
+            "--duration",
+            "120",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["result"], "allowed");
+    assert_eq!(out["target"], "192.0.2.10:5060/udp");
+    assert_eq!(out["label"], "sip-edge");
+    assert_eq!(out["name"], Value::Null);
+    assert_eq!(
+        (out["spent"].as_u64(), out["seq"].as_u64()),
+        (Some(1), Some(1))
+    );
+    // Without --to the fields are there and null.
+    let (_, out) = spend(&file, "calls", NOW);
+    assert_eq!(
+        (&out["target"], &out["label"]),
+        (&Value::Null, &Value::Null)
+    );
+
+    // A destination refusal: exit 2, the code of `permits`, nothing recorded.
+    for (to, name, want) in [
+        ("192.0.2.11:5060/udp", None, "address-not-listed"),
+        ("192.0.2.10:5061/udp", None, "port-not-listed"),
+        ("[::ffff:192.0.2.10]:5060/udp", None, "embedded-ipv4"),
+        ("198.51.100.7:443/tcp", None, "name-required"),
+        (
+            "198.51.100.7:443/tcp",
+            Some("other.example.org"),
+            "name-not-listed",
+        ),
+    ] {
+        let mut args = vec!["spend", s(&file), "calls", "--to", to];
+        if let Some(name) = name {
+            args.extend(["--name", name]);
+        }
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(rc, 2, "{to}: {out}");
+        assert_eq!(out["result"], "refused");
+        assert_eq!(out["refusal"]["code"], want, "{to}");
+        assert_eq!(out["seq"], Value::Null);
+        assert_eq!(out["spent"], 2, "{to}: nothing was recorded");
+        assert_eq!(out["label"], Value::Null);
+    }
+    let (rc, out) = json(
+        &[
+            "spend",
+            s(&file),
+            "calls",
+            "--to",
+            "198.51.100.7:443/tcp",
+            "--name",
+            "APP.example.com.",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(out["name"], "app.example.com");
+    assert_eq!(out["label"], "shared-web");
+
+    // A target or name that is not one address or one name is an error.
+    for extra in [
+        vec!["--to", "sip.example.net:5060/udp"],
+        vec!["--to", "192.0.2.10:5060"],
+        vec!["--to", "192.0.2.10:5060/udp", "--name", "*.example.com"],
+    ] {
+        let mut args = vec!["spend", s(&file), "calls"];
+        args.extend(extra);
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(
+            (rc, out["error"]["code"].as_str()),
+            (1, Some("usage")),
+            "{out}"
+        );
+    }
+    // A name without a target is refused by the command line itself.
+    let lone = run(
+        &["spend", s(&file), "calls", "--name", "app.example.com"],
+        Some(NOW),
+    );
+    assert_eq!(code(&lone), 1);
+    let (_, out) = json(&["status", s(&file)], Some(NOW));
+    assert_eq!(out["counters"][0]["spent"], 3);
+
+    let text = run(
+        &["spend", s(&file), "calls", "--to", "192.0.2.10:5060/udp"],
+        Some(NOW),
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(
+        stdout.starts_with(
+            "RECORDED: 1 calls for 192.0.2.10:5060/udp by destination sip-edge (4 of 6 spent, 2 left; ledger entry 4)"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn spend_refusals_record_nothing() {
     let case = Case::new();
     let file = case.pass("p.toml", PASS);
