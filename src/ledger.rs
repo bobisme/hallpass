@@ -511,6 +511,8 @@ fn parse_ledger(
             "the ledger version is not one this hallpass reads (if a newer hallpass wrote it, use that one)",
         ));
     }
+    // Defer identity mismatch until every line has been verified. In particular,
+    // checkpoint verification must not hide a damaged suffix behind a foreign ID.
     let foreign_id = (header.pass_id != pass_id).then_some(header.pass_id);
     let mut parsed = Parsed {
         tally: Tally::default(),
@@ -1541,17 +1543,28 @@ fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, Ledger
             detail: reason,
         });
     }
-    state.preview_write_access(&loaded.pass.id)?;
-    if view.exists {
-        open_no_follow(&view.path, OpenOptions::new().append(true))?;
+    check_preview_write_access(path, &view.path, view.exists, state, &loaded.pass.id)?;
+    Ok((loaded, view))
+}
+
+fn check_preview_write_access(
+    pass: &Path,
+    ledger: &Path,
+    exists: bool,
+    state: &StateDir,
+    id: &str,
+) -> Result<(), Error> {
+    state.preview_write_access(id)?;
+    if exists {
+        open_no_follow(ledger, OpenOptions::new().append(true))?;
     } else {
         crate::files::writable_directory(
-            path.parent()
+            pass.parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new(".")),
         )?;
     }
-    Ok((loaded, view))
+    Ok(())
 }
 
 fn prepare_witness(
@@ -1707,6 +1720,7 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
         Ok(_) => return Err(Error::Usage("nothing to adopt".into())),
         Err(e) => return Err(e),
     };
+    check_preview_write_access(pass_path, &path, parsed.is_some(), state, id)?;
     let present = parsed
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
@@ -2420,6 +2434,39 @@ mod tests {
     }
 
     #[test]
+    fn adoption_preview_rejects_unwritable_evidence_without_mutation() {
+        let (dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        let ledger = ledger_path(&path);
+        let ledger_bytes = fs::read(&ledger).expect("ledger");
+        let fresh = StateDir::new(dir.path().join("fresh"));
+        fs::set_permissions(&ledger, fs::Permissions::from_mode(0o400)).expect("mode");
+        assert!(preview_adopt(&path, &fresh).is_err());
+        assert!(!fresh.path().expect("state").exists());
+        assert_eq!(fs::read(&ledger).expect("ledger"), ledger_bytes);
+        fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).expect("mode");
+        let old = fs::read(&ledger).expect("ledger");
+        ok(&path, &state, "calls", 1);
+        fs::write(&ledger, &old).expect("restore");
+        let witness = state.witness_path("acme-2026-11").expect("witness");
+        let witness_bytes = fs::read(&witness).expect("witness");
+        let state_path = state.path().expect("path");
+        fs::set_permissions(state_path, fs::Permissions::from_mode(0o500)).expect("mode");
+        let result = preview_adopt(&path, &state);
+        fs::set_permissions(state_path, fs::Permissions::from_mode(0o700)).expect("mode");
+        assert!(result.is_err());
+        assert_eq!(fs::read(&ledger).expect("ledger"), old);
+        assert_eq!(fs::read(&witness).expect("witness"), witness_bytes);
+        fs::remove_file(&ledger).expect("remove");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).expect("mode");
+        let result = preview_adopt(&path, &state);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        assert!(result.is_err());
+        assert!(!ledger.exists());
+        assert_eq!(fs::read(&witness).expect("witness"), witness_bytes);
+    }
+
+    #[test]
     fn missing_ledger_guard_rejects_changed_pass_without_creation() {
         let (_dir, path, state) = setup();
         ok(&path, &state, "calls", 1);
@@ -2459,10 +2506,17 @@ mod tests {
         fs::write(&ledger, &old).expect("restore");
         let mut foreign = checkpoint.clone();
         foreign.pass_id = "another-id".to_owned();
+        assert_eq!(
+            verify_checkpoint(&ledger, &foreign).expect("valid foreign ledger"),
+            CheckpointStatus::Mismatch
+        );
         let mut bad_suffix = fs::read(&ledger).expect("read");
         bad_suffix.extend_from_slice(b"{broken}\n");
         fs::write(&ledger, bad_suffix).expect("damage");
-        assert!(verify_checkpoint(&ledger, &foreign).is_err());
+        assert!(matches!(
+            verify_checkpoint(&ledger, &foreign),
+            Err(Error::LedgerCorrupt { line: 4, .. })
+        ));
         fs::write(&ledger, old).expect("restore");
         let mut wrong = checkpoint;
         wrong.hash = Digest::of(b"different").to_string();

@@ -26,9 +26,11 @@ the same approval retain the ID; a different owner or reference is a new ledger
 identity. An approval without a trustworthy start instant is incomplete:
 request the actual approval time instead of guessing one.
 
-The executable recipe is `hallpass approval-id --owner "OWNER" --reference
-"REFERENCE"`; copy its result into the pass. It is deterministic for the
-same owner/reference pair and deliberately does not guess a validity window.
+For example, run `hallpass approval-id --owner "Pat Owner" --reference
+"Change 9812 / Voice edge (approved)"` and copy the printed ID into the pass.
+Keep the reference exactly as written when revising destinations or ceilings.
+If that message omits the start instant, obtain it from the owner before
+issuing the pass.
 
 For a loopback practice run, allocate a fresh ID and explicit window and
 ceilings for each separately approved start. For example, use `practice-` followed by a new UUIDv4 as the run ID, while retaining the reusable owner reference as
@@ -50,8 +52,10 @@ Before each unit of work (one call, one request), ask and count in one step:
 hallpass --format json spend --to ADDRESS:PORT/PROTOCOL [--name HOSTNAME] [--n N] [--duration SECONDS] [--digest DIGEST] [--note TEXT] -- PASS COUNTER
 ```
 
-Send only if the exit code is 0 **and** the JSON object on standard output
-has `"result": "allowed"`. Anything else means: do not send.
+Before sending, require exit 0 and a production `spend` response with
+`"result": "allowed"`, `"test_clock": false` and a positive recorded sequence.
+Match the pass ID, digest, counter and amount to the request. The reference
+decoder below exercises this contract with a callback.
 
 `spend --to` decides the destination, the window, revocation and the
 ceiling together, under one lock, against one reading of the pass file. If
@@ -63,7 +67,7 @@ every destination itself.
 |---|---|---|---|
 | 0 | `allowed` | recorded; the pass permits this now | send |
 | 2 | `refused` | the pass says no; nothing was recorded | do not send; show `refusal.message` to the operator |
-| 1 | `error` | hallpass could not decide (invalid pass, damaged ledger, unusable state directory, bad arguments) | do not send; show `error.message` |
+| 1 | `error` | invalid input, unavailable evidence or storage failure | stop and show `error.message`. Reconcile a recorded or uncertain append before retrying |
 | other | none | hallpass did not run or crashed | do not send |
 
 Every `refusal.message` and `error.message` ends with what to do next. The
@@ -236,6 +240,18 @@ decoder and compare the action, callback count and warnings. A null exit
 denotes launch failure. Both stop and reconcile must invoke zero callbacks.
 The integration suite also supplies real CLI output acquired with the
 production clock. [Fixtures](conformance/cases.json) · [Reference decoder](conformance/check.py)
+
+The reference adapter takes `expected` from the caller before invoking
+hallpass. It contains the validated pass ID, byte digest, counter name and
+positive integer amount under `pass_id`, `digest`, `counter` and `n`.
+Pin the command with `--digest` and pass the exact counter and amount
+to `spend`. The decoder requires all four response fields to match in
+value and JSON type before it calls the send callback. Unknown response fields
+remain compatible. The callback spy only counts calls.
+
+This adapter covers scalar `spend PASS COUNTER [--n N]`. A multi-charge caller
+should check the same pass identity and digest and validate its complete
+requested `charges` array against the response before proceeding.
 
 ## Charge all known costs at the first send
 

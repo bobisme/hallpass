@@ -1757,10 +1757,39 @@ fn caller_kit_consumes_genuine_production_decisions() {
         )
         .replace("calls = 6", "calls = 1");
     let p = case.pass("real.pass", &window);
+    let loaded = hallpass::load(&p).expect("expected request from validated pass");
+    let digest = loaded.digest.to_string();
+    let expected = serde_json::json!({
+        "pass_id": loaded.pass.id, "digest": digest, "counter": "calls", "n": 1,
+    });
+    let args = [
+        "--format",
+        "json",
+        "spend",
+        s(&p),
+        "calls",
+        "--n",
+        "1",
+        "--digest",
+        &digest,
+    ];
     let mut samples = Vec::new();
     for action in ["proceed", "stop"] {
-        let output = run(&["--format", "json", "spend", s(&p), "calls"], None);
-        samples.push(serde_json::json!({"id":"live","exit":code(&output),"stdout":String::from_utf8(output.stdout).expect("utf8"),"action":action}));
+        let output = run(&args, None);
+        let exit = code(&output);
+        let stdout = String::from_utf8(output.stdout).expect("utf8");
+        samples.push(serde_json::json!({
+            "id": action, "exit": exit, "stdout": stdout, "expected": expected,
+            "action": action,
+        }));
+        if action == "proceed" {
+            let mut mismatched = expected.clone();
+            mismatched["counter"] = "requests".into();
+            samples.push(serde_json::json!({
+                "id": "genuine-success-for-other-request", "exit": exit,
+                "stdout": stdout, "expected": mismatched, "action": "stop",
+            }));
+        }
     }
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/conformance/check.py");
     assert!(
@@ -2169,4 +2198,149 @@ fn budget_previews_match_policy_refusals_without_writes() {
     }
     let no_debits = json(&["ledger", p], None).1;
     assert_eq!(no_debits["entries"], serde_json::json!([]));
+}
+
+#[test]
+fn diff_reports_equivalent_fields_and_all_approval_scope_changes() {
+    let case = Case::new();
+    let base = PASS.replace(
+        "hostname = \"sip.example.net\"",
+        "hostname = \"sip.example.net\"\nnames = [\"sip.example.net\"]",
+    );
+    let old = case.pass("old.pass", &base);
+    let equivalent = case.pass("equivalent.pass", &format!("# changed comment\n{base}"));
+    let (rc, report) = json(&["diff", s(&old), s(&equivalent)], None);
+    assert_eq!(rc, 0, "{report}");
+    assert_ne!(report["old_digest"], report["new_digest"]);
+    assert_eq!(report["changes"].as_array().expect("changes").len(), 0);
+
+    let revised_text = base
+        .replace(
+            "valid_until = 2026-11-20T17:00:00Z",
+            "valid_until = \"2026-11-20T17:00:00.500Z\"",
+        )
+        .replace(
+            "revoked = false",
+            "revoked = true\nrevoked_reason = \"owner withdrew pending review\"",
+        )
+        .replace(
+            "hostname = \"sip.example.net\"",
+            "hostname = \"edge.example.net\"",
+        )
+        .replace("address = \"192.0.2.10\"", "address = \"192.0.2.11\"")
+        .replace("protocol = \"udp\"", "protocol = \"tcp\"")
+        .replace(
+            "ports = [5060, \"10000-10100\"]",
+            "ports = [5061, \"10000-10101\"]",
+        )
+        .replace("names =", "# names removed\n# names =")
+        .replace(
+            "network = \"2001:db8::/120\"",
+            "network = \"2001:db8::/120\"\nwhole_network_approved = true",
+        )
+        .replace("calls = 6", "calls = 9");
+    let revised = case.pass("revised.pass", &revised_text);
+    let (rc, report) = json(&["diff", s(&old), s(&revised)], None);
+    assert_eq!(rc, 0, "{report}");
+    let fields: Vec<_> = report["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|c| c["field"].as_str())
+        .collect();
+    for field in [
+        "approval.valid_until",
+        "approval.revoked",
+        "destination[sip-edge].address",
+        "destination[sip-edge].protocol",
+        "destination[sip-edge].ports",
+        "destination[sip-edge].hostname",
+        "destination[sip-edge].names",
+        "destination[web].whole_network_approved",
+        "ceilings.calls",
+    ] {
+        assert!(fields.contains(&field), "missing {field}: {report}");
+    }
+    let text = String::from_utf8(run(&["diff", s(&old), s(&revised)], None).stdout).expect("text");
+    assert!(text.contains("never authorizes a spend"));
+    assert!(text.contains("2026-11-20T17:00:00.5Z"), "{text}");
+}
+
+#[test]
+fn diff_labels_invalid_old_side_and_fractional_equivalent_offsets() {
+    let case = Case::new();
+    let new = case.pass("new.pass", PASS);
+    let bad = case.path("bad.pass");
+    fs::write(&bad, "not toml").expect("bad");
+    fs::set_permissions(&bad, fs::Permissions::from_mode(0o600)).expect("mode");
+    let (rc, value) = json(&["diff", s(&bad), s(&new)], None);
+    assert_eq!(rc, 1);
+    assert_eq!(value["file"], bad.display().to_string());
+    let fractional = case.pass(
+        "fractional.pass",
+        &PASS.replace(
+            "valid_until = 2026-11-20T17:00:00Z",
+            "valid_until = \"2026-11-20T18:00:00.250Z\"",
+        ),
+    );
+    let offset = case.pass(
+        "offset.pass",
+        &PASS.replace(
+            "valid_until = 2026-11-20T17:00:00Z",
+            "valid_until = \"2026-11-20T19:00:00.250+01:00\"",
+        ),
+    );
+    let (_, value) = json(&["diff", s(&fractional), s(&offset)], None);
+    assert!(
+        value["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .all(|c| c["field"] != "approval.valid_until"),
+        "{value}"
+    );
+}
+
+#[test]
+fn approval_id_handles_punctuation_owner_separation_and_revision_stability() {
+    let _case = Case::new();
+    let reference = "Email / Legal #42: ‘quoted’, [revised] — 2026-11-20";
+    let first = json(
+        &[
+            "approval-id",
+            "--owner",
+            "Owner One / EU",
+            "--reference",
+            reference,
+        ],
+        None,
+    )
+    .1["id"]
+        .clone();
+    let same = json(
+        &[
+            "approval-id",
+            "--owner",
+            "Owner One / EU",
+            "--reference",
+            reference,
+        ],
+        None,
+    )
+    .1["id"]
+        .clone();
+    let other = json(
+        &[
+            "approval-id",
+            "--owner",
+            "Owner Two / EU",
+            "--reference",
+            reference,
+        ],
+        None,
+    )
+    .1["id"]
+        .clone();
+    assert_eq!(first, same);
+    assert_ne!(first, other);
 }

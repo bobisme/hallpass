@@ -7,6 +7,7 @@ use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::net::IpAddr;
+use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use toml::Value;
 
@@ -51,6 +52,10 @@ fn change(
     }
 }
 
+fn exact_stamp(instant: OffsetDateTime) -> String {
+    instant.format(&Rfc3339).unwrap_or_else(|_| stamp(instant))
+}
+
 /// Compare declared pass fields; this deliberately does not claim arbitrary
 /// policy equivalence.
 #[allow(clippy::too_many_lines)]
@@ -82,15 +87,15 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
     change(
         &mut changes,
         "approval.valid_from",
-        stamp(a.approval.valid_from),
-        stamp(b.approval.valid_from),
+        exact_stamp(a.approval.valid_from),
+        exact_stamp(b.approval.valid_from),
         true,
     );
     change(
         &mut changes,
         "approval.valid_until",
-        stamp(a.approval.valid_until),
-        stamp(b.approval.valid_until),
+        exact_stamp(a.approval.valid_until),
+        exact_stamp(b.approval.valid_until),
         true,
     );
     change(

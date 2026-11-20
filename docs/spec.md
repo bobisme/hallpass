@@ -539,7 +539,9 @@ ledger and reconcile before retrying.
 
 `adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
 case, present totals, carry and projected totals, prior witness and a versioned
-opaque token. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
+opaque token. It checks observable ledger, directory and witness write access
+without creating files; later permission changes and I/O failures can still prevent
+application. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
 the writer's witness and ledger locks; a stale token is an error (exit 1) and
 requires a new preview. An adoption already appended before a subsequent witness
 write failure still counts; inspect the ledger before retrying.

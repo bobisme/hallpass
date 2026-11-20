@@ -1,12 +1,5 @@
 # Pass format (format 1)
 
-## Review lint example
-
-When a named rule overlaps a nameless rule, `hallpass lint PASS` emits the
-stable `name-restriction-overlap` finding with both labels, the overlapping
-address/protocol/port, and whether an unnamed query is currently effective.
-It is an advisory owner-review signal; it does not alter `permits` or `spend`.
-
 A pass is one TOML file, written by hand from the owner's written approval.
 `hallpass init FILE` writes a commented template. `hallpass check FILE`
 reports every problem at once, each with its field path and what to do.
@@ -145,6 +138,15 @@ alone would also approve every other party on it. `names` closes that gap.
   network can see the name inside an encrypted request, so only the tool
   that sends it can keep to it.
 
+### Reviewing an overlap
+
+Suppose `web` grants TCP port 443 on `192.0.2.10` for the name
+`app.example.com`. If a second rule `subnet` grants the same port on
+`192.0.2.0/28` with no names, an unnamed request to `192.0.2.10:443/tcp`
+also qualifies through `subnet` during the approval window. Run
+`hallpass lint PASS` to see both labels, the shared service and the example
+decision. The stable finding code is `name-restriction-overlap`.
+
 ### Address spelling
 
 hallpass accepts exactly one spelling of each address, the canonical one
@@ -206,6 +208,14 @@ networks the owner approved.
 No network broader than **/8 (IPv4)** or **/32 (IPv6)** is accepted, even
 with `whole_network_approved`. That is the size of a whole provider
 allocation, not one owner's service.
+
+Across the whole pass, `check` and `status` count the union of declared
+addresses in each family, including IPv4 network edges. For example, a /28
+and two hosts inside it contribute 16 IPv4 addresses even if the service
+rules use different ports. A total above 16,777,216 IPv4 addresses (one /8)
+or 18,446,744,073,709,551,616 IPv6 addresses (one /64) produces an advisory
+warning. Pass validation continues to use the per-network limits above.
+JSON reports each total as a decimal string to preserve its exact value.
 
 ### Ports and protocols
 
