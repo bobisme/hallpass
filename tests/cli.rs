@@ -102,6 +102,7 @@ fn hallpass() -> Command {
     let mut command = Command::new(BIN);
     command
         .env_remove(CLOCK)
+        .env_remove("FORMAT")
         .env("HOME", &home)
         .env("XDG_STATE_HOME", home.join("state"));
     command
@@ -1433,6 +1434,129 @@ fn usage_errors_exit_one() {
     assert_eq!(code(&run(&["frobnicate"], None)), 1);
     assert_eq!(code(&run(&["spend"], None)), 1);
     assert_eq!(code(&run(&["--help"], None)), 0);
+}
+
+#[test]
+fn discover_every_command_from_machine_help() {
+    let _case = Case::new();
+    let (code, root) = json(&["help"], None);
+    assert_eq!(code, 0);
+    assert!(root["topic"].is_null());
+    assert_eq!(
+        root["exit_codes"]["2"],
+        "policy refusal or verification mismatch"
+    );
+    let commands = root["commands"].as_array().expect("command directory");
+    assert!(commands.iter().any(|c| c["name"] == "spend"));
+    for command in commands {
+        let name = command["name"].as_str().expect("name");
+        let (rc, page) = json(&["help", name], None);
+        assert_eq!(rc, 0, "{name}");
+        assert_eq!(page["command"], "help");
+        assert_eq!(page["topic"], name);
+        assert_eq!(page["result"], "ok");
+        assert!(page["usage"].as_str().expect("usage").contains(name));
+        assert!(page["examples"][0].is_string());
+        assert_ne!(page["workflow"].as_str().expect("workflow"), "");
+        assert!(
+            page["arguments"]
+                .as_array()
+                .expect("arguments")
+                .iter()
+                .any(|a| a["long"] == "format")
+        );
+        assert!(page["advice"].is_array());
+        let flag = run(&[name, "--help", "--json"], None);
+        assert!(flag.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&flag.stdout).expect("flag help"),
+            page
+        );
+        let human = String::from_utf8(run(&[name, "--help"], None).stdout).expect("text help");
+        assert!(
+            human.contains("Examples") && human.contains("Agent workflow"),
+            "{name}"
+        );
+        assert!(!human.contains("--json"), "{name}");
+    }
+    assert_eq!(json(&["help", "cases"], None).1["topic"], "test-pass");
+    assert_eq!(json(&["help", "missing-command"], None).0, 1);
+}
+
+#[test]
+fn format_selection_covers_meta_errors_and_literal_arguments() {
+    let case = Case::new();
+    let (_, version) = json(&["version"], None);
+    assert_eq!(version["version"], env!("CARGO_PKG_VERSION"));
+    for args in [
+        vec!["--version", "--json"],
+        vec!["--json", "version"],
+        vec!["version", "--json"],
+        vec!["--format", "text", "version", "--json"],
+    ] {
+        let out = hallpass()
+            .env("FORMAT", "invalid")
+            .args(args)
+            .output()
+            .expect("version");
+        assert!(out.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).expect("json"),
+            version
+        );
+    }
+    let out = hallpass()
+        .env("FORMAT", "json")
+        .args(["version", "--format=pretty"])
+        .output()
+        .expect("pretty");
+    assert_eq!(
+        out.stdout,
+        concat!("hallpass ", env!("CARGO_PKG_VERSION"), "\n").as_bytes()
+    );
+    let root = run(&["--help", "--json"], None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&root.stdout).expect("root help"),
+        json(&["help"], None).1
+    );
+    for args in [
+        vec!["spend"],
+        vec!["unknown", "--json"],
+        vec!["--format", "--json", "spend"],
+    ] {
+        let out = hallpass()
+            .env("FORMAT", "json")
+            .args(args)
+            .output()
+            .expect("usage");
+        assert_eq!(code(&out), 1);
+        let error: Value = serde_json::from_slice(&out.stdout).expect("structured error");
+        assert_eq!(error["error"]["code"], "usage");
+        assert_eq!(error["advice"][0]["type"], "command-help");
+    }
+    let (_, usage) = json(&["spend"], None);
+    assert_eq!(
+        usage["advice"][0]["argv"],
+        serde_json::json!(["hallpass", "help", "spend", "--format", "json"])
+    );
+    case.pass("--json", PASS);
+    let out = hallpass()
+        .current_dir(case.dir.path())
+        .args(["check", "--", "--json"])
+        .output()
+        .expect("literal path");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("OK"));
+    let out = hallpass()
+        .env("FORMAT", "json")
+        .current_dir(case.dir.path())
+        .args(["check", "--", "--json"])
+        .output()
+        .expect("environment format");
+    assert!(out.status.success());
+    let checked: Value = serde_json::from_slice(&out.stdout).expect("check");
+    assert_eq!(checked["file"], "--json");
+    assert!(checked["advice"].is_array());
 }
 
 #[test]

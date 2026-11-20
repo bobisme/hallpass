@@ -26,6 +26,20 @@ cp target/release/hallpass ~/.local/bin/   # or run it from target/release
 Linux and other Unix systems only (it relies on Unix file modes and
 `flock`).
 
+## CLI discovery
+
+Run `hallpass help` to see the command directory. An agent can request the same
+directory, inspect one command, or identify the installed version in JSON.
+
+```sh
+hallpass help --format json
+hallpass help spend --format json
+hallpass version --format json
+```
+
+Each help page includes arguments, examples, an agent workflow and exit codes.
+JSON callers should check the returned `command`, `result` and exit code.
+
 ## Two-minute example
 
 ```sh

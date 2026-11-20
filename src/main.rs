@@ -4,12 +4,15 @@
 //! Every command accepts `--format json` and then prints one JSON object on
 //! standard output.
 
+mod cli_help;
+
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::io::Read as _;
+use std::io::{IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
     Digest, Error, LoadedPass, NamedTarget, Pass, Problem, Refusal, SpendRequest, StateDir,
@@ -25,13 +28,14 @@ const TEST_CLOCK_VAR: &str = "HALLPASS_UNSAFE_TEST_CLOCK";
 #[command(
     name = "hallpass",
     version,
-    about = "Read a pass (the written permission slip for an authorized test), decide what it permits now, and count what has been spent",
-    after_help = "Exit codes: 0 ok or allowed, 2 refused by the pass, 1 any other error.\nhallpass is advisory: it answers tools that ask; it cannot stop a tool that does not."
+    propagate_version = true,
+    disable_help_subcommand = true,
+    about = "Check written approval for literal network destinations and record usage against shared limits"
 )]
 struct Cli {
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = Format::Text, global = true)]
-    format: Format,
+    /// Output format (flag overrides FORMAT; default is pretty on a terminal, text in a pipe).
+    #[arg(long, value_enum, global = true, overrides_with = "format")]
+    format: Option<Format>,
     #[command(subcommand)]
     command: Command,
 }
@@ -39,11 +43,19 @@ struct Cli {
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
     Text,
+    Pretty,
     Json,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover commands, arguments, examples and the agent workflow.
+    Help {
+        /// Command to inspect (omit for the command directory).
+        topic: Option<String>,
+    },
+    /// Report the installed CLI version.
+    Version,
     /// Write a commented template with nothing approved (never overwrites).
     Init {
         /// The new pass file.
@@ -63,7 +75,7 @@ enum Command {
     Permits {
         /// The pass file.
         file: PathBuf,
-        /// `ADDRESS:PORT/PROTOCOL`, for example `192.0.2.10:5060/udp` or `[2001:db8::1]:443/tcp`.
+        /// Repeat for each endpoint (up to 64). For example `192.0.2.10:5060/udp` or `[2001:db8::1]:443/tcp`.
         #[arg(long, required = true, value_name = "ADDR:PORT/PROTO[@NAME]")]
         to: Vec<String>,
         /// Require this exact pass revision.
@@ -81,8 +93,11 @@ enum Command {
     /// With --to, one command answers "may I send N of COUNTER to this
     /// destination now, and count it": the destination, the window and the
     /// ceiling are decided together, and a refusal records nothing.
+    #[command(
+        override_usage = "hallpass spend [OPTIONS] <FILE> <COUNTER> [--n N]\n       hallpass spend [OPTIONS] <FILE> --charge COUNTER=N [--charge COUNTER=N ...]"
+    )]
     Spend {
-        /// The pass file.
+        /// Validated TOML pass supplying the window, scope and ceilings.
         file: PathBuf,
         /// The counter name, one of the pass's ceilings.
         #[arg(required_unless_present = "charges", conflicts_with = "charges")]
@@ -103,7 +118,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
         /// What the spend pays for: `ADDRESS:PORT/PROTOCOL`. Refuse, and record nothing, unless the pass permits it now. Without it only the window and the ceiling are checked.
-        #[arg(long, value_name = "ADDR:PORT/PROTO")]
+        #[arg(long, value_name = "ADDR:PORT/PROTO[@NAME]")]
         to: Vec<String>,
         /// The host name the request will carry, as for `permits --name`. Only with --to.
         #[arg(long, value_name = "HOSTNAME", requires = "to")]
@@ -132,14 +147,29 @@ enum Command {
         counter: Option<String>,
     },
     /// Retain the exact validated pass bytes in a private archive directory.
-    Archive { file: PathBuf, directory: PathBuf },
+    Archive {
+        /// Validated pass to retain.
+        file: PathBuf,
+        /// Existing private archive directory (mode 0700).
+        directory: PathBuf,
+    },
     /// Print an archived pass byte-for-byte by its full digest.
-    Retrieve { directory: PathBuf, digest: String },
+    Retrieve {
+        /// Private directory populated by archive.
+        directory: PathBuf,
+        /// Full sha256 digest from archive or a ledger entry.
+        digest: String,
+    },
     /// Export a checkpoint to retain separately from the ledger.
-    Checkpoint { file: PathBuf },
+    Checkpoint {
+        /// Pass with an existing ledger to checkpoint.
+        file: PathBuf,
+    },
     /// Verify a ledger against a retained checkpoint JSON file.
     VerifyCheckpoint {
+        /// Ledger file itself (typically FILE.ledger).
         ledger: PathBuf,
+        /// Retained JSON from the checkpoint command.
         checkpoint: PathBuf,
     },
     /// Accept a ledger that was lost, changed outside hallpass, or has no witness, and record why.
@@ -160,16 +190,31 @@ enum Command {
         token: Option<String>,
     },
     /// Compare two pass revisions without authorizing either one.
-    Diff { old: PathBuf, new: PathBuf },
+    Diff {
+        /// Previously reviewed pass.
+        old: PathBuf,
+        /// Proposed replacement pass.
+        new: PathBuf,
+    },
     /// Report name-restriction overlaps as advisory findings.
-    Lint { file: PathBuf },
+    Lint {
+        /// Pass whose destination rules should be reviewed.
+        file: PathBuf,
+    },
     /// Replay a bounded, offline TOML case suite.
     #[command(name = "test-pass", alias = "cases")]
-    Cases { file: PathBuf, cases: PathBuf },
+    Cases {
+        /// Validated approval to evaluate.
+        file: PathBuf,
+        /// TOML suite with version = 1 and dated `[[case]]` examples.
+        cases: PathBuf,
+    },
     /// Derive a stable ID from an owner's written approval identity.
     ApprovalId {
+        /// Owner identity from the written approval.
         #[arg(long)]
         owner: String,
+        /// Stable written approval reference.
         #[arg(long)]
         reference: String,
     },
@@ -178,6 +223,8 @@ enum Command {
 impl Command {
     const fn name(&self) -> &'static str {
         match self {
+            Self::Help { .. } => "help",
+            Self::Version => "version",
             Self::Init { .. } => "init",
             Self::Check { .. } => "check",
             Self::Status { .. } => "status",
@@ -1501,7 +1548,7 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
     }
 }
 
-fn run(cli: &Cli) -> Output {
+fn run(cli: &Cli, format: Format) -> Output {
     let name = cli.command.name();
     let needs_clock = matches!(
         cli.command,
@@ -1523,6 +1570,8 @@ fn run(cli: &Cli) -> Output {
         }
     };
     match &cli.command {
+        Command::Help { topic } => cli_help::help(topic.as_deref(), format),
+        Command::Version => cli_help::version(),
         Command::Init { file } => init(file),
         Command::Check { file } => check(file),
         Command::Status { file } => status(file, &clock),
@@ -1600,58 +1649,84 @@ fn run(cli: &Cli) -> Output {
     }
 }
 
-/// Whether the raw command line asks for JSON (`--format json` or
-/// `--format=json` before any `--`). Used only when the command line could
-/// not be parsed.
-fn asked_for_json() -> bool {
-    let args: Vec<_> = std::env::args_os()
-        .skip(1)
-        .take_while(|a| a != "--")
-        .collect();
-    args.iter().any(|a| a == "--format=json")
-        || args
-            .windows(2)
-            .any(|pair| pair[0] == "--format" && pair[1] == "json")
+/// Help, version and usage errors can exit clap before it returns parsed
+/// options. Remember the requested output and the top-level command for those
+/// paths. Leave argument order, non-UTF-8 paths and everything after -- intact.
+struct Invocation {
+    args: Vec<OsString>,
+    json: bool,
+    topic: Option<OsString>,
 }
 
-fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(e) => {
-            // Help and version are not errors; anything else is exit 1
-            // (never clap's 2, which means "refused by the pass" here).
-            let code = if e.use_stderr() { ERROR } else { OK };
-            let _ = e.print();
-            if code == ERROR && asked_for_json() {
-                // The command line could not be read, so `--format json`
-                // was not parsed either: honour it by hand, so a caller
-                // that reads JSON always gets one object.
-                println!(
-                    "{}",
-                    json!({
-                        "command": Value::Null,
-                        "result": "error",
-                        "file": Value::Null,
-                        "error": {
-                            "code": "usage",
-                            "message": e.render().to_string().trim_end(),
-                            "line": Value::Null,
-                        },
-                        "problems": [],
-                        "warnings": [],
-                    })
-                );
+impl Invocation {
+    fn read() -> Self {
+        let mut args: Vec<_> = std::env::args_os().collect();
+        let mut requested_format = None;
+        let mut expects_format = false;
+        let mut topic = None;
+        let mut looking_for_command = true;
+        for arg in args.iter_mut().skip(1).take_while(|arg| *arg != "--") {
+            if arg == "--json" {
+                *arg = "--format=json".into();
             }
-            return ExitCode::from(code);
+            if let Some(value) = arg.to_str().and_then(|s| s.strip_prefix("--format=")) {
+                requested_format = Some(OsString::from(value));
+                expects_format = false;
+            } else if arg == "--format" {
+                requested_format = Some(OsString::new());
+                expects_format = true;
+            } else if expects_format {
+                requested_format = Some(arg.clone());
+                expects_format = false;
+            } else if looking_for_command {
+                looking_for_command = false;
+                if !arg.as_encoded_bytes().starts_with(b"-") {
+                    topic = Some(arg.clone());
+                }
+            }
         }
-    };
-    let mut output = run(&cli);
+        // Feed the environment default to the same value parser as an explicit
+        // flag, only when neither spelling appeared on the command line.
+        if requested_format.is_none()
+            && let Some(value) = std::env::var_os("FORMAT")
+        {
+            let mut option = OsString::from("--format=");
+            option.push(&value);
+            args.insert(1, option);
+            requested_format = Some(value);
+        }
+        let json = requested_format.as_deref() == Some(OsStr::new("json"));
+        Self { args, json, topic }
+    }
+}
+
+fn emit(mut output: Output, format: Format) -> ExitCode {
     if output.json.get("warnings").is_none() {
         output.json["warnings"] = json!([]);
     }
-    match cli.format {
-        Format::Json => println!("{}", output.json),
-        Format::Text => {
+    match format {
+        Format::Json => {
+            let mut advice = output.json["advice"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for warning in output.json["warnings"].as_array().into_iter().flatten() {
+                advice.push(json!({"level":"warn","type":"warning","message":warning}));
+            }
+            if matches!(
+                output.json["error"]["recording"].as_str(),
+                Some("recorded" | "uncertain")
+            ) {
+                advice.push(json!({"level":"warn","type":"reconcile-ledger","message":"Inspect the ledger and reconcile this operation before considering a retry."}));
+            } else if output.json["error"]["code"] == "usage" && advice.is_empty() {
+                advice.push(help_advice(output.json["command"].as_str()));
+            } else if output.json["command"] == "init" && output.code == OK {
+                advice.push(json!({"level":"info","type":"check-pass","message":"Fill in the owner's written approval, then run hallpass check on the new file."}));
+            }
+            output.json["advice"] = Value::Array(advice);
+            println!("{}", output.json);
+        }
+        Format::Text | Format::Pretty => {
             for w in output.json["warnings"].as_array().into_iter().flatten() {
                 eprintln!(
                     "hallpass: warning: {}",
@@ -1666,6 +1741,65 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::from(output.code)
+}
+
+/// Only a command name from clap's definition is passed here.
+fn help_advice(topic: Option<&str>) -> Value {
+    let mut argv = vec!["hallpass", "help"];
+    argv.extend(topic);
+    argv.extend(["--format", "json"]);
+    json!({"level":"info","type":"command-help","message":format!("Run {} for usage and examples.", argv.join(" ")), "argv":argv})
+}
+
+fn main() -> ExitCode {
+    let input = Invocation::read();
+    let mut definition = cli_help::definition();
+    let cli = definition
+        .try_get_matches_from_mut(input.args)
+        .and_then(|matches| Cli::from_arg_matches(&matches));
+    match cli {
+        Ok(cli) => {
+            let format = cli.format.unwrap_or_else(|| {
+                if std::io::stdout().is_terminal() {
+                    Format::Pretty
+                } else {
+                    Format::Text
+                }
+            });
+            emit(run(&cli, format), format)
+        }
+        Err(e) => {
+            if input.json {
+                let out = match e.kind() {
+                    ErrorKind::DisplayHelp => {
+                        cli_help::help(input.topic.as_deref().and_then(OsStr::to_str), Format::Json)
+                    }
+                    ErrorKind::DisplayVersion => cli_help::version(),
+                    _ => {
+                        let _ = e.print();
+                        let topic = input
+                            .topic
+                            .and_then(|s| definition.find_subcommand(s))
+                            .map(clap::Command::get_name);
+                        Output {
+                            code: ERROR,
+                            text: String::new(),
+                            json: json!({
+                                "command":null, "file":null, "result":"error", "problems":[],
+                                "error":{"code":"usage","message":e.render().to_string().trim_end(),"line":null},
+                                "advice":[help_advice(topic)]
+                            }),
+                        }
+                    }
+                };
+                emit(out, Format::Json)
+            } else {
+                let code = if e.use_stderr() { ERROR } else { OK };
+                let _ = e.print();
+                ExitCode::from(code)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

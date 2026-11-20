@@ -303,29 +303,27 @@ pass id: it means nothing was spent.
 ## Command line
 
 ```text
-hallpass [--format text|json] <command>
-  init FILE
-  check FILE
-  status FILE
-  permits FILE --to ADDR:PORT/PROTO [--name HOSTNAME] [--duration SECONDS]
-  spend FILE COUNTER [--to ADDR:PORT/PROTO [--name HOSTNAME]] [--n N] [--note TEXT]
-        [--digest DIGEST] [--duration SECONDS]
-  digest FILE
-  ledger FILE [--counter NAME]
-  adopt FILE --reason TEXT
+hallpass [--format text|pretty|json] <command>
+hallpass help [COMMAND]
+hallpass version
 ```
 
-Exit codes: **0** ok or allowed; **2** refused by the pass; **1** any other
-error, including command-line usage errors. Text output goes to standard
-output, except errors, which go to standard error. With `--format json`
-every command prints one JSON object on standard output, errors included.
-A command line that cannot be read (unknown command, missing argument, bad
-option value) prints the parser's text on standard error, exit 1, and with
-`--format json` (or `--format=json`) also an error object with code `usage`
-and `command` and `file` null. `--help` and `--version` print text and exit
-0 wherever they appear, so a caller requires `result` as well as the exit
-code, and puts options first and `--` before `FILE`. How another tool should
-call hallpass: [INTEGRATING.md](INTEGRATING.md).
+Use `hallpass help --format json` for the installed command directory and
+`hallpass help COMMAND --format json` for arguments, usage, examples and
+workflow. The global format option works on either side of the command,
+before the argument separator `--`. An explicit format overrides `FORMAT`.
+With neither set, terminals select pretty and pipes select text. Operational
+commands use their established plain output in both modes. The help command
+uses a compact listing in text and the expanded listing in pretty.
+
+Exit **0** indicates success, **1** indicates a usage, file or accounting
+error, and **2** indicates a policy refusal or verification mismatch. Text
+errors go to stderr. In JSON mode every command emits one object on stdout,
+including usage errors, help and version. Parser failures also print their
+diagnostic to stderr and return `error.code = "usage"` with null `command`
+and `file`. Help and version requests return their own command name and
+`result = "ok"`. Counted work requires a successful spend reply. See the
+[caller contract](INTEGRATING.md).
 
 | Command | Exit 0 | Exit 2 | Exit 1 |
 |---|---|---|---|
@@ -360,8 +358,14 @@ sequence. JSON output carries the exact text.
 
 ### JSON fields
 
-Every object has `command` and `result` (`ok`, `allowed`, `refused`,
-`error`), `file`, and `warnings` (a list of strings, usually empty).
+Every object has `command`, a command-specific `result`, `warnings` (strings)
+and `advice` (objects with `level`, `type` and `message`). Both arrays can
+be empty. Commands that report a pass path use `file`.
+
+- **help** includes `topic` (null for root), `commands`, `usage`, `arguments`,
+  `examples`, `workflow` and `exit_codes`. Argument metadata describes
+  unconditional requirements. Consult the usage forms for conditional ones.
+- **version** returns the package version in `version`.
 
 - **error** (any command): `error` `{code, message, line}` (`line` is the
   1-based ledger line for `ledger-corrupt`, else null), `problems` (list of

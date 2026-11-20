@@ -175,7 +175,8 @@ exit 0
 ## Rules for a command-line caller
 
 - **Judge by `result`, then by the exit code; require both.** `--help` or
-  `-h` anywhere on the command line prints help and exits 0. Put every
+  `-h` requests help and exits 0. In JSON mode its object has
+  `command = "help"` and `result = "ok"`. Put every
   option first, then `--`, then the pass path and the counter, as above:
   nothing after `--` is read as an option, so a file named `-h` is a file.
   Never build the command line through a shell.
