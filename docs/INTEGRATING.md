@@ -469,10 +469,12 @@ the file again.
   the targets checked. Keep the returned `seq` and digest with your own run record.
 - **Time after the decision.** The CLI samples its spend clock under the writer locks after preparatory witness writes and immediately before evaluating policy. Status, permits and spend previews sample after evidence verification. Time between return and the end of work must still fit the approved window. Rust callers using explicit-time `spend_in` supply their own decision instant.
 
-## Reservations
+## Accounting after a crash
 
-A recorded spend is final under the current accounting rules. Complete local
-preparation before spending and request the debit immediately before the first
-send. If the process crashes after the debit, include that unit in the recorded
-total. The approval-owner decision about introducing reservations and releases
-is tracked in `bn-34a`.
+A recorded spend is final. Use `spend --dry-run` during preparation, then
+request the debit immediately before the first send. For example, with one
+request and 100 bytes left, two callers can both pass preflight for that
+amount. Only one can commit the debit. If that caller crashes before sending,
+the remaining budget is still zero requests and zero bytes. If a crash leaves
+the append outcome uncertain, reconcile the ledger before attempting another
+spend.

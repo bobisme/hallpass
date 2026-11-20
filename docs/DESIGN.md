@@ -402,9 +402,9 @@ listing. A separately retained checkpoint commits to an exact prefix but does
 not establish who approved it or authenticate a checkpoint rewritten alongside
 the ledger.
 
-### Current accounting and proposed release policy
+### Recorded spends are final
 
-Hallpass currently uses monotone spend-only accounting. The caller spends once,
+The approval owner chose to keep recorded spends final. The caller spends once,
 immediately before the first send of a unit with known costs. A read-only
 preflight can help prepare work, but its result is advisory and concurrent
 callers can spend the observed budget before the first send. First-send
@@ -424,9 +424,9 @@ unit never left. Only the caller's send boundary could furnish evidence, and
 a recovered caller can be uncertain after a crash around that boundary.
 Concurrent attempts would require an identity for each reservation and one
 durable decision per release, with rules for missing history and carry
-forward during adoption. The proposal is to keep spend-only accounting
-while that uncertainty remains. The approval owner’s disposition on
-release is pending.
+forward during adoption. Returning credit after an ambiguous send could let a
+second caller exceed the approved ceiling. Revisit reservations if a caller
+needs guaranteed capacity before it can begin preparation.
 
 A crash or I/O error around append requires reconciliation by sequence and
 digest (and a caller reference when available) before retry. An explicit
