@@ -5,6 +5,26 @@ yet built is marked **planned**. The exact file format is in
 [PASS-FORMAT.md](PASS-FORMAT.md); the reasons behind the decisions are in
 [DESIGN.md](DESIGN.md).
 
+## Approval review
+
+`hallpass diff OLD NEW` is read-only and compares declared fields, printing
+both byte digests. It normalizes port ranges, distinguishes informational
+`hostname` from enforced `names`, reports destination additions/removals and
+order changes, and flags uncertain containment for owner review. It never
+authorizes a spend. `hallpass lint PASS` reports named rules overlapping
+nameless rules for the same address family, protocol, and ports; each claimed
+effective allowance is replayed through `permits_named` at the supplied time.
+Lint reports at most 256 findings and indicates when it truncated the list.
+
+`hallpass test-pass PASS SUITE` checks up to 1,024 ordered cases offline.
+Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
+invalid input or an error. See the [example suite](review-suite.toml).
+
+`check` and `status` report exact declared address-space unions separately for
+IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`
+and one IPv6 `/64` are documented consumer comparison points; they are
+advisory only and do not change existing validation caps.
+
 ## Purpose
 
 An authorized test needs a written permission from the owner of what is
@@ -257,7 +277,7 @@ the loss. The window is not checked: an adoption permits nothing.
 
 ### Fail-closed cases
 
-Each of these is an error (exit 1), permits nothing, and records nothing:
+Every error below exits 1. The caller must stop. An append or witness failure can leave a debit on disk.
 
 | Case | Code |
 |---|---|
@@ -272,6 +292,7 @@ Each of these is an error (exit 1), permits nothing, and records nothing:
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
+| the append or its sync failed and the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
 | bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a malformed test clock | `usage` |
@@ -478,12 +499,15 @@ pass is revoked. [DESIGN.md](DESIGN.md) explains each.
   interface field: would need a new format version; not planned in detail.
 
 
-### Caller decision contract (0.2)
+## Caller decision contract (0.2)
 
 Use `hallpass --version` for the binary version. Readers should accept extra
 JSON fields. Stable refusal/error codes and on-disk format versions are
-separate contracts. The CLI uses the clock after acquiring writer locks for
-spends. An instant earlier than the last ledger event produces a warning.
+separate contracts. The CLI samples the live clock after evidence verification for status, permits
+and previews, and after preparatory witness writes under writer locks immediately
+before spend policy evaluation. Explicit-time Rust APIs use the instant supplied
+by their caller. Status and spend warn when that instant is strictly earlier than
+the latest ledger event; equal instants do not warn.
 
 The optional `permits --digest` precondition uses the byte digest and gives
 exit 2 / `pass-changed` on a mismatch after ledger verification. For permits
@@ -510,3 +534,42 @@ After `witness-not-updated`, `error.recording` is `recorded` and the JSON
 error contains `seq` and `ledger`. A `ledger-append-uncertain` error includes
 the ledger path and `recording = "uncertain"`. Both exit 1. Inspect the
 ledger and reconcile before retrying.
+
+### Recovery preview and checkpoints
+
+`adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
+case, present totals, carry and projected totals, prior witness and a versioned
+opaque token. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
+the writer's witness and ledger locks; a stale token is an error (exit 1) and
+requires a new preview. An adoption already appended before a subsequent witness
+write failure still counts; inspect the ledger before retrying.
+
+`checkpoint` exports a versioned pass ID, sequence and exact-line hash, plus
+whether a local witness corroborates the history. Sequence zero identifies the
+header. `verify-checkpoint` validates the supplied ledger and reports `exact`
+or `extended` (exit 0), `mismatch` (exit 2), or an input/error condition (exit
+1). Verification uses the supplied checkpoint as its trust input and does not
+read or create a witness. Retain checkpoints separately from the ledger.
+
+The guard coordinates hallpass writers through their locks. Programs that edit
+pass or ledger files without taking those locks can change them after a reviewed
+snapshot; the missing-ledger decision uses the validated pass snapshot held at
+publication time.
+
+### Atomic accounting
+
+One unit can debit multiple named budgets. The same policy decision checks
+the pass digest, active window, requested destinations, and every ceiling
+under the writer locks. A successful commit syncs one ledger sequence and
+updates the witness with every resulting balance. Refusal leaves every
+counter balance unchanged. Positive previews return projected_spent for each
+charge while leaving the reported current balances and the ledger unchanged. Historical
+scalar debits and adoption carry-forward remain valid, and tallying counts
+a multi-charge unit once while adding each charge to its counter.
+
+The versioned debit can retain an explicitly supplied caller reference and,
+when requested, the approved targets and matched destination labels. The
+reference correlates the caller's own run record with the digest and
+sequence. An older incompatible reader fails closed on a versioned debit.
+Charges remain monotone through restoration and adoption. Callers commit
+at first send and reconcile ambiguous append outcomes against the ledger.

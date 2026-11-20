@@ -1,5 +1,42 @@
 # Calling hallpass from another tool
 
+## Review and case suites
+
+Run `hallpass diff OLD NEW` to inspect the changed terms and both byte
+digests. Run `hallpass lint NEW` to see where a second destination relaxes a
+name restriction.
+
+Try the owner example from the repository root with
+`hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml`.
+The suite checks a named allowance, a name refusal and both window boundaries.
+Each case supplies an offset timestamp, target, and an expected outcome of
+`allowed` or a stable refusal code. The version 1 TOML suite accepts up to
+1,024 cases and 256 KiB. Exit 0 means every expectation matched, 2 means a
+mismatch, and 1 means invalid input. The report includes the pass digest
+and preserves input order. The command reads no accounting state.
+
+## Mapping written approvals and practice runs
+
+Keep the exact written reference in `approval.reference`. For a stable ID,
+construct `hp1-` plus the first 52 lowercase hexadecimal characters of
+SHA-256 over the namespace `hallpass/approval/v1`, owner identity, and the
+exact reference string, separated by NUL bytes. If that ID already belongs to
+different owner/reference material, append `-2`, `-3`, and so on. Revisions of
+the same approval retain the ID; a different owner or reference is a new ledger
+identity. An approval without a trustworthy start instant is incomplete:
+request the actual approval time instead of guessing one.
+
+The executable recipe is `hallpass approval-id --owner "OWNER" --reference
+"REFERENCE"`; copy its result into the pass. It is deterministic for the
+same owner/reference pair and deliberately does not guess a validity window.
+
+For a loopback practice run, allocate a fresh ID and explicit window and
+ceilings for each separately approved start. For example, use `practice-` followed by a new UUIDv4 as the run ID, while retaining the reusable owner reference as
+metadata. Persist that ID in the pass and keep the ordinary ledger and witness
+locations. A restart in the same run reuses the same pass and ledger; a second
+run gets a new ID and budget. Do not copy a pass without its ledger, use a reset
+flag, or apply this recipe to routed rehearsals.
+
 This page is for the author of a tool that sends traffic and wants hallpass
 to decide whether it may. It covers the command line, the library, what a
 "yes" guarantees and what it does not. The rules themselves are in
@@ -200,6 +237,122 @@ denotes launch failure. Both stop and reconcile must invoke zero callbacks.
 The integration suite also supplies real CLI output acquired with the
 production clock. [Fixtures](conformance/cases.json) · [Reference decoder](conformance/check.py)
 
+## Charge all known costs at the first send
+
+Use positional COUNTER with optional --n for a scalar spend, or repeat
+--charge COUNTER=N for the named costs of one unit. Each counter may occur
+once. In JSON a successful debit has result "allowed", one seq, and a
+charges array with counter, n, total, spent and remaining for each charge.
+A refusal has result "refused", no sequence, and unchanged balances. Text
+output shows the sequence and per-counter balances. The scalar command keeps
+its existing JSON fields.
+
+A read-only --dry-run returns "would-allow" when all costs fit at the check,
+with current balances, projected_spent per charge and no sequence. An exit status of zero with result
+"allowed" and a sequence authorizes that unit. The caller should send
+immediately, using the exact destinations and scope it checked. A preview
+never reserves capacity. A committed debit stands if the caller crashes
+before sending. On ambiguous outcomes, inspect the ledger and avoid blind
+retries. A witness-update failure reports the sequence that already synced.
+
+For an isolated run with the debug binary, create a pass and charge it as
+shown below. Both subprocesses use the same pass and witness. At most one
+can consume the available request and bytes.
+
+~~~sh
+set -eu
+hallpass_bin=$(command -v hallpass)
+work=$(mktemp -d)
+trap 'rm -r -- "$work"' EXIT
+export HOME="$work/home"
+export XDG_STATE_HOME="$work/state"
+mkdir -m 700 "$HOME"
+export HALLPASS_UNSAFE_TEST_CLOCK=2026-11-20T09:00:00Z
+umask 077
+pass="$work/example.toml"
+cat >"$pass" <<'PASS'
+format = 1
+id = "multi-charge-example"
+name = "Atomic debit example"
+
+[approval]
+owner = "Example approval owner"
+operator = "Example operator"
+reference = "Example approval"
+valid_from = 2026-11-20T08:00:00Z
+valid_until = 2026-11-20T17:00:00Z
+revoked = false
+
+[[destination]]
+label = "sip-edge"
+address = "192.0.2.10"
+protocol = "udp"
+ports = 5060
+names = ["sip.example.net"]
+
+[[destination]]
+label = "web"
+network = "2001:db8::/120"
+protocol = "tcp"
+ports = 443
+names = ["edge.example.net"]
+
+[ceilings]
+requests = 1
+bytes = 100
+PASS
+
+digest=$("$hallpass_bin" --format json digest "$pass" | jq -er .digest)
+spend() {
+    "$hallpass_bin" --format json spend "$pass" \
+        --charge requests=1 --charge "bytes=$1" \
+        --to 192.0.2.10:5060/udp@sip.example.net \
+        --to '[2001:db8::1]:443/tcp@edge.example.net' --digest "$digest" \
+        --caller-ref "$2" --record-target
+}
+# A preview observes the current balances without reserving them.
+"$hallpass_bin" --format json spend "$pass" --dry-run \
+    --charge requests=1 --charge bytes=100 \
+    --to 192.0.2.10:5060/udp@sip.example.net \
+    --to '[2001:db8::1]:443/tcp@edge.example.net' \
+    | jq -e '.result == "would-allow" and .seq == null'
+test ! -e "$pass.ledger"
+
+# This refusal charges neither counter and leaves the initial ledger header.
+spend 101 run-81/too-large >"$work/refusal.json" || test "$?" -eq 2
+cp "$pass.ledger" "$work/initial.ledger"
+
+spend 100 run-81/unit-a >"$work/a.json" &
+a=$!
+spend 100 run-81/unit-b >"$work/b.json" &
+b=$!
+wait "$a" || test "$?" -eq 2
+wait "$b" || test "$?" -eq 2
+
+# Store the approved unit's sequence and digest alongside the caller reference.
+jq -s -e 'map(select(.result == "allowed")) |
+    if length == 1 then .[0] | {ref: .receipt.caller_ref, seq, digest, charges}
+    else error("expected exactly one committed debit") end' \
+    "$work/a.json" "$work/b.json"
+"$hallpass_bin" status "$pass"
+"$hallpass_bin" ledger "$pass" --counter bytes
+
+# Deliberately restore the header-only copy to exercise adoption.
+cp "$work/initial.ledger" "$pass.ledger"
+"$hallpass_bin" adopt "$pass" --reason "restored example ledger"
+"$hallpass_bin" ledger "$pass" --counter requests
+~~~
+
+The refused 101-byte request spends zero requests and zero bytes. The
+successful 100-byte request leaves both counters at zero remaining. After
+adoption the ledger records both charges as witness carry-forward. The
+caller reference correlates the ledger receipt with a caller-run record.
+The caller should include the pass id when references can span passes.
+References are correlation data rather than idempotency keys. Before
+opting in to --record-target, take into account who can read the ledger
+and its exports. The option stores the literal, canonical request name
+and matched label for each checked target.
+
 ## The library
 
 For Rust callers the same decision is `hallpass::spend` with
@@ -295,18 +448,15 @@ the file again.
 - **A count across machines or users.** Each user on each machine has its
   own witness; a pass and ledger copied to a second machine is accepted
   there with a warning on its first spend.
-- **That a counted unit was sent**, or that an entry says what it paid for:
-  the ledger holds counter, amount, time, pass digest and the note, not the
-  target. Put your own run reference in `--note` and keep the returned
-  `seq`.
-- **Time after the decision.** The CLI samples its spend clock under the writer locks. Time between return and the end of work must still fit the approved window. Rust callers using explicit-time `spend_in` supply their own decision instant.
+- **That a counted unit was sent.** A debit records admission for one unit.
+  When you opt in to a receipt, it can also record a caller reference and
+  the targets checked. Keep the returned `seq` and digest with your own run record.
+- **Time after the decision.** The CLI samples its spend clock under the writer locks after preparatory witness writes and immediately before evaluating policy. Status, permits and spend previews sample after evidence verification. Time between return and the end of work must still fit the approved window. Rust callers using explicit-time `spend_in` supply their own decision instant.
 
-## Not offered yet
+## Reservations
 
-These are needs of known callers that hallpass does not meet; each is a
-bone in this repository (`bn list`):
-
-- giving back a spend whose traffic never left (reserve, then release);
-- practice passes whose id is reused in many directories;
-- the target and a caller reference in the ledger entry;
-- a limit on the total breadth of all destinations together.
+A recorded spend is final under the current accounting rules. Complete local
+preparation before spending and request the debit immediately before the first
+send. If the process crashes after the debit, include that unit in the recorded
+total. The approval-owner decision about introducing reservations and releases
+is tracked in `bn-34a`.

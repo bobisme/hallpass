@@ -166,3 +166,192 @@ fn every_code_block_in_the_document_says_what_it_is() {
     }
     assert_eq!(blocks("rust,no_run").len(), 1);
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn offline_recovery_walkthrough_uses_reviewed_bytes_and_guard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let home = root.join("home");
+    let other_home = root.join("other-home");
+    let archive = root.join("archive");
+    for path in [&home, &other_home, &archive] {
+        fs::create_dir(path).expect("directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("mode");
+    }
+    let pass = root.join("engagement.toml");
+    let original = blocks("toml")[0].clone();
+    fs::write(&pass, &original).expect("pass");
+    fs::set_permissions(&pass, fs::Permissions::from_mode(0o600)).expect("mode");
+    let run = |home: &std::path::Path, args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(root)
+            .env("HOME", home)
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
+            .output()
+            .expect("run");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let json = |home: &std::path::Path, args: &[&str]| -> Value {
+        serde_json::from_slice(&run(home, args)).expect("JSON")
+    };
+    let archived = json(
+        &home,
+        &["--format", "json", "archive", "engagement.toml", "archive"],
+    );
+    let digest = archived["digest"].as_str().expect("digest");
+    json(
+        &home,
+        &["--format", "json", "spend", "engagement.toml", "calls"],
+    );
+    let ledger = root.join("engagement.toml.ledger");
+    let old = fs::read(&ledger).expect("ledger");
+    let checkpoint = run(&home, &["checkpoint", "engagement.toml"]);
+    fs::write(root.join("checkpoint.json"), checkpoint).expect("checkpoint");
+    fs::write(&pass, format!("{original}\n# revised\n")).expect("edit");
+    json(
+        &home,
+        &["--format", "json", "spend", "engagement.toml", "calls"],
+    );
+    let verification = json(
+        &other_home,
+        &[
+            "--format",
+            "json",
+            "verify-checkpoint",
+            "engagement.toml.ledger",
+            "checkpoint.json",
+        ],
+    );
+    assert_eq!(verification["result"], "extended");
+    assert_eq!(verification["added"], 1);
+    assert!(!other_home.join("state").exists());
+    assert_eq!(
+        run(&home, &["retrieve", "archive", digest]),
+        original.as_bytes()
+    );
+    fs::write(&ledger, old).expect("restore");
+    let preview = json(
+        &home,
+        &["--format", "json", "adopt", "engagement.toml", "--preview"],
+    );
+    assert_eq!(preview["carried"]["calls"], 1);
+    let token = preview["token"].as_str().expect("token");
+    let applied = json(
+        &home,
+        &[
+            "--format",
+            "json",
+            "adopt",
+            "engagement.toml",
+            "--reason",
+            "restore",
+            "--token",
+            token,
+        ],
+    );
+    assert_eq!(applied["totals"]["calls"], 2);
+    fs::write(
+        &ledger,
+        fs::read(&ledger)
+            .expect("ledger")
+            .split_inclusive(|b| *b == b'\n')
+            .take(2)
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+    .expect("restore again");
+    let next = json(
+        &home,
+        &["--format", "json", "adopt", "engagement.toml", "--preview"],
+    );
+    let next_token = next["token"].as_str().expect("token");
+    let spawn = || {
+        Command::new(BIN)
+            .args([
+                "--format",
+                "json",
+                "adopt",
+                "engagement.toml",
+                "--reason",
+                "raced",
+                "--token",
+                next_token,
+            ])
+            .current_dir(root)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+    let first = spawn();
+    let second = spawn();
+    let first = first.wait_with_output().expect("wait");
+    let second = second.wait_with_output().expect("wait");
+    assert_eq!(
+        [first.status.success(), second.status.success()]
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&ledger).expect("ledger").lines().count(),
+        3
+    );
+    fs::remove_file(&ledger).expect("remove ledger");
+    let missing = json(
+        &home,
+        &["--format", "json", "adopt", "engagement.toml", "--preview"],
+    );
+    assert_eq!(missing["case"], "ledger-missing");
+    let missing_token = missing["token"].as_str().expect("token");
+    let spawn_missing = || {
+        Command::new(BIN)
+            .args([
+                "--format",
+                "json",
+                "adopt",
+                "engagement.toml",
+                "--reason",
+                "missing",
+                "--token",
+                missing_token,
+            ])
+            .current_dir(root)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+    let first = spawn_missing();
+    let second = spawn_missing();
+    let first = first.wait_with_output().expect("wait");
+    let second = second.wait_with_output().expect("wait");
+    assert_eq!(
+        [first.status.success(), second.status.success()]
+            .iter()
+            .filter(|s| **s)
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&ledger).expect("ledger").lines().count(),
+        2
+    );
+}

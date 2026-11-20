@@ -32,7 +32,10 @@ use crate::pass::{MAX_CEILING, is_counter_name};
 /// The witness format version.
 const WITNESS_VERSION: u32 = 1;
 /// The largest witness file hallpass reads.
-const MAX_WITNESS_BYTES: u64 = 64 * 1024;
+// Version 1 originally read only 64 KiB, but accepted appends could write
+// a larger witness. This limit leaves room for that last valid batch and
+// accommodates many revisions of a pass's counter set.
+const MAX_WITNESS_BYTES: usize = 1024 * 1024;
 
 /// Where hallpass keeps its witnesses: `$XDG_STATE_HOME/hallpass`, or
 /// `$HOME/.local/state/hallpass` when `XDG_STATE_HOME` is unset, empty or
@@ -255,9 +258,10 @@ impl StateDir {
             ));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_WITNESS_BYTES + 1)
+        file.take(MAX_WITNESS_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| self.unavailable(pass_id, format!("{} ({e})", path.display())))?;
+        self.check_size(pass_id, bytes.len())?;
         let damaged = || {
             self.unavailable(
                 pass_id,
@@ -284,16 +288,21 @@ impl StateDir {
         }))
     }
 
-    /// Replace the witness for `pass_id` (written aside, synced, renamed into
-    /// place). The caller holds [`StateDir::lock`].
-    pub(crate) fn write(&self, pass_id: &str, witness: &Witnessed) -> Result<(), Error> {
-        let dir = self.ensure(pass_id)?;
-        let path = dir.join(format!("{pass_id}.witness"));
-        let temp = dir.join(format!(
-            ".{pass_id}.witness.{}.{}.tmp",
-            std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
+    fn check_size(&self, pass_id: &str, len: usize) -> Result<(), Error> {
+        if len <= MAX_WITNESS_BYTES {
+            return Ok(());
+        }
+        Err(self.unavailable(pass_id, format!(
+            "the witness exceeds the {MAX_WITNESS_BYTES}-byte size limit. Preserve the ledger and witness and ask the approval owner to issue a new pass ID with ceilings that account for the existing spends"
+        )))
+    }
+
+    /// Serialize and check the final witness before appending its ledger record.
+    pub(crate) fn prepare(
+        &self,
+        pass_id: &str,
+        witness: &Witnessed,
+    ) -> Result<PreparedWitness, Error> {
         let mut text = serde_json::to_string(&WitnessFile {
             hallpass_witness: WITNESS_VERSION,
             pass_id: pass_id.to_owned(),
@@ -305,13 +314,32 @@ impl StateDir {
         })
         .map_err(|e| self.unavailable(pass_id, e.to_string()))?;
         text.push('\n');
+        self.check_size(pass_id, text.len())?;
+        Ok(PreparedWitness(text))
+    }
+
+    /// Prepare and replace a witness for already verified ledger evidence.
+    pub(crate) fn write(&self, pass_id: &str, witness: &Witnessed) -> Result<(), Error> {
+        self.publish(pass_id, &self.prepare(pass_id, witness)?)
+    }
+
+    /// Replace the witness by syncing a temporary file and renaming it.
+    /// The caller holds the witness lock.
+    pub(crate) fn publish(&self, pass_id: &str, witness: &PreparedWitness) -> Result<(), Error> {
+        let dir = self.ensure(pass_id)?;
+        let path = dir.join(format!("{pass_id}.witness"));
+        let temp = dir.join(format!(
+            ".{pass_id}.witness.{}.{}.tmp",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&temp)?;
-            file.write_all(text.as_bytes())?;
+            file.write_all(witness.0.as_bytes())?;
             file.sync_all()?;
             fs::rename(&temp, &path)?;
             File::open(dir)?.sync_all()
@@ -327,6 +355,9 @@ impl StateDir {
         })
     }
 }
+
+/// A fully serialized witness that fits the reader's size limit.
+pub struct PreparedWitness(String);
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

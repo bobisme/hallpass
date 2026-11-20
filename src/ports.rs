@@ -45,6 +45,24 @@ impl PortSet {
         self.ranges.iter().any(|(s, e)| (*s..=*e).contains(&port))
     }
 
+    /// A canonical, sorted and merged view used by review tooling.
+    #[must_use]
+    pub fn normalized_ranges(&self) -> Vec<(u16, u16)> {
+        let mut ranges = self.ranges.clone();
+        ranges.sort_unstable();
+        let mut out: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some((_, last_end)) = out.last_mut()
+                && u32::from(start) <= u32::from(*last_end) + 1
+            {
+                *last_end = (*last_end).max(end);
+            } else {
+                out.push((start, end));
+            }
+        }
+        out
+    }
+
     /// Parse one element written as a string: `"443"` or `"8000-8100"`.
     ///
     /// # Errors

@@ -1784,3 +1784,389 @@ fn caller_kit_consumes_genuine_production_decisions() {
         .expect("pipe genuine results");
     assert!(reference.wait().expect("reference").success());
 }
+
+#[test]
+fn atomic_charges_race_filter_and_carry_forward() {
+    let case = Case::new();
+    let pass = PASS.replace("requests = 500", "requests = 1\nbytes = 100");
+    let path = case.pass("atomic.toml", &pass);
+    let file = s(&path);
+    let ledger = hallpass::ledger_path(&path);
+    let args = ["spend", file, "--charge", "requests=1", "--charge"];
+    let preview = json(
+        &[&args[..], &["bytes=100", "--dry-run"]].concat(),
+        Some(NOW),
+    );
+    assert_eq!(preview.0, 0);
+    assert_eq!(preview.1["result"], "would-allow");
+    assert!(preview.1["seq"].is_null());
+    assert!(!ledger.exists());
+    assert!(!case.state().exists());
+
+    let (code, refusal) = json(&[&args[..], &["bytes=101"]].concat(), Some(NOW));
+    assert_eq!(code, 2);
+    let balances = refusal["charges"].as_array().expect("charges");
+    assert!(balances.iter().all(|charge| charge["spent"] == 0));
+    let older = fs::read(&ledger).expect("initial ledger");
+
+    let clients = [0, 1].map(|idx| {
+        hallpass()
+            .args(["--format", "json"])
+            .args(args)
+            .args([
+                "bytes=100",
+                "--to",
+                "192.0.2.10:5060/udp",
+                "--name",
+                "SIP.EXAMPLE.NET.",
+                "--record-target",
+                "--caller-ref",
+            ])
+            .arg(format!("run \"{idx}\" \\"))
+            .env(CLOCK, NOW)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("client")
+    });
+    let mut results: Vec<_> = clients
+        .into_iter()
+        .map(|client| {
+            let output = client.wait_with_output().expect("client output");
+            let result: Value = serde_json::from_slice(&output.stdout).expect("json");
+            (output.status.code().expect("code"), result)
+        })
+        .collect();
+    results.sort_by_key(|(code, _)| *code);
+    assert_eq!(results[0].0, 0);
+    assert_eq!(results[1].0, 2);
+    let committed = &results[0].1;
+    assert_eq!(committed["seq"], 1);
+    assert_eq!(committed["charges"][0]["spent"], 1);
+    assert_eq!(committed["charges"][1]["spent"], 100);
+    assert_eq!(committed["charges"][0]["remaining"], 0);
+    assert_eq!(committed["charges"][1]["remaining"], 0);
+    assert_eq!(
+        committed["receipt"]["targets"][0]["name"],
+        "sip.example.net"
+    );
+    assert_eq!(committed["receipt"]["targets"][0]["label"], "sip-edge");
+
+    let (status, view) = json(&["status", file], Some(NOW));
+    assert_eq!(status, 0);
+    assert_eq!(view["ledger"]["entries"], 1);
+    for counter in ["requests", "bytes"] {
+        let (status, filtered) = json(&["ledger", file, "--counter", counter], None);
+        assert_eq!(status, 0);
+        let entries = filtered["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["charges"].as_array().expect("charges").len(), 2);
+        assert_eq!(entries[0]["receipt"], committed["receipt"]);
+        assert_eq!(entries[0]["digest"], committed["digest"]);
+    }
+    fs::write(&path, pass.replace("bytes = 100", "bytes = 150")).expect("edit pass");
+    let (_, filtered) = json(&["ledger", file, "--counter", "bytes"], None);
+    assert_eq!(filtered["entries"][0]["receipt"], committed["receipt"]);
+    assert_eq!(filtered["entries"][0]["digest"], committed["digest"]);
+    assert_ne!(filtered["digest"], committed["digest"]);
+
+    fs::write(&ledger, older).expect("rewind");
+    let (status, _) = json(
+        &["adopt", file, "--reason", "restored initial ledger"],
+        Some(NOW),
+    );
+    assert_eq!(status, 0);
+    for (counter, spent) in [("requests", 1), ("bytes", 100)] {
+        let (status, filtered) = json(&["ledger", file, "--counter", counter], None);
+        assert_eq!(status, 0);
+        assert_eq!(filtered["totals"][0]["spent"], spent);
+        assert_eq!(filtered["adoptions"][0]["carried"][counter], spent);
+    }
+}
+
+#[test]
+fn invalid_multi_charge_and_receipt_arguments_leave_no_ledger() {
+    let case = Case::new();
+    let path = case.pass("invalid-debit.toml", PASS);
+    let too_long = "x".repeat(hallpass::MAX_CALLER_REF + 1);
+    for suffix in [
+        vec![],
+        vec!["--charge", "requests=1", "calls"],
+        vec!["--charge", "requests=1", "--n", "1"],
+        vec!["--charge", "requests=1", "--charge", "requests=2"],
+        vec!["--charge", ""],
+        vec!["--charge", "requests=0"],
+        vec!["--charge", "requests=+1"],
+        vec!["--charge", "requests=18446744073709551616"],
+        vec!["requests", "--caller-ref", &too_long],
+        vec!["requests", "--caller-ref", "bad\nline"],
+        vec!["requests", "--record-target"],
+    ] {
+        let (status, _) = json(&[&["spend", s(&path)][..], &suffix].concat(), Some(NOW));
+        assert_eq!(status, 1, "{suffix:?}");
+        assert!(!hallpass::ledger_path(&path).exists());
+    }
+    let (status, decision) = json(
+        &[
+            "spend",
+            s(&path),
+            "--charge",
+            "requests=1",
+            "--charge",
+            "unknown=1",
+        ],
+        Some(NOW),
+    );
+    assert_eq!(status, 2);
+    assert_eq!(decision["refusal"]["code"], "unknown-counter");
+    assert_eq!(decision["charges"][0]["spent"], 0);
+}
+
+#[test]
+fn charged_unit_preview_and_receipt_bind_every_target_in_order() {
+    let case = Case::new();
+    let pass = PASS.replace("ports = 443", "ports = 443\nnames = [\"edge.example\"]");
+    let path = case.pass("charged-unit.toml", &pass);
+    let file = s(&path);
+    let ledger = hallpass::ledger_path(&path);
+    let unit = [
+        "spend",
+        file,
+        "--charge",
+        "requests=1",
+        "--charge",
+        "calls=1",
+    ];
+    let first = "192.0.2.10:5060/udp";
+    let second = "[2001:db8::1]:443/tcp@EDGE.EXAMPLE.";
+    let options = [
+        "--to",
+        first,
+        "--to",
+        second,
+        "--record-target",
+        "--caller-ref",
+        "job-24",
+    ];
+    let allowed = [&unit[..], &options].concat();
+
+    let (code, preview) = json(&[&allowed[..], &["--dry-run"]].concat(), Some(NOW));
+    assert_eq!(code, 0, "{preview}");
+    assert_eq!(preview["result"], "would-allow");
+    assert_eq!(preview["targets"][0]["label"], "sip-edge");
+    assert_eq!(preview["targets"][1]["label"], "web");
+    assert_eq!(preview["charges"][0]["projected_spent"], 1);
+    assert!(preview["seq"].is_null());
+    assert!(preview["receipt"].is_null());
+    assert!(!ledger.exists());
+    assert!(!case.state().exists());
+
+    let (code, ambiguous) = json(
+        &[&allowed[..], &["--name", "edge.example"]].concat(),
+        Some(NOW),
+    );
+    assert_eq!(code, 1, "{ambiguous}");
+    assert!(!ledger.exists());
+
+    let mut denied = allowed.clone();
+    denied[9] = "[2001:db8::1]:443/tcp@wrong.example";
+    let (code, preview) = json(&[&denied[..], &["--dry-run"]].concat(), Some(NOW));
+    assert_eq!(code, 2, "{preview}");
+    assert_eq!(preview["refused_target"], 2);
+    assert!(preview["seq"].is_null());
+    assert!(!ledger.exists());
+    assert!(!case.state().exists());
+
+    let (code, committed) = json(&allowed, Some(NOW));
+    assert_eq!(code, 0, "{committed}");
+    assert_eq!(committed["seq"], 1);
+    assert_eq!(committed["receipt"]["targets"][0]["target"], first);
+    assert!(committed["receipt"]["targets"][0]["name"].is_null());
+    assert_eq!(committed["receipt"]["targets"][1]["label"], "web");
+    assert_eq!(committed["receipt"]["targets"][1]["name"], "edge.example");
+    let bytes_before = fs::read(&ledger).expect("ledger");
+    let earlier = "2026-11-20T08:59:00Z";
+    let (code, preview) = json(&[&allowed[..], &["--dry-run"]].concat(), Some(earlier));
+    assert_eq!(code, 0, "{preview}");
+    assert!(
+        preview["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| {
+                w.as_str()
+                    .is_some_and(|w| w.contains("precedes the last ledger entry"))
+            })
+    );
+    assert_eq!(fs::read(&ledger).expect("unchanged ledger"), bytes_before);
+}
+
+#[test]
+fn status_warns_on_strict_clock_rollback_for_each_event_kind() {
+    let case = Case::new();
+    let file = case.pass("rollback.toml", PASS);
+    let status = |when| json(&["status", s(&file)], Some(when)).1;
+    let warns = |value: &Value| {
+        value["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| {
+                w.as_str()
+                    .is_some_and(|s| s.contains("precedes the last ledger entry"))
+            })
+    };
+    assert_eq!(spend(&file, "calls", NOW).0, 0);
+    assert!(warns(&status("2026-11-20T08:59:59.999999999Z")));
+    assert!(!warns(&status(NOW)));
+    let ledger = PathBuf::from(format!("{}.ledger", file.display()));
+    let older = fs::read(&ledger).expect("ledger");
+    assert_eq!(
+        json(
+            &["spend", s(&file), "--charge", "calls=1"],
+            Some("2026-11-20T09:10:00Z")
+        )
+        .0,
+        0
+    );
+    assert!(warns(&status("2026-11-20T09:09:59Z")));
+    assert!(!warns(&status("2026-11-20T09:10:00Z")));
+    fs::write(&ledger, older).expect("restore");
+    assert_eq!(
+        json(
+            &["adopt", s(&file), "--reason", "restore"],
+            Some("2026-11-20T09:20:00Z")
+        )
+        .0,
+        0
+    );
+    assert!(warns(&status("2026-11-20T09:19:59Z")));
+    assert!(!warns(&status("2026-11-20T09:20:00Z")));
+}
+
+#[test]
+fn read_only_witness_policies_match_the_caller_contract() {
+    let case = Case::new();
+    let p = case.pass("matrix.pass", PASS);
+    let file = s(&p);
+    let permits = ["permits", file, "--to", "192.0.2.10:5060/udp"];
+    let ledger = ["ledger", file];
+    let status = ["status", file];
+    let preview = ["spend", file, "calls", "--dry-run"];
+    let spend = ["spend", file, "calls"];
+    for query in [&permits[..], &status, &ledger, &preview] {
+        assert_eq!(json(query, Some(NOW)).0, 0);
+    }
+    assert!(!case.state().exists());
+    assert_eq!(json(&spend, Some(NOW)).0, 0);
+    let witness = case.state().join("example-2026-11.witness");
+    let bytes = fs::read(&witness).expect("known witness");
+    fs::remove_file(&witness).expect("remove witness from fixture");
+    for query in [&permits[..], &status, &ledger, &preview] {
+        let (rc, reply) = json(query, Some(NOW));
+        assert_eq!(rc, 0, "{reply}");
+        assert!(reply["warnings"].get(0).is_some());
+    }
+    assert!(!witness.exists());
+    fs::write(&witness, b"invalid").expect("damaged witness fixture");
+    fs::set_permissions(&witness, fs::Permissions::from_mode(0o600)).expect("private");
+    for query in [&permits[..], &status, &ledger] {
+        let (rc, reply) = json(query, Some(NOW));
+        assert_eq!(rc, 0, "{reply}");
+        assert!(reply["warnings"].get(0).is_some());
+    }
+    for query in [&preview[..], &spend] {
+        assert_eq!(
+            json(query, Some(NOW)).1["error"]["code"],
+            "witness-unavailable"
+        );
+    }
+    fs::write(&witness, bytes).expect("restore fixture witness");
+    fs::remove_file(hallpass::ledger_path(&p)).expect("lost ledger");
+    for query in [&permits[..], &status, &ledger, &preview, &spend] {
+        assert_eq!(json(query, Some(NOW)).1["error"]["code"], "ledger-missing");
+    }
+    assert!(!hallpass::ledger_path(&p).exists());
+}
+
+#[test]
+fn file_backed_rust_and_cli_decide_the_same_named_targets() {
+    use hallpass::{
+        NamedTarget, StateDir, permits_in,
+        time::{Duration, macros::datetime},
+    };
+    let case = Case::new();
+    let path = case.pass(
+        "rust-cli.pass",
+        &PASS.replace("ports = 443", "ports = 443\nnames = [\"site.example\"]"),
+    );
+    let pin = hallpass::load(&path).expect("pass").digest;
+    let state = StateDir::new(case.state());
+    let pair = ["192.0.2.10:5060/udp", "[2001:db8::2]:443/tcp@site.example"];
+    let targets: Vec<NamedTarget> = pair.iter().map(|t| t.parse().expect("literal")).collect();
+    let evaluate = || {
+        permits_in(
+            &path,
+            &targets,
+            Some(pin),
+            datetime!(2026-11-20 09:00 UTC),
+            Duration::ZERO,
+            &state,
+        )
+        .expect("decision")
+        .decision
+    };
+    let cli = || {
+        json(
+            &[
+                "permits",
+                "--to",
+                pair[0],
+                "--to",
+                pair[1],
+                "--digest",
+                &pin.to_string(),
+                "--",
+                s(&path),
+            ],
+            Some(NOW),
+        )
+    };
+    let labels = evaluate().expect("allow");
+    let (rc, reply) = cli();
+    assert_eq!(rc, 0);
+    assert_eq!(labels, ["sip-edge", "web"]);
+    assert_eq!(reply["targets"][1]["label"], labels[1]);
+    fs::write(&path, format!("# changed\n{PASS}")).expect("edit");
+    let err = evaluate().expect_err("stale revision");
+    assert_eq!(err.reason.code.as_str(), "pass-changed");
+    assert_eq!(cli().1["refusal"]["code"], err.reason.code.as_str());
+}
+
+#[test]
+fn budget_previews_match_policy_refusals_without_writes() {
+    let case = Case::new();
+    let path = case.pass("preview.pass", PASS);
+    let p = s(&path);
+    for (options, want) in [
+        (vec!["--n", "7"], "ceiling-reached"),
+        (vec!["--to", "192.0.2.40:5060/udp"], "address-not-listed"),
+        (
+            vec![
+                "--digest",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ],
+            "pass-changed",
+        ),
+    ] {
+        let mut args = vec!["spend", p, "calls"];
+        args.extend_from_slice(&options);
+        args.push("--dry-run");
+        let (rc, preview) = json(&args, Some(NOW));
+        assert_eq!(rc, 2);
+        assert_eq!(preview["refusal"]["code"], want);
+        args.pop();
+        assert_eq!(json(&args, Some(NOW)).1["refusal"], preview["refusal"]);
+    }
+    let no_debits = json(&["ledger", p], None).1;
+    assert_eq!(no_debits["entries"], serde_json::json!([]));
+}

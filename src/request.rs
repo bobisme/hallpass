@@ -4,7 +4,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     Decision, Digest, Error, HostName, LoadedPass, Refusal, RefusalCode, StateDir, Target, load,
-    read_ledger,
+    read_summary,
 };
 
 /// Maximum number of destinations in one question.
@@ -40,6 +40,8 @@ pub struct TargetRefusal {
 /// The pass and state used for an uncounted decision. Labels follow query order.
 #[derive(Clone, Debug)]
 pub struct PermitOutcome {
+    /// Time at which the policy decision was made.
+    pub now: OffsetDateTime,
     pub loaded: LoadedPass,
     pub decision: Result<Vec<String>, TargetRefusal>,
     pub warnings: Vec<String>,
@@ -100,13 +102,29 @@ pub fn permits_in(
     needed: Duration,
     state: &StateDir,
 ) -> Result<PermitOutcome, Error> {
+    permits_with_clock_in(path, targets, expected, needed, state, || now)
+}
+
+/// Check targets with a clock sampled after verifying the ledger.
+///
+/// # Errors
+/// As [`permits_in`].
+pub fn permits_with_clock_in(
+    path: &Path,
+    targets: &[NamedTarget],
+    expected: Option<Digest>,
+    needed: Duration,
+    state: &StateDir,
+    clock: impl FnOnce() -> OffsetDateTime,
+) -> Result<PermitOutcome, Error> {
     if targets.is_empty() || targets.len() > MAX_TARGETS || needed.is_negative() {
         return Err(Error::Usage(format!(
             "provide 1 to {MAX_TARGETS} targets and a nonnegative duration"
         )));
     }
     let loaded = load(path)?;
-    let view = read_ledger(&loaded, state)?;
+    let view = read_summary(&loaded, state)?;
+    let now = clock();
     let decision = decide_targets(
         &loaded,
         targets.iter().map(|t| (t.target, t.name.as_ref())),
@@ -115,8 +133,47 @@ pub fn permits_in(
         needed,
     );
     Ok(PermitOutcome {
+        now,
         loaded,
         decision,
         warnings: view.warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, fs, os::unix::fs::PermissionsExt};
+    use time::macros::datetime;
+
+    #[test]
+    fn clock_is_sampled_only_after_evidence_is_verified() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("pass");
+        fs::write(&path, crate::pass::tests::GOOD).expect("pass");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let ledger = crate::ledger_path(&path);
+        fs::write(&ledger, b"broken\n").expect("ledger");
+        fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).expect("mode");
+        let state = StateDir::new(dir.path().join("state"));
+        let targets = ["192.0.2.10:5060/udp".parse().expect("target")];
+        let called = Cell::new(false);
+        let clock = || {
+            called.set(true);
+            datetime!(2026-11-20 17:00 UTC)
+        };
+        assert!(
+            permits_with_clock_in(&path, &targets, None, Duration::ZERO, &state, clock).is_err()
+        );
+        assert!(!called.get());
+        fs::remove_file(ledger).expect("remove");
+        let outcome = permits_with_clock_in(&path, &targets, None, Duration::ZERO, &state, clock)
+            .expect("decision");
+        assert!(called.get());
+        assert_eq!(outcome.now, datetime!(2026-11-20 17:00 UTC));
+        assert_eq!(
+            outcome.decision.expect_err("expired").reason.code,
+            RefusalCode::Expired
+        );
+    }
 }

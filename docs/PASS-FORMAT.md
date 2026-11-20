@@ -1,5 +1,12 @@
 # Pass format (format 1)
 
+## Review lint example
+
+When a named rule overlaps a nameless rule, `hallpass lint PASS` emits the
+stable `name-restriction-overlap` finding with both labels, the overlapping
+address/protocol/port, and whether an unnamed query is currently effective.
+It is an advisory owner-review signal; it does not alter `permits` or `spend`.
+
 A pass is one TOML file, written by hand from the owner's written approval.
 `hallpass init FILE` writes a commented template. `hallpass check FILE`
 reports every problem at once, each with its field path and what to do.
@@ -289,3 +296,54 @@ edit it. It is JSON Lines:
 | counters | 64 |
 | ceiling total | 10^12 |
 | note on a spend | 500 characters, one line: no control characters, line separators or bidirectional controls |
+
+### Versioned debit records
+
+A debit represents one unit of work and has a single sequence number. It
+shares the version 1 ledger header, predecessor chain and witness with legacy
+spends and adoptions. Each named counter is charged once. The charges array
+holds 1 to 64 distinct counter names and amounts within the pass ceiling
+range. A reader rejects an unfamiliar debit version, unknown fields, an
+invalid charge, or a sum outside that range.
+
+The following example shows the writer's field order. The example digest and
+predecessor stand in for the SHA-256 digest of the actual pass bytes and the
+previous ledger line, respectively.
+
+~~~json
+{"seq":2,"time":"2026-11-20T09:00:00Z","event":"debit","version":1,"charges":[{"counter":"requests","n":1},{"counter":"bytes","n":100}],"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","note":"first send","receipt":{"caller_ref":"run-81/unit-02","targets":[{"target":"192.0.2.10:5060/udp","name":"sip.example.net","label":"sip-edge"}]},"prev":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}
+~~~
+
+The note and receipt are optional. The receipt is present only if the caller
+opts in. A caller reference is nonblank, at most 128 characters, and excludes
+control characters and Unicode formatting and line controls that disguise
+text. The target list is optional and records the approved literals and
+matched labels in request order. Each name is the canonical request name, if
+supplied. Targets, names and labels reflect the pass checked at the recorded
+digest, so later edits do not rewrite prior receipts. Store only approved
+references and targets. The private ledger and any exported JSON containing
+receipts carry those details.
+
+Ordinary scalar spends keep their existing record format. A scalar spend
+with a receipt uses a debit with one charge. An old reader rejects the debit
+line and cannot verify or extend that ledger. Upgrade all readers and
+writers sharing a ledger before recording a debit. A target or reference is
+never needed to interpret the accounting.
+
+Ledger JSON places the debit once in the sequence-sorted entries array. It
+exposes seq, time, event, version, charges, digest, note and receipt. The
+last two are null when absent. With a counter filter, a matching debit still
+includes its full charge array and receipt. Legacy JSON entries keep their
+scalar counter and n fields.
+
+
+### Witness size
+
+Version 1 witness files are limited to 1 MiB, including the newline.
+The larger read limit also accepts valid witnesses written by older
+versions that exceeded their 64 KiB read limit. The witness retains
+historical counter names across pass edits. Before a spend or adoption
+appends an event, the writer checks that the resulting witness fits.
+If it would exceed the limit, preserve the existing ledger and witness.
+The approval owner can issue a new pass ID with ceilings that account
+for the amounts already spent. Deleting old evidence can lose those counts.

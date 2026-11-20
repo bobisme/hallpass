@@ -34,9 +34,9 @@
 //! # Ok::<(), hallpass::Error>(())
 //! ```
 //!
-//! Everything that decides is pure and takes `now` from the caller; only
-//! [`load`], [`tally`], [`read_ledger`], [`spend`], [`spend_in`], [`adopt`]
-//! and [`write_template`] touch the file system.
+//! [`Pass::permits`] evaluates a target against a loaded approval at a supplied
+//! instant. [`permits_with_clock_in`] also verifies accounting evidence and
+//! samples the clock after reading it.
 //!
 //! Besides the ledger beside the pass, [`spend`] keeps a *witness* of the
 //! ledger's last line in the user's state directory ([`StateDir`]), so that
@@ -46,6 +46,7 @@
 //! directory).
 
 mod address;
+mod archive;
 mod decision;
 mod error;
 mod files;
@@ -55,7 +56,10 @@ mod name;
 mod pass;
 mod ports;
 mod request;
-pub use request::{MAX_TARGETS, NamedTarget, PermitOutcome, TargetRefusal, permits_in};
+pub use request::{
+    MAX_TARGETS, NamedTarget, PermitOutcome, TargetRefusal, permits_in, permits_with_clock_in,
+};
+pub mod review;
 mod template;
 mod witness;
 
@@ -63,13 +67,18 @@ pub use address::{
     AddressError, Ipv6Transition, Network, Protocol, Target, embedded_ipv4, ipv6_transition,
     parse_address, parse_network,
 };
+pub use archive::{archive_pass, retrieve_pass};
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
 pub use error::{Error, MissingLedger};
 pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load};
 pub use ledger::{
-    AdoptCase, AdoptOutcome, Adoption, LedgerEntry, LedgerView, MAX_NOTE, SpendOutcome,
-    SpendRequest, Tally, WitnessStatus, adopt, display_safe, ledger_path, preview_spend_in,
-    read_ledger, spend, spend_in, spend_with_clock_in, tally,
+    AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
+    CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry, LedgerView,
+    MAX_CALLER_REF, MAX_NOTE, RecordedTarget, SpendChargesOutcome, SpendChargesRequest,
+    SpendOutcome, SpendRequest, Tally, WitnessStatus, adopt, adopt_guarded, display_safe,
+    export_checkpoint, ledger_path, preview_adopt, preview_spend_in, preview_spend_with_clock_in,
+    read_ledger, read_summary, spend, spend_charges, spend_charges_in, spend_charges_with_clock_in,
+    spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
 pub use name::{HostName, MAX_NAMES};
 pub use pass::{

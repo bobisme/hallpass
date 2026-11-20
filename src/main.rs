@@ -5,6 +5,7 @@
 //! standard output.
 
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -84,16 +85,26 @@ enum Command {
         /// The pass file.
         file: PathBuf,
         /// The counter name, one of the pass's ceilings.
-        counter: String,
-        /// The amount to spend.
-        #[arg(long = "n", value_name = "N", default_value_t = 1)]
-        amount: u64,
+        #[arg(required_unless_present = "charges", conflicts_with = "charges")]
+        counter: Option<String>,
+        /// The amount to spend (default 1 with a positional counter).
+        #[arg(long = "n", value_name = "N", requires = "counter")]
+        amount: Option<u64>,
+        /// One named cost of this unit. Repeat for each counter.
+        #[arg(long = "charge", value_name = "COUNTER=N", conflicts_with_all = ["counter", "amount"])]
+        charges: Vec<String>,
+        /// Retain this caller/run reference with the debit.
+        #[arg(long, value_name = "TEXT")]
+        caller_ref: Option<String>,
+        /// Retain the checked literal target, request name and matched destination label.
+        #[arg(long, requires = "to")]
+        record_target: bool,
+        /// Assess what would fit without recording anything or reserving budget.
+        #[arg(long)]
+        dry_run: bool,
         /// What the spend pays for: `ADDRESS:PORT/PROTOCOL`. Refuse, and record nothing, unless the pass permits it now. Without it only the window and the ceiling are checked.
         #[arg(long, value_name = "ADDR:PORT/PROTO")]
         to: Vec<String>,
-        /// Preview this request without recording a debit.
-        #[arg(long)]
-        dry_run: bool,
         /// The host name the request will carry, as for `permits --name`. Only with --to.
         #[arg(long, value_name = "HOSTNAME", requires = "to")]
         name: Option<String>,
@@ -120,6 +131,17 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         counter: Option<String>,
     },
+    /// Retain the exact validated pass bytes in a private archive directory.
+    Archive { file: PathBuf, directory: PathBuf },
+    /// Print an archived pass byte-for-byte by its full digest.
+    Retrieve { directory: PathBuf, digest: String },
+    /// Export a checkpoint to retain separately from the ledger.
+    Checkpoint { file: PathBuf },
+    /// Verify a ledger against a retained checkpoint JSON file.
+    VerifyCheckpoint {
+        ledger: PathBuf,
+        checkpoint: PathBuf,
+    },
     /// Accept a ledger that was lost, changed outside hallpass, or has no witness, and record why.
     ///
     /// The adoption is written into the ledger. A lost or rewound ledger
@@ -128,8 +150,28 @@ enum Command {
         /// The pass file.
         file: PathBuf,
         /// Why (one line; it is recorded in the ledger).
-        #[arg(long, value_name = "TEXT")]
-        reason: String,
+        #[arg(long, value_name = "TEXT", required_unless_present = "preview")]
+        reason: Option<String>,
+        /// Inspect without recording anything.
+        #[arg(long)]
+        preview: bool,
+        /// Require the exact reviewed preview token.
+        #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
+        token: Option<String>,
+    },
+    /// Compare two pass revisions without authorizing either one.
+    Diff { old: PathBuf, new: PathBuf },
+    /// Report name-restriction overlaps as advisory findings.
+    Lint { file: PathBuf },
+    /// Replay a bounded, offline TOML case suite.
+    #[command(name = "test-pass", alias = "cases")]
+    Cases { file: PathBuf, cases: PathBuf },
+    /// Derive a stable ID from an owner's written approval identity.
+    ApprovalId {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        reference: String,
     },
 }
 
@@ -144,6 +186,14 @@ impl Command {
             Self::Digest { .. } => "digest",
             Self::Ledger { .. } => "ledger",
             Self::Adopt { .. } => "adopt",
+            Self::Archive { .. } => "archive",
+            Self::Retrieve { .. } => "retrieve",
+            Self::Checkpoint { .. } => "checkpoint",
+            Self::VerifyCheckpoint { .. } => "verify-checkpoint",
+            Self::Diff { .. } => "diff",
+            Self::Lint { .. } => "lint",
+            Self::Cases { .. } => "test-pass",
+            Self::ApprovalId { .. } => "approval-id",
         }
     }
 }
@@ -163,6 +213,16 @@ const REFUSED: u8 = 2;
 struct Clock {
     now: OffsetDateTime,
     test: bool,
+}
+
+impl Clock {
+    fn sample(&self) -> OffsetDateTime {
+        if self.test {
+            self.now
+        } else {
+            OffsetDateTime::now_utc()
+        }
+    }
 }
 
 fn clock() -> Result<Clock, Error> {
@@ -300,26 +360,191 @@ fn init(file: &Path) -> Output {
 
 fn check(file: &Path) -> Output {
     match hallpass::load(file) {
-        Ok(loaded) => Output {
-            code: OK,
-            json: json!({
-                "command": "check",
-                "result": "ok",
-                "file": file.display().to_string(),
-                "digest": loaded.digest.to_string(),
-                "pass_id": loaded.pass.id,
-                "problems": [],
-            }),
-            text: format!(
-                "{}: OK, pass {} with {} destination(s) and {} ceiling(s). The window is checked by `hallpass status`.\nDigest: {}\n",
-                file.display(),
-                loaded.pass.id,
-                loaded.pass.destinations.len(),
-                loaded.pass.ceilings.len(),
-                loaded.digest
-            ),
-        },
+        Ok(loaded) => {
+            let breadth = hallpass::review::breadth(&loaded.pass);
+            Output {
+                code: OK,
+                json: json!({
+                    "command": "check",
+                    "result": "ok",
+                    "file": file.display().to_string(),
+                    "digest": loaded.digest.to_string(),
+                    "pass_id": loaded.pass.id,
+                    "problems": [],
+                    "breadth": breadth,
+                    "warnings": hallpass::review::breadth_warnings(&breadth),
+                }),
+                text: format!(
+                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n",
+                    file.display(),
+                    loaded.pass.id,
+                    loaded.pass.destinations.len(),
+                    loaded.pass.ceilings.len(),
+                    breadth.ipv4,
+                    breadth.ipv6,
+                    loaded.digest
+                ),
+            }
+        }
         Err(e) => error_output("check", Some(file), &e),
+    }
+}
+
+fn review_diff(old: &Path, new: &Path) -> Output {
+    let a = match hallpass::load(old) {
+        Ok(v) => v,
+        Err(e) => return error_output("diff", Some(old), &e),
+    };
+    let b = match hallpass::load(new) {
+        Ok(v) => v,
+        Err(e) => return error_output("diff", Some(new), &e),
+    };
+    let report = hallpass::review::diff(&a, &b);
+    let mut text = format!(
+        "OLD pass {} digest: {}\nNEW pass {} digest: {}\n",
+        report.old_pass_id, report.old_digest, report.new_pass_id, report.new_digest
+    );
+    if report.approval_changed {
+        text.push_str("APPROVAL ID CHANGED: treat as a different ledger identity.\n");
+    }
+    for c in &report.changes {
+        let _ = writeln!(
+            text,
+            "{}: {} -> {}{}",
+            c.field,
+            safe(&c.before),
+            safe(&c.after),
+            if c.review_required {
+                " [review required]"
+            } else {
+                ""
+            }
+        );
+    }
+    for l in &report.introduced {
+        let _ = writeln!(text, "introduced destination: {l}");
+    }
+    for l in &report.removed {
+        let _ = writeln!(text, "removed destination: {l}");
+    }
+    if report.order_changed {
+        text.push_str("WARNING: common destination order changed; returned label may change.\n");
+    }
+    text.push_str("This is a declared-field diff only; it never authorizes a spend.\n");
+    Output {
+        code: OK,
+        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":[]}),
+        text,
+    }
+}
+
+fn review_lint(file: &Path, clock: &Clock) -> Output {
+    let loaded = match hallpass::load(file) {
+        Ok(v) => v,
+        Err(e) => return error_output("lint", Some(file), &e),
+    };
+    let report = hallpass::review::lint(&loaded.pass, clock.now);
+    let findings = report.findings;
+    let truncated = report.truncated;
+    let mut text = format!(
+        "{} advisory finding(s) for {}\n",
+        findings.len(),
+        loaded.pass.id
+    );
+    if truncated {
+        text.push_str("Additional overlaps omitted after 256 findings.\n");
+    }
+    for f in &findings {
+        let _ = writeln!(
+            text,
+            "{}: {} overlaps {} in {} on {}-{} / {} (example {}, effective unnamed permission: {}){}",
+            f.code,
+            f.named_label,
+            f.unnamed_label,
+            f.network,
+            f.port,
+            f.port_end,
+            f.protocol,
+            f.address,
+            f.effective,
+            f.inactive_reason
+                .as_ref()
+                .map_or(String::new(), |r| format!(" ({r})"))
+        );
+    }
+    Output {
+        code: OK,
+        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":[]}),
+        text,
+    }
+}
+
+fn review_cases(file: &Path, cases_file: &Path) -> Output {
+    let loaded = match hallpass::load(file) {
+        Ok(v) => v,
+        Err(e) => return error_output("test-pass", Some(file), &e),
+    };
+    let mut file_handle = match std::fs::File::open(cases_file) {
+        Ok(v) => v,
+        Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e.to_string())),
+    };
+    let mut bytes = Vec::new();
+    if let Err(e) = file_handle
+        .by_ref()
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut bytes)
+    {
+        return error_output("test-pass", Some(cases_file), &Error::Usage(e.to_string()));
+    }
+    if bytes.len() > 256 * 1024 {
+        return error_output(
+            "test-pass",
+            Some(cases_file),
+            &Error::Usage("case suite exceeds 256 KiB".to_owned()),
+        );
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return error_output(
+            "test-pass",
+            Some(cases_file),
+            &Error::Usage("case suite is not UTF-8".to_owned()),
+        );
+    };
+    let results = match hallpass::review::cases(&loaded.pass, &text) {
+        Ok(v) => v,
+        Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e)),
+    };
+    let mismatches = results.iter().filter(|v| v["match"] == false).count();
+    Output {
+        code: if mismatches == 0 { OK } else { REFUSED },
+        json: json!({"command":"test-pass","result":if mismatches==0{"ok"}else{"mismatch"},"file":file.display().to_string(),"cases":cases_file.display().to_string(),"digest":loaded.digest.to_string(),"results":results,"mismatches":mismatches,"warnings":[]}),
+        text: {
+            let mut text = format!(
+                "{} case(s), {} mismatch(es), digest {}\n",
+                results.len(),
+                mismatches,
+                loaded.digest
+            );
+            for result in &results {
+                if result["match"] == false {
+                    let _ = writeln!(
+                        text,
+                        "MISMATCH {}: expected {}, actual {}",
+                        result["id"], result["expected"], result["actual"]
+                    );
+                }
+            }
+            text
+        },
+    }
+}
+
+fn approval_id(owner: &str, reference: &str) -> Output {
+    let id = hallpass::review::approval_id(owner, reference);
+    Output {
+        code: OK,
+        json: json!({"command":"approval-id","result":"ok","id":id,"owner":owner,"reference":reference,"warnings":[]}),
+        text: format!("{id}\n"),
     }
 }
 
@@ -403,18 +628,31 @@ fn status_text(
 }
 
 fn status(file: &Path, clock: &Clock) -> Output {
+    status_with_clock(file, clock, &StateDir::from_env(), || clock.sample())
+}
+
+fn status_with_clock(
+    file: &Path,
+    clock: &Clock,
+    state_dir: &StateDir,
+    sample: impl FnOnce() -> OffsetDateTime,
+) -> Output {
     let loaded = match hallpass::load(file) {
         Ok(l) => l,
         Err(e) => return error_output("status", Some(file), &e),
     };
-    let view = match hallpass::read_ledger(&loaded, &StateDir::from_env()) {
+    let mut view = match hallpass::read_summary(&loaded, state_dir) {
         Ok(v) => v,
         Err(e) => return error_output("status", Some(file), &e),
     };
+    let now = sample();
+    if let Some(previous) = view.last_time.filter(|last| now < *last) {
+        view.warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
+    }
     let tally = &view.tally;
     let pass = &loaded.pass;
-    let state = pass.window_at(clock.now);
-    let refusal = pass.check_window(clock.now, Duration::ZERO).err();
+    let state = pass.window_at(now);
+    let refusal = pass.check_window(now, Duration::ZERO).err();
     let destinations: Vec<Value> = pass
         .destinations
         .iter()
@@ -452,7 +690,15 @@ fn status(file: &Path, clock: &Clock) -> Output {
         .map(|(name, spent)| json!({ "name": name, "spent": spent }))
         .collect();
 
+    let breadth = hallpass::review::breadth(pass);
+    let mut warnings = view.warnings.clone();
+    warnings.extend(hallpass::review::breadth_warnings(&breadth));
     let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
+    let _ = writeln!(
+        text,
+        "Declared breadth: IPv4 {}, IPv6 {}.",
+        breadth.ipv4, breadth.ipv6
+    );
     let _ = writeln!(text, "Ledger: {}", ledger_state_text(&view));
     Output {
         code: if refusal.is_some() { REFUSED } else { OK },
@@ -461,7 +707,7 @@ fn status(file: &Path, clock: &Clock) -> Output {
             "result": if refusal.is_some() { "refused" } else { "ok" },
             "file": file.display().to_string(),
             "digest": loaded.digest.to_string(),
-            "now": stamp(clock.now),
+            "now": stamp(now),
             "test_clock": clock.test,
             "pass": {
                 "id": pass.id,
@@ -472,10 +718,11 @@ fn status(file: &Path, clock: &Clock) -> Output {
             },
             "window": window_json(pass, &state),
             "destinations": destinations,
+            "breadth": breadth,
             "counters": counters,
             "unlisted_spends": unlisted,
             "ledger": ledger_json(&view),
-            "warnings": view.warnings,
+            "warnings": warnings,
             "refusal": refusal.as_ref().map(refusal_json),
         }),
         text,
@@ -526,13 +773,13 @@ fn permits(
             .map(str::parse::<Digest>)
             .transpose()
             .map_err(Error::Usage)?;
-        let result = hallpass::permits_in(
+        let result = hallpass::permits_with_clock_in(
             file,
             &targets,
             expected,
-            clock.now,
             Duration::seconds(i64::from(duration)),
             &StateDir::from_env(),
+            || clock.sample(),
         )?;
         Ok::<_, Error>((targets, result))
     };
@@ -550,8 +797,9 @@ fn permits(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let now = outcome.now;
     let loaded = outcome.loaded;
-    let state = loaded.pass.window_at(clock.now);
+    let state = loaded.pass.window_at(now);
     let labels = outcome.decision.as_deref().unwrap_or(&[]);
     let refused = outcome.decision.as_ref().err();
     let text = refused.map_or_else(
@@ -570,15 +818,18 @@ fn permits(
         text,
         json: json!({
             "command":"permits","result":if refused.is_some(){"refused"}else{"allowed"},"file":file.display().to_string(),"digest":loaded.digest.to_string(),"pass_id":loaded.pass.id,
-            "now":stamp(clock.now),"test_clock":clock.test,"target":first.target.to_string(),"name":first.name.as_ref().map(hallpass::HostName::as_str),"label":labels.first(),"refusal":refused.map(|r|refusal_json(&r.reason)),"refused_target":refused.and_then(|r|r.index),"targets":targets_json(&targets,labels),"window":window_json(&loaded.pass,&state),"warnings":outcome.warnings
+            "now":stamp(now),"test_clock":clock.test,"target":first.target.to_string(),"name":first.name.as_ref().map(hallpass::HostName::as_str),"label":labels.first(),"refusal":refused.map(|r|refusal_json(&r.reason)),"refused_target":refused.and_then(|r|r.index),"targets":targets_json(&targets,labels),"window":window_json(&loaded.pass,&state),"warnings":outcome.warnings
         }),
     }
 }
 
 struct SpendArgs<'a> {
     file: &'a Path,
-    counter: &'a str,
+    counter: Option<&'a str>,
     amount: u64,
+    charges: &'a [String],
+    caller_ref: Option<&'a str>,
+    record_target: bool,
     to: &'a [String],
     dry_run: bool,
     name: Option<&'a str>,
@@ -606,24 +857,21 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
     let first = targets.first();
     let target = first.map(|t| t.target);
     let name = first.and_then(|t| t.name.as_ref());
-    let mut request = SpendRequest::new(args.counter, args.amount);
+    let mut request = SpendRequest::new(args.counter.unwrap_or_default(), args.amount);
     request.note = args.note;
     request.expect_digest = expect_digest;
     request.needed = Duration::seconds(i64::from(args.duration));
     request.target = target;
     request.name = name;
     request.additional_targets = targets.get(1..).unwrap_or_default();
+    if args.counter.is_none() || args.caller_ref.is_some() || args.record_target {
+        return debit_spend(args, request, &targets, clock);
+    }
     let state = StateDir::from_env();
     let answer = if args.dry_run {
-        hallpass::preview_spend_in(file, &request, clock.now, &state)
+        hallpass::preview_spend_with_clock_in(file, &request, &state, || clock.sample())
     } else {
-        hallpass::spend_with_clock_in(file, &request, &state, || {
-            if clock.test {
-                clock.now
-            } else {
-                OffsetDateTime::now_utc()
-            }
-        })
+        hallpass::spend_with_clock_in(file, &request, &state, || clock.sample())
     };
     let outcome = match answer {
         Ok(o) => o,
@@ -687,6 +935,114 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
     }
 }
 
+fn debit_spend(
+    args: &SpendArgs<'_>,
+    policy: SpendRequest<'_>,
+    targets: &[NamedTarget],
+    clock: &Clock,
+) -> Output {
+    let file = args.file;
+    let parsed = args.charges.iter().map(|charge| {
+        let (counter, n) = charge.split_once('=').ok_or_else(|| {
+            Error::Usage(format!("--charge expects COUNTER=N (got {})", safe(charge)))
+        })?;
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::Usage(
+                "--charge expects a positive whole number".to_owned(),
+            ));
+        }
+        let amount = n.parse::<u64>().map_err(|_| {
+            Error::Usage("--charge amount exceeds the maximum whole number".to_owned())
+        })?;
+        Ok(hallpass::Charge { counter, amount })
+    });
+    let charges: Vec<_> = match args.counter {
+        Some(counter) => vec![hallpass::Charge {
+            counter,
+            amount: args.amount,
+        }],
+        None => match parsed.collect() {
+            Ok(charges) => charges,
+            Err(e) => return error_output("spend", Some(file), &e),
+        },
+    };
+    let mut request = hallpass::SpendChargesRequest::new(&charges);
+    request.policy = policy;
+    request.caller_ref = args.caller_ref;
+    request.record_targets = args.record_target;
+    request.dry_run = args.dry_run;
+    let outcome =
+        match hallpass::spend_charges_with_clock_in(file, &request, &StateDir::from_env(), || {
+            clock.sample()
+        }) {
+            Ok(o) => o,
+            Err(e) => return error_output("spend", Some(file), &e),
+        };
+    let (result, code, mut text) = match (&outcome.refusal, outcome.seq) {
+        (Some(r), _) => (
+            "refused",
+            REFUSED,
+            format!("REFUSED: {}.\n", safe(&r.message)),
+        ),
+        (None, Some(seq)) => ("allowed", OK, format!("RECORDED: ledger entry {seq}\n")),
+        (None, None) => (
+            "would-allow",
+            OK,
+            "WOULD ALLOW: no debit recorded\n".to_owned(),
+        ),
+    };
+    for charge in &outcome.charges {
+        let remaining = charge
+            .remaining
+            .map_or_else(|| "unknown".to_owned(), |n| n.to_string());
+        let _ = writeln!(
+            text,
+            "  {} {} ({} spent, {remaining} left)",
+            charge.amount, charge.counter, charge.spent
+        );
+    }
+    if let Some(receipt) = &outcome.receipt {
+        let _ = writeln!(text, "  receipt {}", debit_receipt_text(receipt));
+    }
+    let mut json = json!({
+        "command": "spend",
+        "result": result,
+        "file": file.display().to_string(),
+        "digest": outcome.digest.to_string(),
+        "pass_id": outcome.pass_id,
+        "now": stamp(outcome.now),
+        "test_clock": clock.test,
+        "charges": outcome.charges,
+        "seq": outcome.seq,
+        "note": args.note,
+        "targets": targets_json(targets, &outcome.labels),
+        "refused_target": outcome.refused_target,
+        "target": request.policy.target.map(|t| t.to_string()),
+        "name": request.policy.name.map(hallpass::HostName::as_str),
+        "label": outcome.labels.first(),
+        "receipt": outcome.receipt,
+        "refusal": outcome.refusal.as_ref().map(refusal_json),
+        "warnings": outcome.warnings,
+    });
+    if args.counter.is_some()
+        && let Some(charge) = outcome.charges.first()
+    {
+        json["counter"] = json!(charge.counter);
+        json["n"] = json!(charge.amount);
+        json["total"] = json!(charge.total);
+        json["spent"] = json!(charge.spent);
+        json["remaining"] = json!(charge.remaining);
+        json["projected_spent"] = json!(charge.projected_spent);
+    }
+    Output { code, json, text }
+}
+
+fn debit_receipt_text(receipt: &hallpass::DebitReceipt) -> String {
+    // Quote and escape reliably in text mode, including labels from a pass.
+    let printable = serde_json::to_string(receipt).unwrap_or_default();
+    safe(&printable).into_owned()
+}
+
 fn digest(file: &Path) -> Output {
     match hallpass::load(file) {
         Ok(loaded) => Output {
@@ -716,6 +1072,7 @@ fn ledger_text(
     loaded: &LoadedPass,
     view: &hallpass::LedgerView,
     entries: &[&hallpass::LedgerEntry],
+    debits: &[&hallpass::LedgerDebit],
     totals: &[Total<'_>],
     counter: Option<&str>,
 ) -> String {
@@ -746,6 +1103,30 @@ fn ledger_text(
                 )
             })
             .collect();
+        rows.extend(debits.iter().map(|e| {
+            let charges = e
+                .charges
+                .iter()
+                .map(|charge| format!("{}={}", charge.counter, charge.amount))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let note = e
+                .note
+                .as_deref()
+                .map_or_else(String::new, |n| safe(n).into_owned());
+            let receipt = e.receipt.as_ref().map_or_else(String::new, |r| {
+                format!(" receipt {}", debit_receipt_text(r))
+            });
+            (
+                e.seq,
+                format!(
+                    "  {:>5}  {:<20}  DEBIT {charges}  {}  {note}{receipt}",
+                    e.seq,
+                    stamp(e.time),
+                    short_digest(&e.digest)
+                ),
+            )
+        }));
         rows.extend(view.adoptions.iter().map(|a| {
             (
                 a.seq,
@@ -799,7 +1180,7 @@ fn ledger_state_text(view: &hallpass::LedgerView) -> String {
     if !view.exists {
         return "none yet (nothing spent)".to_owned();
     }
-    let lines = view.entries.len() + view.adoptions.len();
+    let lines = view.tally.entries + view.adoption_count;
     let witness = match &view.witness {
         W::Matches => "the witness matches",
         W::Extended { .. } => "the witness is behind (see the warning)",
@@ -822,8 +1203,8 @@ fn ledger_json(view: &hallpass::LedgerView) -> Value {
     json!({
         "path": view.path.display().to_string(),
         "exists": view.exists,
-        "entries": view.entries.len(),
-        "adoptions": view.adoptions.len(),
+        "entries": view.tally.entries,
+        "adoptions": view.adoption_count,
         "witness": view.witness.as_str(),
         "moved_from": view.moved_from,
     })
@@ -836,6 +1217,46 @@ fn witnessed_json(w: &hallpass::Witnessed) -> Value {
         "totals": w.totals,
         "updated": w.updated,
     })
+}
+
+fn spend_events_json(
+    entries: &[&hallpass::LedgerEntry],
+    debits: &[&hallpass::LedgerDebit],
+) -> Vec<Value> {
+    let mut events: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.seq,
+                json!({
+                    "seq": e.seq,
+                    "time": stamp(e.time),
+                    "counter": e.counter,
+                    "n": e.amount,
+                    "digest": e.digest.to_string(),
+                    "note": e.note,
+                }),
+            )
+        })
+        .chain(debits.iter().map(|e| {
+            (
+                e.seq,
+                json!({
+                    "seq": e.seq,
+                    "time": stamp(e.time),
+                    "event": "debit",
+                    "version": 1,
+                    "charges": e.charges,
+                    "digest": e.digest.to_string(),
+                    "note": e.note,
+                    "receipt": e.receipt,
+                }),
+            )
+        }))
+        .collect();
+    events.sort_by_key(|(seq, _)| *seq);
+
+    events.into_iter().map(|(_, entry)| entry).collect()
 }
 
 fn ledger(file: &Path, counter: Option<&str>) -> Output {
@@ -863,6 +1284,11 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
     let wanted = |name: &str| counter.is_none_or(|c| c == name);
     let entries: Vec<&hallpass::LedgerEntry> =
         view.entries.iter().filter(|e| wanted(&e.counter)).collect();
+    let debits: Vec<&hallpass::LedgerDebit> = view
+        .debits
+        .iter()
+        .filter(|e| e.charges.iter().any(|charge| wanted(&charge.counter)))
+        .collect();
     let mut names: Vec<&str> = pass
         .ceilings
         .keys()
@@ -880,7 +1306,7 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
         .map(|n| (*n, view.tally.spent(n), pass.ceilings.get(*n).copied()))
         .collect();
 
-    let text = ledger_text(&loaded, &view, &entries, &totals, counter);
+    let text = ledger_text(&loaded, &view, &entries, &debits, &totals, counter);
 
     Output {
         code: OK,
@@ -896,14 +1322,7 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
             "verified": true,
             "witness": view.witness.as_str(),
             "moved_from": view.moved_from,
-            "entries": entries.iter().map(|e| json!({
-                "seq": e.seq,
-                "time": stamp(e.time),
-                "counter": e.counter,
-                "n": e.amount,
-                "digest": e.digest.to_string(),
-                "note": e.note,
-            })).collect::<Vec<_>>(),
+            "entries": spend_events_json(&entries, &debits),
             "adoptions": view.adoptions.iter().map(|a| json!({
                 "seq": a.seq,
                 "time": stamp(a.time),
@@ -924,11 +1343,32 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
     }
 }
 
-fn adopt(file: &Path, reason: &str, clock: &Clock) -> Output {
-    let outcome = match hallpass::adopt(file, reason, clock.now, &StateDir::from_env()) {
-        Ok(o) => o,
-        Err(e) => return error_output("adopt", Some(file), &e),
-    };
+fn preview_adopt(file: &Path) -> Output {
+    match hallpass::preview_adopt(file, &StateDir::from_env()) {
+        Ok(p) => Output {
+            code: 0,
+            text: format!(
+                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}. Projected: {}. Token: {}\n",
+                p.case.as_str(),
+                p.pass_id,
+                p.seq,
+                hallpass::totals_text(&p.present),
+                hallpass::totals_text(&p.carried),
+                hallpass::totals_text(&p.totals),
+                p.token
+            ),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token}),
+        },
+        Err(e) => error_output("adopt", Some(file), &e),
+    }
+}
+
+fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Output {
+    let outcome =
+        match hallpass::adopt_guarded(file, reason, clock.now, &StateDir::from_env(), token) {
+            Ok(o) => o,
+            Err(e) => return error_output("adopt", Some(file), &e),
+        };
     let what = match outcome.case {
         hallpass::AdoptCase::LedgerMissing => "the ledger was missing; a new one was started",
         hallpass::AdoptCase::LedgerChanged => "the ledger did not match its witness",
@@ -973,6 +1413,94 @@ fn safe(text: &str) -> std::borrow::Cow<'_, str> {
     hallpass::display_safe(text)
 }
 
+fn archive(file: &Path, directory: &Path) -> Output {
+    match hallpass::archive_pass(file, directory) {
+        Ok(digest) => Output {
+            code: 0,
+            text: format!("Archived: {digest}\n"),
+            json: json!({"command": "archive", "result": "ok", "digest": digest.to_string()}),
+        },
+        Err(e) => error_output("archive", Some(file), &e),
+    }
+}
+
+fn retrieve(directory: &Path, digest: &str) -> Output {
+    let result = digest
+        .parse::<hallpass::Digest>()
+        .map_err(Error::Usage)
+        .and_then(|digest| hallpass::retrieve_pass(directory, digest));
+    match result {
+        Ok(bytes) => {
+            let Ok(text) = String::from_utf8(bytes) else {
+                return error_output(
+                    "retrieve",
+                    None,
+                    &Error::Usage("archived pass is not UTF-8".into()),
+                );
+            };
+            Output {
+                code: 0,
+                json: json!({"command": "retrieve", "result": "ok", "digest": digest, "bytes": text}),
+                text,
+            }
+        }
+        Err(e) => error_output("retrieve", None, &e),
+    }
+}
+
+fn checkpoint(file: &Path) -> Output {
+    let result = hallpass::load(file)
+        .and_then(|loaded| hallpass::export_checkpoint(&loaded, &StateDir::from_env()));
+    match result {
+        Ok((checkpoint, corroborated)) => {
+            let value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash});
+            Output {
+                code: 0,
+                text: format!("{value}\n"),
+                json: json!({"command": "checkpoint", "result": "ok", "checkpoint": value, "local_corroboration": corroborated, "warnings": [if corroborated { "The witness corroborates a prefix and may lag the exported tail." } else { "There is no local witness corroboration." }]}),
+            }
+        }
+        Err(e) => error_output("checkpoint", Some(file), &e),
+    }
+}
+
+fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
+    let result = (|| {
+        let file = std::fs::File::open(checkpoint)
+            .map_err(|e| Error::Usage(format!("cannot read checkpoint: {e}")))?;
+        let mut bytes = Vec::new();
+        file.take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|e| Error::Usage(format!("cannot read checkpoint: {e}")))?;
+        if bytes.len() > 65536 {
+            return Err(Error::Usage("checkpoint too large".to_owned()));
+        }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Usage(format!("invalid checkpoint JSON: {e}")))?;
+        let value = value.get("checkpoint").cloned().unwrap_or(value);
+        let checkpoint = serde_json::from_value(value)
+            .map_err(|e| Error::Usage(format!("invalid checkpoint: {e}")))?;
+        hallpass::verify_checkpoint(ledger, &checkpoint)
+    })();
+    match result {
+        Ok(status) => {
+            let (name, added, code) = match status {
+                hallpass::CheckpointStatus::Exact => ("exact", 0, 0),
+                hallpass::CheckpointStatus::Extended(n) => ("extended", n, 0),
+                hallpass::CheckpointStatus::Mismatch => ("mismatch", 0, 2),
+            };
+            Output {
+                code,
+                text: format!(
+                    "Checkpoint verification: {name} ({added} later lines). Trust input: supplied checkpoint.\n"
+                ),
+                json: json!({"command": "verify-checkpoint", "result": name, "added": added, "trust_input": "supplied-checkpoint"}),
+            }
+        }
+        Err(e) => error_output("verify-checkpoint", Some(ledger), &e),
+    }
+}
+
 fn run(cli: &Cli) -> Output {
     let name = cli.command.name();
     let needs_clock = matches!(
@@ -981,6 +1509,7 @@ fn run(cli: &Cli) -> Output {
             | Command::Permits { .. }
             | Command::Spend { .. }
             | Command::Adopt { .. }
+            | Command::Lint { .. }
     );
     let clock = if needs_clock {
         match clock() {
@@ -1015,19 +1544,25 @@ fn run(cli: &Cli) -> Output {
             file,
             counter,
             amount,
+            charges,
+            caller_ref,
+            record_target,
+            dry_run,
             to,
             name,
             note,
             digest,
             duration,
-            dry_run,
         } => spend(
             &SpendArgs {
                 file,
-                counter,
-                amount: *amount,
-                to,
+                counter: counter.as_deref(),
+                amount: amount.unwrap_or(1),
+                charges,
+                caller_ref: caller_ref.as_deref(),
+                record_target: *record_target,
                 dry_run: *dry_run,
+                to,
                 name: name.as_deref(),
                 note: note.as_deref(),
                 digest: digest.as_deref(),
@@ -1037,7 +1572,31 @@ fn run(cli: &Cli) -> Output {
         ),
         Command::Digest { file } => digest(file),
         Command::Ledger { file, counter } => ledger(file, counter.as_deref()),
-        Command::Adopt { file, reason } => adopt(file, reason, &clock),
+        Command::Archive { file, directory } => archive(file, directory),
+        Command::Retrieve { directory, digest } => retrieve(directory, digest),
+        Command::Checkpoint { file } => checkpoint(file),
+        Command::VerifyCheckpoint { ledger, checkpoint } => verify_checkpoint(ledger, checkpoint),
+        Command::Adopt {
+            file,
+            reason,
+            preview,
+            token,
+        } => {
+            if *preview {
+                preview_adopt(file)
+            } else {
+                adopt(
+                    file,
+                    reason.as_deref().unwrap_or_default(),
+                    token.as_deref(),
+                    &clock,
+                )
+            }
+        }
+        Command::Diff { old, new } => review_diff(old, new),
+        Command::Lint { file } => review_lint(file, &clock),
+        Command::Cases { file, cases } => review_cases(file, cases),
+        Command::ApprovalId { owner, reference } => approval_id(owner, reference),
     }
 }
 
@@ -1107,4 +1666,80 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::from(output.code)
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    use time::macros::datetime;
+
+    #[test]
+    fn status_samples_after_ledger_verification() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("pass");
+        let docs = include_str!("../docs/INTEGRATING.md");
+        let pass = docs
+            .split("```toml\n")
+            .nth(1)
+            .expect("pass block")
+            .split("```")
+            .next()
+            .expect("pass");
+        fs::write(&path, pass).expect("pass");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let clock = Clock {
+            now: datetime!(2026-11-20 09:00 UTC),
+            test: true,
+        };
+        let output = status_with_clock(
+            &path,
+            &clock,
+            &StateDir::new(dir.path().join("state")),
+            || {
+                fs::write(hallpass::ledger_path(&path), b"corrupt\n")
+                    .expect("change after snapshot");
+                datetime!(2026-11-20 17:00 UTC)
+            },
+        );
+        assert_eq!(output.code, REFUSED);
+        assert_eq!(output.json["now"], "2026-11-20T17:00:00Z");
+        assert_eq!(output.json["refusal"]["code"], "expired");
+    }
+}
+
+#[cfg(test)]
+mod caller_errors {
+    use super::*;
+    #[test]
+    fn failures_after_the_append_starts_have_explicit_reconciliation_state() {
+        let path = PathBuf::from("approval.pass.ledger");
+        for (err, recording, seq) in [
+            (
+                Error::WitnessNotUpdated {
+                    path: path.clone(),
+                    seq: 3,
+                    detail: "fixture".into(),
+                },
+                "recorded",
+                Some(3),
+            ),
+            (
+                Error::AppendUncertain {
+                    path: path.clone(),
+                    event: "spend".into(),
+                    detail: "fixture".into(),
+                },
+                "uncertain",
+                None,
+            ),
+        ] {
+            let out = error_output("spend", None, &err);
+            assert_eq!(out.code, 1);
+            assert_eq!(out.json["result"], "error");
+            assert_eq!(out.json["error"]["recording"], recording);
+            assert_eq!(out.json["error"]["seq"], json!(seq));
+            assert_eq!(out.json["error"]["ledger"], json!(path));
+        }
+    }
 }

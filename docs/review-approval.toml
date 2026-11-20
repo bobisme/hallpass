@@ -1,0 +1,17 @@
+# Historical documentation fixture for the offline owner case suite.
+format = 1
+id = "review-example"
+name = "Named web service"
+[approval]
+owner = "Example owner"
+reference = "Documentation fixture"
+operator = "Example reviewer"
+valid_from = 2026-11-20T08:00:00Z
+valid_until = 2026-11-20T17:00:00Z
+revoked = false
+[[destination]]
+label = "web"
+address = "192.0.2.10"
+protocol = "tcp"
+ports = 443
+names = ["app.example.com"]

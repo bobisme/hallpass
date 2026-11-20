@@ -11,20 +11,16 @@ six commands. hallpass closes that gap with the ledger.
 
 - **Library first, CLI second.** Rust tools call the library; other tools
   call `hallpass ... --format json`. The CLI is a thin layer over the same
-  functions and adds no rule of its own. (`hallpass permits` calls both
-  `read_ledger` and `Pass::permits`, so a lost or changed ledger fails
-  closed there too; a library caller that wants the same calls both.)
-- **Pure decisions, injected clock.** `Pass::window_at`,
-  `Pass::check_window` and `Pass::permits` take `now` from the caller and
-  read nothing. Only `load`, `tally`, `read_ledger`, `spend`, `spend_in`,
-  `adopt` and `write_template` touch the file system, and only `spend`
-  (through `StateDir::from_env`) reads the environment.
-- **Small public API**: `load`, `Pass` (with `permits`, `window_at`,
-  `check_window`, `destination_for`), `spend`, `spend_in`, `adopt`,
-  `tally`, `read_ledger`, `ledger_path`, `StateDir`, `write_template`, the
-  address parsers, and their value types. Structs
-  that the library builds are `#[non_exhaustive]` so a caller cannot build
-  an unvalidated `Pass`.
+  library calls. The CLI uses `permits_with_clock_in` to verify the ledger
+  and witness before sampling the decision instant. Library clients can use
+  the same entry point.
+- **Pure decisions and live decisions.** `Pass::window_at`,
+  `Pass::check_window` and `Pass::permits` evaluate caller-supplied data and
+  time. Ledger-aware APIs handle local files and accept an explicit state
+  directory. Writers evaluate live policy under the accounting locks.
+- **Validated inputs.** Construct a pass with `load` and use the public
+  address and target parsers. Library-produced structs such as `Pass` are
+  `#[non_exhaustive]`.
 
 ## Validation
 
@@ -150,8 +146,8 @@ reuses `permits_named` unchanged, so the two can never disagree. `spend`
 without a target stays, for callers that count something with no single
 destination; it can only be stricter to give one.
 
-The ledger entry does not record the target (a ledger format change, left
-as a bone). The command line reports a line it cannot read as a JSON error
+By default the ledger omits targets. Callers can opt into a debit receipt
+with checked targets and labels using `--record-target`. The command line reports a line it cannot read as a JSON error
 object when `--format json` is on it, because a caller that reads JSON and
 gets empty output has to guess. What a caller may rely on is in
 [INTEGRATING.md](INTEGRATING.md).
@@ -333,6 +329,7 @@ ignores the variable, says so, and decides on the real clock
 | `clap` (derive) | the command line |
 | `serde`, `serde_json` | JSON output and ledger lines |
 | `toml` | the pass format |
+| `rustix` | safe Unix effective-UID and write-access queries |
 | `time` | RFC 3339 parsing, offsets, durations |
 | `thiserror` | error types |
 | `sha2` | SHA-256 for the digest and the ledger chain (RustCrypto, small, maintained) |
@@ -364,7 +361,8 @@ No locking crate: the standard library has file locks.
 - **Locks are advisory and local.** `flock` does not work reliably on some
   network file systems. Keep the pass on a local disk.
 - **The window uses the caller's clock.** Changing the system clock moves
-  the window. CLI spends sample time after acquiring the writer locks. A
+  the window. CLI spends sample time after preparatory witness writes under the writer locks;
+  status, permits and previews sample after verifying their evidence. A
   decision instant strictly earlier than the most recent ledger event
   produces a warning, including a difference of one nanosecond. Equal times
   are valid. A historical advanced clock cannot indefinitely block legitimate
@@ -392,3 +390,67 @@ either trusted owner. UID and mode are checked on the opened file.
 Read-only permission checks report unavailable witness evidence as a warning
 because they answer a scope question. A counted operation and its preview
 require usable witness evidence.
+
+### Streaming verification
+
+Ledger decisions scan the complete chain line by line, hashing the original
+bytes. Summary reads retain totals, the tail, and the requested witnessed
+prefix instead of retaining every event or line hash. Retained memory therefore
+depends on counter names and the largest line, while each decision still takes
+linear time in the number of ledger lines. Full-history reads retain events for
+listing. A separately retained checkpoint commits to an exact prefix but does
+not establish who approved it or authenticate a checkpoint rewritten alongside
+the ledger.
+
+### Current accounting and proposed release policy
+
+Hallpass currently uses monotone spend-only accounting. The caller spends once,
+immediately before the first send of a unit with known costs. A read-only
+preflight can help prepare work, but its result is advisory and concurrent
+callers can spend the observed budget before the first send. First-send
+spending still checks all costs together under the writer locks.
+
+For a pass with one request and 100 bytes available, a proposed
+one-request, 101-byte unit is refused and both recorded counters remain
+zero. A caller can preflight a one-request, 100-byte unit as often as needed.
+When two callers reach the first send with that cost, exactly one obtains
+a committed sequence and both counters reach their ceilings. If that
+caller crashes after the debit and before the send, both charges stand.
+When the witness recorded the debit and an older ledger is restored,
+adoption carries both missing amounts forward.
+
+A reservation and release model would require authority to attest that the
+unit never left. Only the caller's send boundary could furnish evidence, and
+a recovered caller can be uncertain after a crash around that boundary.
+Concurrent attempts would require an identity for each reservation and one
+durable decision per release, with rules for missing history and carry
+forward during adoption. The proposal is to keep spend-only accounting
+while that uncertainty remains. The approval owner’s disposition on
+release is pending.
+
+A crash or I/O error around append requires reconciliation by sequence and
+digest (and a caller reference when available) before retry. An explicit
+witness-update failure identifies a synced sequence. Verify it and account
+for it as spent, even if a caller never obtained permission to send.
+
+A capacity instrumentation run with one counter and synthetic fixed-shape
+records used `cargo test summary_retains_no_per_event_storage_at_scale -- --nocapture`.
+At 10,000 and 100,000 records the inputs were 2,428,933 and 24,388,934 bytes;
+the largest lines were 243 and 244 bytes. The previous parser retained at least
+2,748,965 and 27,588,966 bytes in its input buffer and 32-byte hashes alone,
+excluding event objects and allocator overhead. The streaming summary retained
+zero event/adoption vector capacity at both sizes, one counter, one tail and one
+requested prefix. These are instrumented retained structures, not process RSS;
+the test fixture itself constructs the input in memory and is excluded.
+
+Archive checks the opened directory and entry metadata, and syncs the directory
+after publishing. The private archive directory and its parent path are a trust
+boundary: another process able to rename or replace those paths without taking
+locks can race pathname operations. A present witness may corroborate only an
+earlier prefix when the ledger extends it, not necessarily the exported tail.
+
+Preparatory witness updates retain the most recent ledger event timestamp (or
+the prior witness timestamp, or the Unix epoch for a new header). This timestamp
+describes available evidence, not the later decision instant. A failed or invalid
+clock after preparation can therefore leave the corroborating witness updated,
+but no spend is appended.

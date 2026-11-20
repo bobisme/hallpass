@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +36,10 @@ use crate::pass::{MAX_CEILING, is_counter_name};
 use crate::request::decide_targets;
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
 use crate::{MAX_TARGETS, NamedTarget};
+
+mod debit;
+pub use debit::*;
+use debit::{DebitLine, parse_debit};
 
 /// The ledger format version.
 const LEDGER_VERSION: u32 = 1;
@@ -132,6 +136,17 @@ impl<'a> SpendRequest<'a> {
             name: None,
             additional_targets: &[],
         }
+    }
+
+    fn targets(&self) -> impl Iterator<Item = (Target, Option<&HostName>)> {
+        self.target
+            .into_iter()
+            .map(|target| (target, self.name))
+            .chain(
+                self.additional_targets
+                    .iter()
+                    .map(|entry| (entry.target, entry.name.as_ref())),
+            )
     }
 }
 
@@ -378,12 +393,18 @@ pub struct LedgerView {
     pub path: PathBuf,
     /// False when there is no ledger yet (nothing was spent).
     pub exists: bool,
-    /// Every spend, in order.
+    /// Every legacy single-counter spend, in order.
     pub entries: Vec<LedgerEntry>,
+    /// Every versioned debit, in order. Shares the sequence with entries and adoptions.
+    pub debits: Vec<LedgerDebit>,
     /// Every adoption, in order.
     pub adoptions: Vec<Adoption>,
     /// The totals (spends and carried amounts).
     pub tally: Tally,
+    /// Timestamp of the latest recorded event, if any.
+    pub last_time: Option<OffsetDateTime>,
+    /// Number of adoption records.
+    pub adoption_count: u64,
     /// How the ledger compares with its witness.
     pub witness: WitnessStatus,
     /// Where the witness last saw this ledger, when that was another path
@@ -398,20 +419,22 @@ pub struct LedgerView {
 struct Parsed {
     tally: Tally,
     entries: Vec<LedgerEntry>,
+    debits: Vec<LedgerDebit>,
     adoptions: Vec<Adoption>,
     /// The hash of every line; index 0 is the header, index `n` the line
     /// with sequence number `n`.
-    hashes: Vec<Digest>,
+    tail: Digest,
+    prefix: Option<(u64, Digest)>,
+    collect: bool,
+    last_time: Option<OffsetDateTime>,
+    adoption_count: u64,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
 }
 
 impl Parsed {
-    fn tail(&self) -> Digest {
-        self.hashes
-            .last()
-            .copied()
-            .unwrap_or_else(|| Digest::of(b""))
+    const fn tail(&self) -> Digest {
+        self.tail
     }
 }
 
@@ -419,6 +442,7 @@ impl Parsed {
 #[serde(untagged)]
 enum Line {
     Spend(Entry),
+    Debit(DebitLine),
     Adopt(AdoptLine),
 }
 
@@ -453,25 +477,33 @@ fn add(totals: &mut BTreeMap<String, u64>, counter: &str, n: u64) -> Option<()> 
 }
 
 /// Parse the whole ledger. Any doubt is an error, never an empty count.
-fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<Parsed, Error> {
+fn parse_ledger(
+    path: &Path,
+    reader: impl BufRead,
+    pass_id: &str,
+    collect: bool,
+    requested: Option<u64>,
+) -> Result<Parsed, Error> {
     let corrupt = |line: usize, detail: &str| Error::LedgerCorrupt {
         path: path.to_path_buf(),
         line,
         detail: detail.to_owned(),
     };
-    if bytes.is_empty() {
+    let mut reader = reader;
+    let mut first = Vec::new();
+    reader
+        .read_until(b'\n', &mut first)
+        .map_err(|e| Error::io(path, &e))?;
+    if first.is_empty() {
         return Err(corrupt(
             1,
             "the file is empty, but a ledger always starts with a header line (was it truncated?)",
         ));
     }
-    if bytes.last() != Some(&b'\n') {
-        let line = bytes.split(|b| *b == b'\n').count();
-        return Err(corrupt(line, "the last line is cut short (no line end)"));
+    if first.pop() != Some(b'\n') {
+        return Err(corrupt(1, "the last line is cut short (no line end)"));
     }
-    let mut lines = bytes[..bytes.len() - 1].split(|b| *b == b'\n');
-    let first = lines.next().unwrap_or_default();
-    let header: Header = serde_json::from_slice(first)
+    let header: Header = serde_json::from_slice(&first)
         .map_err(|_| corrupt(1, "the header line is not a hallpass ledger header"))?;
     if header.hallpass_ledger != LEDGER_VERSION {
         return Err(corrupt(
@@ -479,26 +511,39 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<Parsed, Erro
             "the ledger version is not one this hallpass reads (if a newer hallpass wrote it, use that one)",
         ));
     }
-    if header.pass_id != pass_id {
-        return Err(Error::LedgerForeign {
-            path: path.to_path_buf(),
-            ledger_id: header.pass_id,
-            pass_id: pass_id.to_owned(),
-        });
-    }
+    let foreign_id = (header.pass_id != pass_id).then_some(header.pass_id);
     let mut parsed = Parsed {
         tally: Tally::default(),
         entries: Vec::new(),
+        debits: Vec::new(),
         adoptions: Vec::new(),
-        hashes: vec![Digest::of(first)],
+        tail: Digest::of(&first),
+        prefix: (requested == Some(0)).then(|| (0, Digest::of(&first))),
+        collect,
+        last_time: None,
+        adoption_count: 0,
         seq: 0,
     };
-    for (i, line) in lines.enumerate() {
-        let number = i + 2;
-        let record: Line = serde_json::from_slice(line)
+    let mut number = 1;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| Error::io(path, &e))?
+            == 0
+        {
+            break;
+        }
+        number += 1;
+        if line.pop() != Some(b'\n') {
+            return Err(corrupt(number, "the last line is cut short (no line end)"));
+        }
+        let record: Line = serde_json::from_slice(&line)
             .map_err(|_| corrupt(number, "the line is not a complete ledger entry"))?;
         let (seq, prev) = match &record {
             Line::Spend(e) => (e.seq, &e.prev),
+            Line::Debit(e) => (e.seq, &e.prev),
             Line::Adopt(a) => (a.seq, &a.prev),
         };
         if seq != parsed.seq + 1 {
@@ -517,12 +562,25 @@ fn parse_ledger(path: &Path, bytes: &[u8], pass_id: &str) -> Result<Parsed, Erro
             Line::Spend(entry) => {
                 parse_spend(&mut parsed, entry).map_err(|detail| corrupt(number, detail))?;
             }
+            Line::Debit(debit) => {
+                parse_debit(&mut parsed, debit).map_err(|detail| corrupt(number, detail))?;
+            }
             Line::Adopt(adopt) => {
                 parse_adopt(&mut parsed, adopt).map_err(|detail| corrupt(number, detail))?;
             }
         }
         parsed.seq = seq;
-        parsed.hashes.push(Digest::of(line));
+        parsed.tail = Digest::of(&line);
+        if requested == Some(seq) {
+            parsed.prefix = Some((seq, parsed.tail));
+        }
+    }
+    if let Some(ledger_id) = foreign_id {
+        return Err(Error::LedgerForeign {
+            path: path.to_path_buf(),
+            ledger_id,
+            pass_id: pass_id.to_owned(),
+        });
     }
     Ok(parsed)
 }
@@ -544,17 +602,20 @@ fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<(), &'static str> {
     {
         return Err("the time, digest or note is not valid");
     }
+    parsed.last_time = Some(time);
     add(&mut parsed.tally.spent, &entry.counter, entry.n)
         .ok_or("the recorded amounts add up beyond any ceiling")?;
     parsed.tally.entries += 1;
-    parsed.entries.push(LedgerEntry {
-        seq: entry.seq,
-        time,
-        counter: entry.counter,
-        amount: entry.n,
-        digest,
-        note: entry.note,
-    });
+    if parsed.collect {
+        parsed.entries.push(LedgerEntry {
+            seq: entry.seq,
+            time,
+            counter: entry.counter,
+            amount: entry.n,
+            digest,
+            note: entry.note,
+        });
+    }
     Ok(())
 }
 
@@ -589,18 +650,22 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<(), &'static str>
             })
         }
     };
+    parsed.last_time = Some(time);
+    parsed.adoption_count += 1;
     for (counter, n) in &line.carried {
         add(&mut parsed.tally.spent, counter, *n)
             .ok_or("the recorded amounts add up beyond any ceiling")?;
     }
-    parsed.adoptions.push(Adoption {
-        seq: line.seq,
-        time,
-        reason: line.reason,
-        digest,
-        carried: line.carried,
-        previous,
-    });
+    if parsed.collect {
+        parsed.adoptions.push(Adoption {
+            seq: line.seq,
+            time,
+            reason: line.reason,
+            digest,
+            carried: line.carried,
+            previous,
+        });
+    }
     Ok(())
 }
 
@@ -636,7 +701,7 @@ fn check_private(path: &Path, file: &fs::File) -> Result<(), Error> {
 ///
 /// A ledger that is a link, not private, damaged, or for another pass id.
 pub fn tally(loaded: &LoadedPass) -> Result<Tally, Error> {
-    Ok(read_shared(loaded)?
+    Ok(read_shared(loaded, false, None)?
         .0
         .map_or_else(Tally::default, |p| p.tally))
 }
@@ -644,21 +709,26 @@ pub fn tally(loaded: &LoadedPass) -> Result<Tally, Error> {
 /// Read and verify the whole ledger beside `loaded` under a shared lock:
 /// `None` when there is no ledger. The lock is held as long as the returned
 /// file is.
-fn read_shared(loaded: &LoadedPass) -> Result<(Option<Parsed>, Option<fs::File>), Error> {
+fn read_shared(
+    loaded: &LoadedPass,
+    collect: bool,
+    requested: Option<u64>,
+) -> Result<(Option<Parsed>, Option<fs::File>), Error> {
     let path = ledger_path(&loaded.path);
     if !exists(&path)? {
         return Ok((None, None));
     }
-    let mut file = open_no_follow(&path, OpenOptions::new().read(true))?;
+    let file = open_no_follow(&path, OpenOptions::new().read(true))?;
     check_private(&path, &file)?;
     file.lock_shared().map_err(|e| Error::io(&path, &e))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| Error::io(&path, &e))?;
-    Ok((
-        Some(parse_ledger(&path, &bytes, &loaded.pass.id)?),
-        Some(file),
-    ))
+    let parsed = parse_ledger(
+        &path,
+        BufReader::new(&file),
+        &loaded.pass.id,
+        collect,
+        requested,
+    )?;
+    Ok((Some(parsed), Some(file)))
 }
 
 /// Whether anything (even a dangling link) is at `path`.
@@ -699,10 +769,7 @@ fn compare(
         (Some(p), Some(w)) => {
             let here = ledger_identity(ledger);
             let moved = (w.ledger != here).then(|| w.ledger.clone());
-            let witnessed = usize::try_from(w.seq)
-                .ok()
-                .and_then(|i| p.hashes.get(i))
-                .is_some_and(|h| *h == w.tail);
+            let witnessed = p.prefix == Some((w.seq, w.tail));
             if witnessed {
                 let added = p.seq - w.seq;
                 let status = if added == 0 {
@@ -795,10 +862,39 @@ fn warnings(
 /// but the witness recorded spends, and [`Error::LedgerChanged`] when the
 /// ledger does not hold the line the witness recorded.
 pub fn read_ledger(loaded: &LoadedPass, state: &StateDir) -> Result<LedgerView, Error> {
+    read_view(loaded, state, true)
+}
+
+/// Read and verify a ledger without retaining its individual events.
+///
+/// # Errors
+/// As [`read_ledger`].
+pub fn read_summary(loaded: &LoadedPass, state: &StateDir) -> Result<LedgerView, Error> {
+    read_view(loaded, state, false)
+}
+
+fn read_view(loaded: &LoadedPass, state: &StateDir, collect: bool) -> Result<LedgerView, Error> {
     let path = ledger_path(&loaded.path);
     let id = &loaded.pass.id;
-    let (parsed, _lock) = read_shared(loaded)?;
-    let (witness, moved) = match state.read(id) {
+    let file = if exists(&path)? {
+        let file = open_no_follow(&path, OpenOptions::new().read(true))?;
+        check_private(&path, &file)?;
+        file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+        Some(file)
+    } else {
+        None
+    };
+    let saved_witness = state.read(id);
+    let requested = saved_witness
+        .as_ref()
+        .ok()
+        .and_then(|w| w.as_ref())
+        .map(|w| w.seq);
+    let parsed = file
+        .as_ref()
+        .map(|f| parse_ledger(&path, BufReader::new(f), id, collect, requested))
+        .transpose()?;
+    let (witness, moved) = match saved_witness {
         Err(e) => (
             WitnessStatus::NotChecked {
                 reason: e.to_string(),
@@ -812,20 +908,127 @@ pub fn read_ledger(loaded: &LoadedPass, state: &StateDir) -> Result<LedgerView, 
     let parsed = parsed.unwrap_or_else(|| Parsed {
         tally: Tally::default(),
         entries: Vec::new(),
+        debits: Vec::new(),
         adoptions: Vec::new(),
-        hashes: Vec::new(),
+        tail: Digest::of(b""),
+        prefix: None,
+        collect: true,
+        last_time: None,
+        adoption_count: 0,
         seq: 0,
     });
     Ok(LedgerView {
         path,
         exists,
         entries: parsed.entries,
+        debits: parsed.debits,
         adoptions: parsed.adoptions,
         tally: parsed.tally,
+        last_time: parsed.last_time,
+        adoption_count: parsed.adoption_count,
         witness,
         moved_from: moved,
         warnings,
     })
+}
+
+/// A retained commitment to one exact ledger line.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Checkpoint {
+    /// Checkpoint format version.
+    pub version: u32,
+    /// Pass identity recorded in the ledger header.
+    pub pass_id: String,
+    /// Sequence of the committed line; zero denotes the header.
+    pub seq: u64,
+    /// SHA-256 of the original line without its newline.
+    pub hash: String,
+}
+
+/// Result of verifying a complete ledger against a checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckpointStatus {
+    /// The ledger ends at the committed line.
+    Exact,
+    /// The ledger extends the committed line.
+    Extended(u64),
+    /// The valid ledger is shorter than, or differs from, the commitment.
+    Mismatch,
+}
+
+/// Export a checkpoint and say whether local witness corroboration exists.
+///
+/// # Errors
+/// If the ledger or local witness is unusable or contradicts the ledger.
+pub fn export_checkpoint(
+    loaded: &LoadedPass,
+    state: &StateDir,
+) -> Result<(Checkpoint, bool), Error> {
+    let path = ledger_path(&loaded.path);
+    let file = open_no_follow(&path, OpenOptions::new().read(true))?;
+    check_private(&path, &file)?;
+    file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+    let witness = state.read(&loaded.pass.id)?;
+    let parsed = parse_ledger(
+        &path,
+        BufReader::new(&file),
+        &loaded.pass.id,
+        false,
+        witness.as_ref().map(|w| w.seq),
+    )?;
+    compare(
+        &loaded.path,
+        &path,
+        Some(&parsed),
+        witness.as_ref(),
+        state,
+        &loaded.pass.id,
+    )?;
+    Ok((
+        Checkpoint {
+            version: 1,
+            pass_id: loaded.pass.id.clone(),
+            seq: parsed.seq,
+            hash: parsed.tail.to_string(),
+        },
+        witness.is_some(),
+    ))
+}
+
+/// Verify every line of a ledger against an independently retained checkpoint.
+/// This never reads or writes local witness state.
+///
+/// # Errors
+/// If the checkpoint is malformed or the ledger is unavailable or corrupt.
+pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<CheckpointStatus, Error> {
+    if checkpoint.version != 1 || !crate::pass::is_identifier(&checkpoint.pass_id) {
+        return Err(Error::Usage(
+            "invalid checkpoint version or pass ID".to_owned(),
+        ));
+    }
+    let hash = checkpoint.hash.parse::<Digest>().map_err(Error::Usage)?;
+    let file = open_no_follow(path, OpenOptions::new().read(true))?;
+    check_private(path, &file)?;
+    file.lock_shared().map_err(|e| Error::io(path, &e))?;
+    let parsed = match parse_ledger(
+        path,
+        BufReader::new(&file),
+        &checkpoint.pass_id,
+        false,
+        Some(checkpoint.seq),
+    ) {
+        Err(Error::LedgerForeign { .. }) => return Ok(CheckpointStatus::Mismatch),
+        other => other?,
+    };
+    if parsed.prefix != Some((checkpoint.seq, hash)) {
+        return Ok(CheckpointStatus::Mismatch);
+    }
+    if parsed.seq == checkpoint.seq {
+        Ok(CheckpointStatus::Exact)
+    } else {
+        Ok(CheckpointStatus::Extended(parsed.seq - checkpoint.seq))
+    }
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -873,26 +1076,21 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The policy part of a spend: the refusal when it may not be recorded,
-/// otherwise the label of the destination that permits the target (when
-/// the request has one).
+/// Check one counter against the pass and the locked ledger totals.
 fn decide_ceiling(
     loaded: &LoadedPass,
-    request: &SpendRequest<'_>,
+    counter: &str,
+    amount: u64,
     total: Option<u64>,
     spent: u64,
 ) -> Result<(), Refusal> {
-    let refuse = |code, message: String| Refusal {
-        code,
-        message: format!("{message}. Nothing was recorded"),
-    };
     let Some(total) = total else {
         let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
-        return Err(refuse(
+        return Err(refused_spend(
             RefusalCode::UnknownCounter,
             format!(
                 "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent: use one of those names, or ask the owner to add this ceiling to the pass in writing",
-                request.counter,
+                counter,
                 if known.is_empty() {
                     "none".to_owned()
                 } else {
@@ -901,18 +1099,23 @@ fn decide_ceiling(
             ),
         ));
     };
-    if spent.saturating_add(request.amount) > total {
-        return Err(refuse(
+    if spent.saturating_add(amount) > total {
+        return Err(refused_spend(
             RefusalCode::CeilingReached,
             format!(
                 "spending {} {} would exceed the ceiling: {spent} of {total} already spent, {} left; stop, or ask the owner to raise the ceiling in writing",
-                request.amount,
-                request.counter,
+                amount,
+                counter,
                 total.saturating_sub(spent)
             ),
         ));
     }
     Ok(())
+}
+
+fn refused_spend(code: RefusalCode, mut message: String) -> Refusal {
+    message.push_str(". Nothing was recorded");
+    Refusal { code, message }
 }
 
 /// A ledger opened for writing under both locks.
@@ -941,39 +1144,84 @@ struct Locked {
 /// spends is [`Error::LedgerMissing`] and nothing is created; otherwise a
 /// missing ledger is created. For an adoption, a missing ledger is created
 /// only when the witness recorded spends (that is what is adopted).
-fn lock_for_writing(pass_path: &Path, state: &StateDir, adopting: bool) -> Result<Locked, Error> {
+fn lock_for_writing(
+    pass_path: &Path,
+    state: &StateDir,
+    adopting: bool,
+    guard: Option<&str>,
+) -> Result<Locked, Error> {
     let id = load(pass_path)?.pass.id;
     let witness_lock = state.lock(&id)?;
     let witness = state.read(&id)?;
+    if let Some(expected) = guard {
+        let current = preview_adopt(pass_path, state)
+            .map_err(|_| Error::Usage("stale adoption preview; nothing was recorded".into()))?;
+        if current.token != expected {
+            return Err(Error::Usage(
+                "stale adoption preview; nothing was recorded".into(),
+            ));
+        }
+    }
     let path = ledger_path(pass_path);
     let created = !exists(&path)?;
+    let mut guarded_missing_pass = None;
     if created {
-        if !adopting {
+        if adopting {
+            let Some(known) = witness.as_ref().filter(|w| w.seq > 0) else {
+                return Err(Error::Usage(
+                    "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
+                ));
+            };
+            check_projected_witness_size(state, &id, &path, 1, &known.totals)?;
+        } else {
             compare(pass_path, &path, None, witness.as_ref(), state, &id)?;
-        } else if witness.as_ref().is_none_or(|w| w.seq == 0) {
-            return Err(Error::Usage(
-                "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
-            ));
+        }
+        if let Some(expected) = guard {
+            let snapshot = load(pass_path)?;
+            if snapshot.pass.id != id
+                || expected != adoption_token(&snapshot, &path, None, witness.as_ref())
+            {
+                return Err(Error::Usage(
+                    "stale adoption preview; nothing was recorded".into(),
+                ));
+            }
+            guarded_missing_pass = Some(snapshot);
         }
         create_ledger(&path, &id)?;
     }
-    let mut file = open_no_follow(&path, OpenOptions::new().read(true).append(true))?;
+    let file = open_no_follow(&path, OpenOptions::new().read(true).append(true))?;
     check_private(&path, &file)?;
     file.lock().map_err(|e| Error::io(&path, &e))?;
 
     // Everything below holds both locks. The pass is read again: what counts
     // is the pass as it is now, not as it was a moment ago.
-    let loaded = load(pass_path)?;
+    let loaded = match guarded_missing_pass {
+        Some(snapshot) => snapshot,
+        None => load(pass_path)?,
+    };
     if loaded.pass.id != id {
         return Err(Error::Usage(format!(
             "the pass id changed from `{id}` to `{}` while waiting for the ledger; nothing was recorded. Run the command again",
             loaded.pass.id
         )));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| Error::io(&path, &e))?;
-    let parsed = parse_ledger(&path, &bytes, &id)?;
+    let parsed = parse_ledger(
+        &path,
+        BufReader::new(&file),
+        &id,
+        false,
+        witness.as_ref().map(|w| w.seq),
+    )?;
+    if !created
+        && guard.is_some_and(|expected| {
+            expected != adoption_token(&loaded, &path, Some(&parsed), witness.as_ref())
+        })
+    {
+        return Err(Error::Usage(
+            "stale adoption preview; nothing was recorded".into(),
+        ));
+    }
+
     Ok(Locked {
         _witness_lock: witness_lock,
         file,
@@ -1053,9 +1301,10 @@ pub fn spend(
 /// Anything that prevents a sure decision: an unreadable or invalid pass, a
 /// damaged or foreign ledger, a ledger that is missing or changed according
 /// to the witness, a state directory that cannot be used, a malformed
-/// request, a failed write. Nothing is recorded, except in
-/// [`Error::WitnessNotUpdated`], where the spend was recorded but the
-/// witness could not be updated afterwards.
+/// request, or a failed write. [`Error::AppendUncertain`] means the
+/// append or sync failed and its outcome requires reconciliation.
+/// [`Error::WitnessNotUpdated`] means the debit synced and the witness
+/// update failed.
 pub fn spend_in(
     pass_path: &Path,
     request: &SpendRequest<'_>,
@@ -1067,15 +1316,19 @@ pub fn spend_in(
 }
 
 fn validate_request(request: &SpendRequest<'_>) -> Result<(), Error> {
-    if request.needed.is_negative() {
-        return Err(Error::Usage(
-            "the duration the work may take is negative; pass zero for \"right now\", or how long the work may take. Nothing was recorded".to_owned(),
-        ));
-    }
     if request.amount == 0 || request.amount > MAX_CEILING {
         return Err(Error::Usage(format!(
             "the amount must be a whole number from 1 to {MAX_CEILING}; nothing was recorded"
         )));
+    }
+    validate_spend_policy(request)
+}
+
+fn validate_spend_policy(request: &SpendRequest<'_>) -> Result<(), Error> {
+    if request.needed.is_negative() {
+        return Err(Error::Usage(
+            "the duration the work may take is negative; pass zero for \"right now\", or how long the work may take. Nothing was recorded".to_owned(),
+        ));
     }
     if request.name.is_some() && request.target.is_none() {
         return Err(Error::Usage(
@@ -1106,46 +1359,12 @@ pub fn spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
-    let mut locked = lock_for_writing(pass_path, state, false)?;
+    let mut locked = lock_for_writing(pass_path, state, false, None)?;
     let id = locked.loaded.pass.id.clone();
-    let here = ledger_identity(&locked.path);
-    let (status, moved) = compare(
-        pass_path,
-        &locked.path,
-        Some(&locked.parsed),
-        locked.witness.as_ref(),
-        state,
-        &id,
-    )?;
+    let (here, warnings) = prepare_witness(pass_path, &locked, state)?;
     let now = clock();
     check_clock(now)?;
-    let mut warnings = warnings(&status, moved.as_ref(), &id, true);
-    if locked.created && status == WitnessStatus::Missing {
-        // This call started the ledger: it has no witness because it is
-        // new, not because it came from somewhere else.
-        warnings.clear();
-    }
-    if status != WitnessStatus::Matches || moved.is_some() {
-        state.write(
-            &id,
-            &Witnessed {
-                ledger: here.clone(),
-                seq: locked.parsed.seq,
-                tail: locked.parsed.tail(),
-                totals: locked.parsed.tally.spent.clone(),
-                updated: stamp(now),
-            },
-        )?;
-    }
-    let last = locked
-        .parsed
-        .entries
-        .last()
-        .map(|e| (e.seq, e.time))
-        .into_iter()
-        .chain(locked.parsed.adoptions.last().map(|a| (a.seq, a.time)))
-        .max_by_key(|(seq, _)| *seq)
-        .map(|(_, time)| time);
+    let last = locked.parsed.last_time;
     let mut outcome = evaluate_spend(
         &locked.loaded,
         request,
@@ -1169,20 +1388,21 @@ pub fn spend_with_clock_in(
         prev: locked.parsed.tail().to_string(),
     };
     let line = serde_json::to_string(&entry).map_err(|e| Error::Usage(e.to_string()))?;
-    append(&mut locked, &line, "spend")?;
     let mut totals = locked.parsed.tally.spent.clone();
     let _ = add(&mut totals, request.counter, request.amount);
+    let prepared = state.prepare(
+        &id,
+        &Witnessed {
+            ledger: here,
+            seq: entry.seq,
+            tail: Digest::of(line.as_bytes()),
+            totals,
+            updated: stamp(now),
+        },
+    )?;
+    append(&mut locked, &line, "spend")?;
     state
-        .write(
-            &id,
-            &Witnessed {
-                ledger: here,
-                seq: entry.seq,
-                tail: Digest::of(line.as_bytes()),
-                totals,
-                updated: stamp(now),
-            },
-        )
+        .publish(&id, &prepared)
         .map_err(|e| Error::WitnessNotUpdated {
             path: locked.path.clone(),
             seq: entry.seq,
@@ -1193,6 +1413,16 @@ pub fn spend_with_clock_in(
     Ok(outcome)
 }
 
+fn warn_clock_rollback(
+    now: OffsetDateTime,
+    last_time: Option<OffsetDateTime>,
+    warnings: &mut Vec<String>,
+) {
+    if let Some(previous) = last_time.filter(|t| now < *t) {
+        warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
+    }
+}
+
 fn evaluate_spend(
     loaded: &LoadedPass,
     request: &SpendRequest<'_>,
@@ -1201,9 +1431,7 @@ fn evaluate_spend(
     mut warnings: Vec<String>,
     last_time: Option<OffsetDateTime>,
 ) -> SpendOutcome {
-    if let Some(previous) = last_time.filter(|t| now < *t) {
-        warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
-    }
+    warn_clock_rollback(now, last_time, &mut warnings);
     let total = loaded.pass.ceilings.get(request.counter).copied();
     let spent = tally.spent(request.counter);
     let mut outcome = SpendOutcome {
@@ -1221,14 +1449,14 @@ fn evaluate_spend(
         label: None,
         warnings,
     };
-    let targets = request.target.into_iter().map(|t| (t, request.name)).chain(
-        request
-            .additional_targets
-            .iter()
-            .map(|t| (t.target, t.name.as_ref())),
-    );
-    match decide_targets(loaded, targets, request.expect_digest, now, request.needed) {
-        Ok(labels) => match decide_ceiling(loaded, request, total, spent) {
+    match decide_targets(
+        loaded,
+        request.targets(),
+        request.expect_digest,
+        now,
+        request.needed,
+    ) {
+        Ok(labels) => match decide_ceiling(loaded, request.counter, request.amount, total, spent) {
             Ok(()) => {
                 outcome.label = labels.first().cloned();
                 outcome.labels = labels;
@@ -1255,10 +1483,57 @@ pub fn preview_spend_in(
     now: OffsetDateTime,
     state: &StateDir,
 ) -> Result<SpendOutcome, Error> {
-    validate_request(request)?;
     check_clock(now)?;
+    preview_spend_with_clock_in(path, request, state, || now)
+}
+
+/// Predict a spend with a clock sampled after verifying the snapshot.
+///
+/// # Errors
+/// As [`preview_spend_in`].
+pub fn preview_spend_with_clock_in(
+    path: &Path,
+    request: &SpendRequest<'_>,
+    state: &StateDir,
+    clock: impl FnOnce() -> OffsetDateTime,
+) -> Result<SpendOutcome, Error> {
+    validate_request(request)?;
+    let (loaded, mut view) = preview_snapshot(path, state)?;
+    let now = clock();
+    check_clock(now)?;
+    let outcome = evaluate_spend(
+        &loaded,
+        request,
+        &view.tally,
+        now,
+        std::mem::take(&mut view.warnings),
+        view.last_time,
+    );
+    if outcome.refusal.is_none() {
+        let projected = view.tally.spent(request.counter) + request.amount;
+        view.tally
+            .spent
+            .insert(request.counter.to_owned(), projected);
+        view.check_next_witness(state, &loaded.pass.id)?;
+    }
+    Ok(outcome)
+}
+
+impl LedgerView {
+    fn check_next_witness(&self, state: &StateDir, id: &str) -> Result<(), Error> {
+        check_projected_witness_size(
+            state,
+            id,
+            &self.path,
+            self.tally.entries + self.adoption_count + 1,
+            &self.tally.spent,
+        )
+    }
+}
+
+fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
     let loaded = load(path)?;
-    let view = read_ledger(&loaded, state)?;
+    let view = read_summary(&loaded, state)?;
     if let WitnessStatus::NotChecked { reason } = view.witness {
         return Err(Error::WitnessUnavailable {
             pass_id: loaded.pass.id,
@@ -1276,22 +1551,48 @@ pub fn preview_spend_in(
                 .unwrap_or_else(|| Path::new(".")),
         )?;
     }
-    let last = view
-        .entries
-        .last()
-        .map(|e| (e.seq, e.time))
-        .into_iter()
-        .chain(view.adoptions.last().map(|e| (e.seq, e.time)))
-        .max_by_key(|(seq, _)| *seq)
-        .map(|(_, time)| time);
-    Ok(evaluate_spend(
-        &loaded,
-        request,
-        &view.tally,
-        now,
-        view.warnings,
-        last,
-    ))
+    Ok((loaded, view))
+}
+
+fn prepare_witness(
+    pass_path: &Path,
+    locked: &Locked,
+    state: &StateDir,
+) -> Result<(String, Vec<String>), Error> {
+    let id = &locked.loaded.pass.id;
+    let here = ledger_identity(&locked.path);
+    let (status, moved) = compare(
+        pass_path,
+        &locked.path,
+        Some(&locked.parsed),
+        locked.witness.as_ref(),
+        state,
+        id,
+    )?;
+    let mut warnings = warnings(&status, moved.as_ref(), id, true);
+    if locked.created && status == WitnessStatus::Missing {
+        // This call started the ledger: it has no witness because it is
+        // new, not because it came from somewhere else.
+        warnings.clear();
+    }
+    if status != WitnessStatus::Matches || moved.is_some() {
+        state.write(
+            id,
+            &Witnessed {
+                ledger: here.clone(),
+                seq: locked.parsed.seq,
+                tail: locked.parsed.tail(),
+                totals: locked.parsed.tally.spent.clone(),
+                updated: locked
+                    .parsed
+                    .last_time
+                    .map(stamp)
+                    .or_else(|| locked.witness.as_ref().map(|w| w.updated.clone()))
+                    .unwrap_or_else(|| stamp(OffsetDateTime::UNIX_EPOCH)),
+            },
+        )?;
+    }
+    Ok((here, warnings))
 }
 
 /// The result of an adoption.
@@ -1310,6 +1611,144 @@ pub struct AdoptOutcome {
     pub pass_id: String,
     /// The totals after the adoption (spends and carried amounts).
     pub totals: BTreeMap<String, u64>,
+}
+
+/// Read-only adoption snapshot and its guarded-apply token.
+#[derive(Clone, Debug)]
+pub struct AdoptPreview {
+    /// The recovery situation.
+    pub case: AdoptCase,
+    /// Pass ID.
+    pub pass_id: String,
+    /// Present ledger sequence, or zero if absent.
+    pub seq: u64,
+    /// Present totals.
+    pub present: BTreeMap<String, u64>,
+    /// Additional amounts to carry from the witness.
+    pub carried: BTreeMap<String, u64>,
+    /// Projected totals after adoption.
+    pub totals: BTreeMap<String, u64>,
+    /// Witness used by the snapshot.
+    pub previous: Option<Witnessed>,
+    /// Opaque versioned reviewed-state token.
+    pub token: String,
+}
+
+fn carry(present: &BTreeMap<String, u64>, witness: Option<&Witnessed>) -> BTreeMap<String, u64> {
+    let mut carried = BTreeMap::new();
+    if let Some(w) = witness {
+        for (counter, n) in &w.totals {
+            let have = present.get(counter).copied().unwrap_or(0);
+            if *n > have {
+                carried.insert(counter.clone(), n - have);
+            }
+        }
+    }
+    carried
+}
+
+fn adoption_token(
+    loaded: &LoadedPass,
+    path: &Path,
+    parsed: Option<&Parsed>,
+    witness: Option<&Witnessed>,
+) -> String {
+    let w = witness.map(|w| WitnessLine {
+        ledger: w.ledger.clone(),
+        seq: w.seq,
+        tail: w.tail.to_string(),
+        totals: w.totals.clone(),
+        updated: w.updated.clone(),
+    });
+    let input = serde_json::json!({"version": 1, "pass_id": loaded.pass.id, "pass_digest": loaded.digest.to_string(), "ledger": ledger_identity(path), "exists": parsed.is_some(), "seq": parsed.map_or(0, |p| p.seq), "tail": parsed.map(|p| p.tail.to_string()), "witness": w });
+    format!("v1:{}", Digest::of(input.to_string().as_bytes()))
+}
+
+/// Inspect an adoptable state without creating files or locks.
+///
+/// # Errors
+/// If the state is not adoptable or any evidence is invalid.
+pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview, Error> {
+    let loaded = load(pass_path)?;
+    let id = &loaded.pass.id;
+    let path = ledger_path(pass_path);
+    let file = if exists(&path)? {
+        let file = open_no_follow(&path, OpenOptions::new().read(true))?;
+        check_private(&path, &file)?;
+        file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+        Some(file)
+    } else {
+        None
+    };
+    let witness = state.read(id)?;
+    let parsed = file
+        .as_ref()
+        .map(|f| {
+            parse_ledger(
+                &path,
+                BufReader::new(f),
+                id,
+                false,
+                witness.as_ref().map(|w| w.seq),
+            )
+        })
+        .transpose()?;
+    let case = match compare(
+        pass_path,
+        &path,
+        parsed.as_ref(),
+        witness.as_ref(),
+        state,
+        id,
+    ) {
+        Err(Error::LedgerMissing(_)) => AdoptCase::LedgerMissing,
+        Err(Error::LedgerChanged { .. }) => AdoptCase::LedgerChanged,
+        Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
+        Ok(_) => return Err(Error::Usage("nothing to adopt".into())),
+        Err(e) => return Err(e),
+    };
+    let present = parsed
+        .as_ref()
+        .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
+    let carried = carry(&present, witness.as_ref());
+    let mut totals = present.clone();
+    for (counter, n) in &carried {
+        let _ = add(&mut totals, counter, *n);
+    }
+    let seq = parsed.as_ref().map_or(0, |p| p.seq);
+    check_projected_witness_size(state, id, &path, seq + 1, &totals)?;
+    let token = adoption_token(&loaded, &path, parsed.as_ref(), witness.as_ref());
+    Ok(AdoptPreview {
+        case,
+        pass_id: id.clone(),
+        seq,
+        present,
+        carried,
+        totals,
+        previous: witness,
+        token,
+    })
+}
+
+// The next tail hash and UTC timestamp have fixed serialized widths.
+fn check_projected_witness_size(
+    state: &StateDir,
+    id: &str,
+    path: &Path,
+    next_seq: u64,
+    totals: &BTreeMap<String, u64>,
+) -> Result<(), Error> {
+    state.prepare(
+        id,
+        &Witnessed {
+            ledger: ledger_identity(path),
+            seq: next_seq,
+            tail: Digest::of(b""),
+            totals: totals.clone(),
+            updated: stamp(OffsetDateTime::UNIX_EPOCH),
+        },
+    )?;
+    Ok(())
 }
 
 /// Acknowledge, with a reason, a ledger that hallpass would otherwise
@@ -1340,9 +1779,23 @@ pub fn adopt(
     now: OffsetDateTime,
     state: &StateDir,
 ) -> Result<AdoptOutcome, Error> {
+    adopt_guarded(pass_path, reason, now, state, None)
+}
+
+/// Adopt with an optional token returned by [`preview_adopt`].
+///
+/// # Errors
+/// As [`adopt`], or a stale preview token.
+pub fn adopt_guarded(
+    pass_path: &Path,
+    reason: &str,
+    now: OffsetDateTime,
+    state: &StateDir,
+    token: Option<&str>,
+) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
-    let mut locked = lock_for_writing(pass_path, state, true)?;
+    let mut locked = lock_for_writing(pass_path, state, true, token)?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
     let case = if locked.created {
@@ -1367,15 +1820,7 @@ pub fn adopt(
             Err(e) => return Err(e),
         }
     };
-    let mut carried = BTreeMap::new();
-    if let Some(w) = &locked.witness {
-        for (counter, n) in &w.totals {
-            let have = locked.parsed.tally.spent(counter);
-            if *n > have {
-                carried.insert(counter.clone(), n - have);
-            }
-        }
-    }
+    let carried = carry(&locked.parsed.tally.spent, locked.witness.as_ref());
     let line = AdoptLine {
         seq: locked.parsed.seq + 1,
         time: rfc3339(now),
@@ -1393,22 +1838,22 @@ pub fn adopt(
         prev: locked.parsed.tail().to_string(),
     };
     let text = serde_json::to_string(&line).map_err(|e| Error::Usage(e.to_string()))?;
-    append(&mut locked, &text, "adoption")?;
     let mut totals = locked.parsed.tally.spent.clone();
     for (counter, n) in &carried {
         let _ = add(&mut totals, counter, *n);
     }
-    state
-        .write(
-            &id,
-            &Witnessed {
-                ledger: here,
-                seq: line.seq,
-                tail: Digest::of(text.as_bytes()),
-                totals: totals.clone(),
-                updated: stamp(now),
-            },
-        )
+    let prepared = state.prepare(
+        &id,
+        &Witnessed {
+            ledger: here,
+            seq: line.seq,
+            tail: Digest::of(text.as_bytes()),
+            totals: totals.clone(),
+            updated: stamp(now),
+        },
+    )?;
+    append(&mut locked, &text, "adoption")?;
+    state.publish(&id, &prepared)
         .map_err(|e| Error::WitnessUnavailable {
             pass_id: id.clone(),
             dir: state.path().ok().map(Path::to_path_buf),
@@ -1459,6 +1904,10 @@ mod tests {
         let (_dir, path, state) = setup();
         let req = request("calls", 1);
         let out = spend_with_clock_in(&path, &req, &state, || {
+            assert!(
+                state.witness_path("acme-2026-11").expect("path").exists(),
+                "preparatory witness must be synced before sampling"
+            );
             let held = fs::File::open(ledger_path(&path)).expect("created");
             assert!(matches!(
                 held.try_lock(),
@@ -1487,6 +1936,19 @@ mod tests {
                 .time,
             NOW
         );
+    }
+
+    #[test]
+    fn preview_clock_is_sampled_after_verified_snapshot() {
+        let (_dir, path, state) = setup();
+        let req = request("calls", 1);
+        let result = preview_spend_with_clock_in(&path, &req, &state, || {
+            assert!(!ledger_path(&path).exists());
+            datetime!(2026-11-20 17:00 UTC)
+        })
+        .expect("preview");
+        assert_eq!(result.refusal.expect("expired").code, RefusalCode::Expired);
+        assert!(!ledger_path(&path).exists());
     }
 
     #[test]
@@ -1544,8 +2006,490 @@ mod tests {
         );
     }
 
+    #[test]
+    fn historical_counter_witness_round_trips_past_legacy_limit_and_adopts() {
+        let (_dir, path, state) = setup();
+        let approval = GOOD.split_once("[ceilings]").expect("ceilings").0;
+        let id = load(&path).expect("pass").pass.id;
+        let ledger = ledger_path(&path);
+        let witness_path = state.witness_path(&id).expect("witness");
+        let mut older_ledger = Vec::new();
+        for revision in 0..22 {
+            let mut pass = format!("{approval}[ceilings]\n");
+            let names: Vec<_> = (0..crate::MAX_COUNTERS)
+                .map(|counter| format!("c{:031}", revision * crate::MAX_COUNTERS + counter))
+                .collect();
+            for name in &names {
+                writeln!(pass, "{name} = {MAX_CEILING}").expect("ceiling");
+            }
+            fs::write(&path, pass).expect("edited pass");
+            let charges: Vec<_> = names
+                .iter()
+                .map(|counter| Charge {
+                    counter,
+                    amount: MAX_CEILING,
+                })
+                .collect();
+            let spent = spend_charges_in(&path, &SpendChargesRequest::new(&charges), NOW, &state)
+                .expect("spend across revisions");
+            assert_eq!(spent.seq, Some(revision as u64 + 1));
+            if revision == 0 {
+                older_ledger = fs::read(&ledger).expect("initial ledger");
+            }
+        }
+        // The unchanged version 1 encoding matches the writer from before
+        // the read-limit change, including a terminal newline.
+        let version_one = fs::read(&witness_path).expect("old encoding");
+        assert!(version_one.len() > 64 * 1024);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&version_one).expect("JSON")["hallpass_witness"],
+            1
+        );
+        assert_eq!(
+            state
+                .read(&id)
+                .expect("above old cap")
+                .expect("witness")
+                .totals
+                .len(),
+            22 * crate::MAX_COUNTERS
+        );
+        assert_eq!(
+            read_summary(&load(&path).expect("pass"), &state)
+                .expect("summary")
+                .witness,
+            WitnessStatus::Matches
+        );
+        fs::write(&ledger, older_ledger).expect("restore");
+        let preview = preview_adopt(&path, &state).expect("preview");
+        let adopted = adopt_guarded(
+            &path,
+            "restored first revision",
+            NOW,
+            &state,
+            Some(&preview.token),
+        )
+        .expect("adopt");
+        assert_eq!(adopted.adoption.carried.len(), 21 * crate::MAX_COUNTERS);
+        assert_eq!(adopted.totals, preview.totals);
+        assert_eq!(
+            state.read(&id).expect("read back").expect("witness").totals,
+            adopted.totals
+        );
+    }
+
+    #[test]
+    fn witness_size_refusal_leaves_accounting_records_untouched() {
+        const CAP: usize = 1024 * 1024;
+        const NEXT_COUNTER: &str = "abcdefghijklmnopqrstuvwxyzabcdef";
+        let (_dir, path, state) = setup();
+        let pass = format!("{GOOD}\n{NEXT_COUNTER} = {MAX_CEILING}\n");
+        fs::write(&path, pass).expect("pass");
+        let loaded = load(&path).expect("pass");
+        let id = &loaded.pass.id;
+        let ledger = ledger_path(&path);
+        let witness_path = state.witness_path(id).expect("witness");
+        let fixture_lock = state.lock(id).expect("fixture witness lock");
+        let mut witness = Witnessed {
+            ledger: ledger_identity(&ledger),
+            seq: 1,
+            tail: Digest::of(b"placeholder"),
+            totals: BTreeMap::new(),
+            updated: stamp(NOW),
+        };
+        state.write(id, &witness).expect("empty test witness");
+        let overhead = fs::read(&witness_path).expect("sample").len();
+        let entry_size = format!(r#""{NEXT_COUNTER}":{MAX_CEILING},"#).len();
+        for i in 0..((CAP - overhead + 1) / entry_size) {
+            witness.totals.insert(format!("c{i:031}"), MAX_CEILING);
+        }
+        create_ledger(&ledger, id).expect("header");
+        let header = fs::read_to_string(&ledger).expect("header");
+        let mut record = AdoptLine {
+            seq: 1,
+            time: rfc3339(NOW),
+            event: "adopt".to_owned(),
+            reason: "simulated historical carry-forward".to_owned(),
+            digest: loaded.digest.to_string(),
+            carried: witness.totals.clone(),
+            witness: None,
+            prev: Digest::of(header.trim_end().as_bytes()).to_string(),
+        };
+        let baseline = serde_json::to_string(&record).expect("ledger line");
+        witness.tail = Digest::of(baseline.as_bytes());
+        state
+            .write(id, &witness)
+            .expect("witness just below the limit");
+        let witness_before = fs::read(&witness_path).expect("witness");
+        drop(fixture_lock);
+
+        let bytes = format!("{header}{baseline}\n");
+        fs::write(&ledger, &bytes).expect("ledger");
+        let charges = [Charge {
+            counter: NEXT_COUNTER,
+            amount: MAX_CEILING,
+        }];
+        let mut preview = SpendChargesRequest::new(&charges);
+        preview.dry_run = true;
+        for result in [
+            preview_spend_in(
+                &path,
+                &SpendRequest::new(NEXT_COUNTER, MAX_CEILING),
+                NOW,
+                &state,
+            )
+            .map(|_| ()),
+            spend_charges_in(&path, &preview, NOW, &state).map(|_| ()),
+            spend_in(
+                &path,
+                &SpendRequest::new(NEXT_COUNTER, MAX_CEILING),
+                NOW,
+                &state,
+            )
+            .map(|_| ()),
+            spend_charges_in(&path, &SpendChargesRequest::new(&charges), NOW, &state).map(|_| ()),
+        ] {
+            let error = result.expect_err("witness size refusal");
+            assert!(error.to_string().contains("size limit"), "{error}");
+            assert_eq!(
+                fs::read(&ledger).expect("unchanged ledger"),
+                bytes.as_bytes()
+            );
+            assert_eq!(
+                fs::read(&witness_path).expect("unchanged witness"),
+                witness_before
+            );
+        }
+
+        record.carried.clear();
+        record.carried.insert(NEXT_COUNTER.to_owned(), MAX_CEILING);
+        let divergent = format!(
+            "{header}{}\n",
+            serde_json::to_string(&record).expect("line")
+        );
+        fs::write(&ledger, &divergent).expect("divergent ledger");
+        let error = preview_adopt(&path, &state).expect_err("oversized adoption preview");
+        assert!(error.to_string().contains("size limit"), "{error}");
+        let error = adopt(&path, "reconcile divergent totals", NOW, &state)
+            .expect_err("oversized adoption");
+        assert!(error.to_string().contains("size limit"), "{error}");
+        assert_eq!(
+            fs::read(&ledger).expect("unchanged ledger"),
+            divergent.as_bytes()
+        );
+        assert_eq!(
+            fs::read(&witness_path).expect("unchanged witness"),
+            witness_before
+        );
+    }
+
     fn request(counter: &str, amount: u64) -> SpendRequest<'_> {
         SpendRequest::new(counter, amount)
+    }
+
+    fn synthetic_history(count: u64) -> Vec<u8> {
+        let header = r#"{"hallpass_ledger":1,"pass_id":"test"}"#;
+        let mut bytes = format!("{header}\n").into_bytes();
+        let mut tail = Digest::of(header.as_bytes());
+        for seq in 1..=count {
+            let line = serde_json::json!({"seq":seq,"time":"2026-11-20T09:00:00Z","counter":"calls","n":1,"digest":Digest::of(b"pass").to_string(),"note":null,"prev":tail.to_string()}).to_string();
+            tail = Digest::of(line.as_bytes());
+            bytes.extend_from_slice(line.as_bytes());
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn streaming_summary_matches_collected_history(count in 0u64..50) {
+            let bytes = synthetic_history(count);
+            let path = Path::new("synthetic");
+            let full = parse_ledger(path, bytes.as_slice(), "test", true, Some(count / 2)).expect("full");
+            let summary = parse_ledger(path, bytes.as_slice(), "test", false, Some(count / 2)).expect("summary");
+            proptest::prop_assert_eq!(full.tally, summary.tally);
+            proptest::prop_assert_eq!(full.tail, summary.tail);
+            proptest::prop_assert_eq!(full.prefix, summary.prefix);
+            proptest::prop_assert_eq!(summary.entries.len(), 0);
+        }
+    }
+
+    #[test]
+    fn summary_retains_no_per_event_storage_at_scale() {
+        for count in [10_000, 100_000] {
+            let bytes = synthetic_history(count);
+            let summary = parse_ledger(
+                Path::new("synthetic"),
+                bytes.as_slice(),
+                "test",
+                false,
+                Some(count / 2),
+            )
+            .expect("summary");
+            assert_eq!(summary.entries.capacity(), 0);
+            assert_eq!(summary.adoptions.capacity(), 0);
+            assert_eq!(summary.tally.spent.len(), 1);
+            let largest_line = bytes
+                .split(|b| *b == b'\n')
+                .map(<[u8]>::len)
+                .max()
+                .unwrap_or(0);
+            eprintln!(
+                "events={count} input_bytes={} largest_line={} old_input_plus_hash_bytes={} retained_entry_capacity={} retained_adoption_capacity={} counters={}",
+                bytes.len(),
+                largest_line,
+                bytes.len()
+                    + (usize::try_from(count).expect("bounded count") + 1)
+                        * std::mem::size_of::<Digest>(),
+                summary.entries.capacity(),
+                summary.adoptions.capacity(),
+                summary.tally.spent.len()
+            );
+        }
+    }
+
+    #[test]
+    fn archive_checkpoint_and_recovery_walkthrough() {
+        let (dir, path, state) = setup();
+        let archive = dir.path().join("archive");
+        fs::create_dir(&archive).expect("archive");
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).expect("private");
+        let original = fs::read(&path).expect("pass");
+        let digest = crate::archive_pass(&path, &archive).expect("archive pass");
+        ok(&path, &state, "calls", 4);
+        let ledger = ledger_path(&path);
+        let older = fs::read(&ledger).expect("ledger");
+        let (checkpoint, _) =
+            export_checkpoint(&load(&path).expect("load"), &state).expect("checkpoint");
+        fs::write(
+            &path,
+            format!(
+                "{}\n# changed\n",
+                String::from_utf8(original.clone()).expect("utf8")
+            ),
+        )
+        .expect("edit");
+        ok(&path, &state, "calls", 2);
+        let witness_path = state
+            .witness_path(&checkpoint.pass_id)
+            .expect("witness path");
+        let before = fs::read(&witness_path).expect("witness");
+        assert_eq!(
+            verify_checkpoint(&ledger, &checkpoint).expect("verify"),
+            CheckpointStatus::Extended(1)
+        );
+        assert_eq!(fs::read(&witness_path).expect("witness"), before);
+        assert_eq!(
+            crate::retrieve_pass(&archive, digest).expect("retrieve"),
+            original
+        );
+        fs::write(&ledger, older).expect("restore");
+        let preview = preview_adopt(&path, &state).expect("preview");
+        assert_eq!(preview.carried["calls"], 2);
+        let outcome = adopt_guarded(&path, "restored backup", NOW, &state, Some(&preview.token))
+            .expect("adopt");
+        assert_eq!(outcome.totals["calls"], 6);
+        assert_eq!(
+            verify_checkpoint(&ledger, &checkpoint).expect("verify"),
+            CheckpointStatus::Extended(1)
+        );
+    }
+
+    #[test]
+    fn guarded_preview_carries_and_rejects_stale_state() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 4);
+        let ledger = ledger_path(&path);
+        let old = fs::read(&ledger).expect("older ledger");
+        ok(&path, &state, "calls", 2);
+        fs::write(&ledger, old).expect("restore");
+        let preview = preview_adopt(&path, &state).expect("preview");
+        assert_eq!(preview.present["calls"], 4);
+        assert_eq!(preview.carried["calls"], 2);
+        assert_eq!(preview.totals["calls"], 6);
+        let applied = adopt_guarded(
+            &path,
+            "restore old ledger",
+            NOW,
+            &state,
+            Some(&preview.token),
+        )
+        .expect("adopt");
+        assert_eq!(applied.totals, preview.totals);
+        let before = fs::read(&ledger).expect("ledger");
+        assert!(adopt_guarded(&path, "again", NOW, &state, Some(&preview.token)).is_err());
+        assert_eq!(fs::read(&ledger).expect("ledger"), before);
+    }
+
+    #[test]
+    fn concurrent_summary_reader_and_writer_agree_after_completion() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                for _ in 0..5 {
+                    ok(&path, &state, "calls", 1);
+                }
+            });
+            let reader = scope.spawn(|| {
+                for _ in 0..50 {
+                    let loaded = load(&path).expect("pass");
+                    let summary = read_summary(&loaded, &state).expect("summary");
+                    assert!(summary.tally.spent("calls") >= 1);
+                }
+            });
+            writer.join().expect("writer");
+            reader.join().expect("reader");
+        });
+        let loaded = load(&path).expect("pass");
+        assert_eq!(
+            read_summary(&loaded, &state).expect("summary").tally,
+            read_ledger(&loaded, &state).expect("full").tally
+        );
+    }
+
+    #[test]
+    fn preview_cases_are_read_only_and_reject_bad_evidence() {
+        let (dir, path, state) = setup();
+        let ledger = ledger_path(&path);
+        assert!(preview_adopt(&path, &state).is_err());
+        assert!(!ledger.exists());
+        assert!(!state.path().expect("path").exists());
+        ok(&path, &state, "calls", 1);
+        assert!(preview_adopt(&path, &state).is_err());
+        let id = load(&path).expect("pass").pass.id;
+        let witness_path = state.witness_path(&id).expect("witness");
+        let earlier_witness = fs::read(&witness_path).expect("witness");
+        let earlier_ledger = fs::read(&ledger).expect("ledger");
+        ok(&path, &state, "calls", 1);
+        let latest_witness = fs::read(&witness_path).expect("witness");
+        fs::write(&witness_path, &earlier_witness).expect("rewind witness");
+        assert!(
+            preview_adopt(&path, &state).is_err(),
+            "valid extension is not adoptable"
+        );
+        fs::write(&witness_path, &latest_witness).expect("restore witness");
+        let fresh = StateDir::new(dir.path().join("fresh"));
+        let no_witness = preview_adopt(&path, &fresh).expect("no witness");
+        assert_eq!(no_witness.case, AdoptCase::NoWitness);
+        assert!(!fresh.path().expect("path").exists());
+        fs::write(&ledger, &earlier_ledger).expect("restore ledger");
+        let changed = preview_adopt(&path, &state).expect("changed");
+        assert_eq!(changed.case, AdoptCase::LedgerChanged);
+        assert_eq!(changed.carried["calls"], 1);
+        fs::remove_file(&ledger).expect("remove");
+        let missing = preview_adopt(&path, &state).expect("missing");
+        assert_eq!(missing.case, AdoptCase::LedgerMissing);
+        assert!(!ledger.exists());
+        fs::write(&ledger, b"corrupt\n").expect("corrupt");
+        assert!(preview_adopt(&path, &state).is_err());
+        fs::write(&ledger, &earlier_ledger).expect("restore");
+        fs::write(&witness_path, b"broken").expect("bad witness");
+        assert!(preview_adopt(&path, &state).is_err());
+        assert_eq!(fs::read(&ledger).expect("ledger"), earlier_ledger);
+        assert_eq!(fs::read(&witness_path).expect("witness"), b"broken");
+    }
+
+    #[test]
+    fn both_modes_find_middle_damage_before_matching_tail() {
+        let bytes = synthetic_history(3);
+        let mut lines: Vec<Vec<u8>> = bytes
+            .split_inclusive(|b| *b == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect();
+        let tail = Digest::of(lines[3].strip_suffix(b"\n").expect("newline"));
+        let middle = String::from_utf8(lines[1].clone())
+            .expect("utf8")
+            .replace("2026-11-20", "2026-11-21");
+        lines[1] = middle.into_bytes();
+        let corrupt = lines.concat();
+        for collect in [false, true] {
+            let result = parse_ledger(
+                Path::new("synthetic"),
+                corrupt.as_slice(),
+                "test",
+                collect,
+                Some(3),
+            );
+            assert!(matches!(result, Err(Error::LedgerCorrupt { line: 3, .. })));
+        }
+        assert_eq!(
+            tail,
+            Digest::of(lines[3].strip_suffix(b"\n").expect("newline"))
+        );
+    }
+
+    #[test]
+    fn missing_ledger_guard_rejects_changed_pass_without_creation() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        let ledger = ledger_path(&path);
+        fs::remove_file(&ledger).expect("remove");
+        let preview = preview_adopt(&path, &state).expect("preview");
+        let mut bytes = fs::read(&path).expect("pass");
+        bytes.extend_from_slice(b"\n# changed\n");
+        fs::write(&path, bytes).expect("edit");
+        assert!(adopt_guarded(&path, "restore", NOW, &state, Some(&preview.token)).is_err());
+        assert!(!ledger.exists());
+    }
+
+    #[test]
+    fn checkpoint_verifies_exact_extended_and_corrupt_suffix() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        ok(&path, &state, "calls", 1);
+        let loaded = load(&path).expect("pass");
+        let (checkpoint, corroborated) = export_checkpoint(&loaded, &state).expect("checkpoint");
+        assert!(corroborated);
+        let ledger = ledger_path(&path);
+        let old = fs::read(&ledger).expect("read");
+        assert_eq!(
+            verify_checkpoint(&ledger, &checkpoint).expect("verify"),
+            CheckpointStatus::Exact
+        );
+        ok(&path, &state, "calls", 1);
+        assert_eq!(
+            verify_checkpoint(&ledger, &checkpoint).expect("verify"),
+            CheckpointStatus::Extended(1)
+        );
+        let mut corrupt = fs::read(&ledger).expect("read");
+        corrupt.pop();
+        fs::write(&ledger, corrupt).expect("write");
+        assert!(verify_checkpoint(&ledger, &checkpoint).is_err());
+        fs::write(&ledger, &old).expect("restore");
+        let mut foreign = checkpoint.clone();
+        foreign.pass_id = "another-id".to_owned();
+        let mut bad_suffix = fs::read(&ledger).expect("read");
+        bad_suffix.extend_from_slice(b"{broken}\n");
+        fs::write(&ledger, bad_suffix).expect("damage");
+        assert!(verify_checkpoint(&ledger, &foreign).is_err());
+        fs::write(&ledger, old).expect("restore");
+        let mut wrong = checkpoint;
+        wrong.hash = Digest::of(b"different").to_string();
+        assert_eq!(
+            verify_checkpoint(&ledger, &wrong).expect("verify"),
+            CheckpointStatus::Mismatch
+        );
+    }
+
+    #[test]
+    fn summary_matches_full_history_and_rejects_damage() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        ok(&path, &state, "calls", 2);
+        let loaded = load(&path).expect("load");
+        let full = read_ledger(&loaded, &state).expect("full");
+        let summary = read_summary(&loaded, &state).expect("summary");
+        assert_eq!(summary.tally, full.tally);
+        assert_eq!(summary.witness, full.witness);
+        assert_eq!(summary.last_time, full.last_time);
+        assert_eq!(summary.entries.len(), 0);
+        let ledger = ledger_path(&path);
+        let mut bytes = fs::read(&ledger).expect("read bytes");
+        bytes.pop();
+        fs::write(&ledger, bytes).expect("damage");
+        assert!(read_summary(&loaded, &state).is_err());
+        assert!(read_ledger(&loaded, &state).is_err());
     }
 
     #[test]

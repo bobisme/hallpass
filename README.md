@@ -178,7 +178,7 @@ What it does not guard against:
   accidents and casual edits, not a deliberate cheat;
 - the same pass used from two machines or user accounts (each has its own
   witness);
-- a wrong system clock (the window uses the caller's clock);
+- a wrong system clock (the window uses the decision clock; status and spends warn if it is strictly earlier than the last ledger event);
 - network file systems where `flock` is unreliable;
 - what happens inside a long step after a tool has asked (revocation takes
   effect at the next question).
@@ -198,3 +198,46 @@ The integration tests set the clock with `HALLPASS_UNSAFE_TEST_CLOCK`,
 which only debug builds and `--features test-clock` honour. Every test
 points `XDG_STATE_HOME` and `HOME` (or the library's `StateDir`) at a
 temporary directory, so the suite never touches your real witnesses.
+
+### Retaining and checking history
+
+Create a private archive directory, then retain the exact approved pass bytes:
+
+```sh
+mkdir -m 700 approval-archive
+hallpass archive engagement.toml approval-archive
+hallpass --format json ledger engagement.toml
+hallpass retrieve approval-archive sha256:REPLACE_WITH_FULL_LEDGER_DIGEST > reviewed-pass.toml
+hallpass --format json checkpoint engagement.toml > checkpoint.json
+```
+
+Retain the checkpoint separately with the report. `retrieve` in text mode writes
+exact original UTF-8 bytes, including comments and the original ending; JSON
+mode instead emits metadata and a JSON string. The archive is user-owned and
+may contain sensitive approval text. Its directory must be private and its
+entries private regular files. Archive retention is opt-in and ordinary spends
+do not depend on it. A matching digest identifies bytes, not who approved them.
+
+In a separate account, verify a ledger without creating a witness:
+
+```sh
+hallpass --format json verify-checkpoint engagement.toml.ledger checkpoint.json
+```
+
+`exact` and `extended` exit 0; `mismatch` exits 2; malformed inputs, missing
+files or damaged ledgers exit 1. Verification trusts the supplied checkpoint:
+a checkpoint copied from the same rewritten files does not establish independent
+provenance. Keep it outside the ledger's administrative control.
+
+When restoring an older ledger, inspect its carry-forward before recording the
+recovery. The preview creates no ledger or witness; its token represents a
+snapshot that may become stale:
+
+```sh
+hallpass --format json adopt engagement.toml --preview
+hallpass adopt engagement.toml --reason 'restored from backup' --token 'v1:sha256:REPLACE_WITH_PREVIEW_TOKEN'
+```
+
+A stale token is refused. Obtain and review a fresh preview. If a witness update
+fails after an adoption was appended, inspect the ledger before retrying: the
+adoption is already recorded.

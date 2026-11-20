@@ -243,7 +243,7 @@ fn check_text(text: &str, max: usize) -> Result<(), String> {
 }
 
 /// An identifier: `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
-fn is_identifier(text: &str) -> bool {
+pub fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && text.len() <= 64
