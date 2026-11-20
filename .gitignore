@@ -1,3 +1,7 @@
 /target
 *.pass.toml
 *.ledger
+# maw admin tree (consolidated layout) — runtime/admin only
+/.maw/
+/.manifold/
+/repo.git/
