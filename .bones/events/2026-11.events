@@ -195,3 +195,33 @@
 1795211685857581	codex	itc:AQ		item.move	bn-4fr	{"state":"doing"}	blake3:t81w1t_cfc10p-50rezPjMEJcSuQ97NjhgdTcyC5Mow
 1795211685860444	codex	itc:AQ		item.assign	bn-4fr	{"action":"assign","agent":"codex"}	blake3:_8r6OWh8xjuFTTqVcQ7445vZELOzw0RdxYnNoHVb2Ew
 1795211742860263	codex	itc:AQ		item.move	bn-4fr	{"reason":"The new accounting_history target alone caught 4/4 mutations with a green baseline (seed 317928): exact fit refused, equal totals emitting zero carry, addition replacing the carry difference, and projected balances returned outside a successful preview. Confirmed from assertion logs. Full suite 207 passed; fmt, Clippy -D warnings, cargo doc passed. These are sampled sequential histories using real files; existing process and fault tests cover locking and failure boundaries. Defer Kani until a shared arithmetic implementation warrants it.","state":"done"}	blake3:WOBGXcse730J6OwXssUENqcH0qSRrXeLNORbhLpzGzY
+1795212379505495	accounting	itc:AQ		item.move	bn-3s2	{"state":"doing"}	blake3:R8b31B9-T5lHPCL1wU8aTLV8_asbSIErHxzSctTYlEk
+1795212379508783	accounting	itc:AQ		item.assign	bn-3s2	{"action":"assign","agent":"accounting"}	blake3:jkHinGisGDxQxqk0FHau5mtyCFuSLReWWRi2tF62Co4
+1795212379509612	accounting	itc:AQ		item.move	bn-3d8	{"state":"doing"}	blake3:tkSDAt5QOzxehbBek8F67Vc2BkumbVa3U__kssXHaOE
+1795212379510446	accounting	itc:AQ		item.assign	bn-3d8	{"action":"assign","agent":"accounting"}	blake3:CTVbxZ6rCidaRb9TOaMO1s1VBFoGZBih_Ebg9ekX1pE
+1795212379520712	evidence	itc:AQ		item.move	bn-2i8	{"state":"doing"}	blake3:fGMsOLOVgypEFMEA_3Uw9H7QcRn-QDdntiuaeLJ-Zms
+1795212379524543	evidence	itc:AQ		item.assign	bn-2i8	{"action":"assign","agent":"evidence"}	blake3:5cbzRiOxKWjgv5eDi_x8jd1sIHPHTZ9gxpKxzvwdpgE
+1795212379525260	evidence	itc:AQ		item.move	bn-1x5	{"state":"doing"}	blake3:rw1gNayFgQqjE1jHuKqET5-cQbQdNr82i6JtrpnzIRw
+1795212379525884	evidence	itc:AQ		item.assign	bn-1x5	{"action":"assign","agent":"evidence"}	blake3:gkhSm-z3nl8IZJVYUt-5ZEsNZzHDlthgYrtfWi4_EdQ
+1795212379526367	evidence	itc:AQ		item.move	bn-zw1	{"state":"doing"}	blake3:_53PWzNxuiqBj_ctx8K0jxLftMOtxwcoef40M59HXaA
+1795212379526933	evidence	itc:AQ		item.assign	bn-zw1	{"action":"assign","agent":"evidence"}	blake3:yeTWyXthbQ2d9pMLGmWnyrJDCLWMKw2TsrLNfzfa3WY
+1795212379537220	review	itc:AQ		item.move	bn-2xv	{"state":"doing"}	blake3:bRQPBwmYcxuUeq4LxRq-ym5f_3hfA_XNLt3gCrZVCLk
+1795212379540135	review	itc:AQ		item.assign	bn-2xv	{"action":"assign","agent":"review"}	blake3:0oZuZooDSev_3_tOoPIJT-wVlVonwzEg7I1zUZ7bk9I
+1795212379540726	review	itc:AQ		item.move	bn-2hg	{"state":"doing"}	blake3:tzOU8Eg0qx4NZLo60B5V4DHNaK-KJgd3wYqiqX5KMzc
+1795212379541302	review	itc:AQ		item.assign	bn-2hg	{"action":"assign","agent":"review"}	blake3:PGe_W3Onem4CkrgEDnB6ar_SP1401JYRf50U-lyTRc8
+1795212379542143	review	itc:AQ		item.move	bn-1wk	{"state":"doing"}	blake3:LTTyoTA8dDkZXdMcd3bc__abcTlKBEPKnyBsIh6Hxxw
+1795212379542701	review	itc:AQ		item.assign	bn-1wk	{"action":"assign","agent":"review"}	blake3:-1ULOISTbnFkPYo_-0X515ZRdn7yY-E6GSYfVjwCeIQ
+1795212379552383	codex	itc:AQ		item.move	bn-2au	{"state":"doing"}	blake3:MYKPnTKLwFXLavipuKPqzPkdihmn4gqOrhxh__OHSh8
+1795212379556192	codex	itc:AQ		item.assign	bn-2au	{"action":"assign","agent":"codex"}	blake3:otD5qwZ7TC0gr5rtx8gsjLOnspzjMKZkE1j4FYB32zI
+1795212379557002	codex	itc:AQ		item.move	bn-1bu	{"state":"doing"}	blake3:imMGkphBNXlyUX-7grjaD2Wy-d606OckJG1nRkR1mGk
+1795212379557707	codex	itc:AQ		item.assign	bn-1bu	{"action":"assign","agent":"codex"}	blake3:WGVeu_ZyefESAgxNGsuSCU_pIbq-DFMA136WRrIdorc
+1795213127917157	codex	itc:AQ		item.move	bn-1bu	{"reason":"The shared monotonic lock budget covers both spend writer locks. Contention, zero wait, release, queued expiry, and pre-append recording status passed on integrated main 6be9a75.","state":"done"}	blake3:DMluSDjBf526ftNHH0xoUMHajOwVlVMfUK5lX9yLKu8
+1795213127985095	codex	itc:AQ		item.move	bn-2au	{"reason":"The v3 decoder binds ordered targets, charges, scalar echoes and receipts, rejects ambiguous JSON, and advances once on matching production replies. Both offline corpora and genuine CLI tests passed on 6be9a75.","state":"done"}	blake3:ErVePbSNl4f7gBhMikTJvGG4npWcJ2T-r9n4edBFJqc
+1795213128055192	codex	itc:AQ		item.move	bn-3s2	{"reason":"All spending paths enforce required_counters_v1 after scope checks. Legacy strict-reader rejection and atomic refusal verified. Disabling the check failed the API and CLI regression tests. Integrated in 6be9a75.","state":"done"}	blake3:4AxtvyTpE88aObopBOXZyYqXBsytzn_AMBEAEhd0S04
+1795213128119809	codex	itc:AQ		item.move	bn-3d8	{"reason":"rehearse simulates cumulative costs against one verified snapshot, stopping on refusal. Live practice comparisons, carry, expiry, malformed inputs and evidence preservation passed on 6be9a75.","state":"done"}	blake3:wzLTBdiTL4k601rh3uYiXNB5kclsHQdPlEHHuOdngVA
+1795213128191362	codex	itc:AQ		item.move	bn-2i8	{"reason":"receipt finds exact caller references after edits, reports ambiguity and partial history, and verifies the entire chain. End-to-end lookup and unchanged-evidence checks passed on 6be9a75.","state":"done"}	blake3:cn7HDjEbpSQYh0CeZyIsLi2Xmr--LMcV7xq1bhSBAzA
+1795213128259536	codex	itc:AQ		item.move	bn-1x5	{"reason":"audit-receipts checks recorded endpoints at their original instants against digest-verified archived passes. Historical edits, gaps, mismatched labels and damaged evidence covered on 6be9a75.","state":"done"}	blake3:E6wN5alSHSmZaaVZ4De4uyjVO5SKjJdcK8gJDGj85NY
+1795213128327029	codex	itc:AQ		item.move	bn-zw1	{"reason":"compare-backups verifies ordered explicit candidates against one captured witness, distinguishes copies, forks and corrupt files, and works with the live ledger absent. Passed on 6be9a75.","state":"done"}	blake3:zqkv8Uo4oDxJJs1WuaT1VtJTpDvEQ8fDnHmYkvbzxpg
+1795213128397180	codex	itc:AQ		item.move	bn-2xv	{"reason":"Detached OpenSSH signatures verify the exact validated bytes and return a pin for live decisions. Disposable signer, trust, namespace, expired approval and subsequent edit cases passed on 6be9a75.","state":"done"}	blake3:2W2z8ftuRJsqEyxb30Y91KgH89KJLC8JjuUNWpuLUkg
+1795213128466542	codex	itc:AQ		item.move	bn-2hg	{"reason":"diff --examples --at reports bounded, replayable sampled changes with labels or refusal codes. Both revisions were replayed for IPv4, IPv6, names, ordering and inactive windows. Integrated in 6be9a75.","state":"done"}	blake3:Zo8oO2aTx5q0Due0QjOkhzJV2lMWPAS_n6mncsmfRHg
+1795213128536610	codex	itc:AQ		item.move	bn-1wk	{"reason":"consumer-coverage reports gaps per destination and counter from an explicit declaration. CLI and documented examples, invalid profiles and read-only behavior passed on 6be9a75.","state":"done"}	blake3:Yh0PzsJmA-23YIVZvs8KYC_usQ9QJs7FE3vsqZsvHUY
