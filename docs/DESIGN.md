@@ -137,6 +137,36 @@ The earlier toolbox had an "unbound" mode (a run with no approval window,
 with a warning). hallpass has none: every valid pass has a window. A tool
 that runs without a pass is unbound, and should say so itself.
 
+## One decision for a send
+
+Until `spend` took a target, a caller asked `permits` and then `spend`: two
+commands, two readings of the pass file, and only the caller's discipline
+tied the count to the destination. A pass edited between the two could
+count a call for a destination that had just been removed. `spend --to`
+(`SpendRequest::target`) decides the destination inside the spend: after
+the locks are taken and the pass is read again, in the order digest,
+window, destination, counter, ceiling, and a refusal records nothing. It
+reuses `permits_named` unchanged, so the two can never disagree. `spend`
+without a target stays, for callers that count something with no single
+destination; it can only be stricter to give one.
+
+The ledger entry does not record the target (a ledger format change, left
+as a bone). The command line reports a line it cannot read as a JSON error
+object when `--format json` is on it, because a caller that reads JSON and
+gets empty output has to guess. What a caller may rely on is in
+[INTEGRATING.md](INTEGRATING.md).
+
+## Literals as written
+
+TOML reads `0x1F90`, `8_080` and `+443` as numbers and
+`"192.0.2.1\u0030"` as `192.0.2.10`. The value is right by TOML's rules,
+but a reviewer reading the file sees something else. A pass is refused
+unless every number is plain decimal and every string is written with the
+characters it holds (`\"` and `\\` excepted). A window timestamp must also
+fit the years 0001 to 9999 when read in UTC, and a host name whose last
+label is a number (`app.example.123`, `0x7f.1`) is refused, because common
+resolvers read such text as an IPv4 address.
+
 ## Digest
 
 SHA-256 of the exact file bytes, not of a canonical form of the content.

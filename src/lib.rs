@@ -78,3 +78,9 @@ pub use ports::PortSet;
 pub use template::{TEMPLATE, write_template};
 pub use time;
 pub use witness::{StateDir, Witnessed, totals_text};
+
+/// Compiles the Rust example of `docs/INTEGRATING.md` as a documentation
+/// test, so the document cannot show code that no longer builds.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/INTEGRATING.md")]
+pub struct IntegratingDoc;

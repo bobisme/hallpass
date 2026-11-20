@@ -11,7 +11,8 @@ the library; other tools run the command with `--format json`.
 
 The whole project in one page: [docs/spec.md](docs/spec.md). The file
 format: [docs/PASS-FORMAT.md](docs/PASS-FORMAT.md). Why it is built this
-way: [docs/DESIGN.md](docs/DESIGN.md).
+way: [docs/DESIGN.md](docs/DESIGN.md). Calling hallpass from another tool:
+[docs/INTEGRATING.md](docs/INTEGRATING.md).
 
 ## Build
 
@@ -82,8 +83,8 @@ $ hallpass permits web.pass.toml --to 198.51.100.7:443/tcp --name other.example.
 REFUSED: 198.51.100.7:443/tcp as other.example.org: … is not approved for the name other.example.org, only for: web (app.example.com). …
 2
 
-$ hallpass spend engagement.pass.toml calls --note "first call"
-RECORDED: 1 calls (1 of 6 spent, 5 left; ledger entry 1)
+$ hallpass spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --note "first call"
+RECORDED: 1 calls for 192.0.2.10:5060/udp by destination sip-edge (1 of 6 spent, 5 left; ledger entry 1)
 
 $ hallpass ledger engagement.pass.toml
 Ledger of pass example-2026-11 (engagement.pass.toml.ledger)
@@ -95,6 +96,9 @@ Ledger: 1 line(s) after the header, chain verified, the witness matches
 Current pass digest: sha256:…
 ```
 
+`spend --to` decides the destination, the window and the ceiling in one
+step and records nothing when any of them refuses; without `--to` it checks
+only the window and the ceiling.
 The sixth `spend` of `calls` succeeds and the seventh is refused (exit 2),
 whether the seven spends come from one process, seven commands, or two
 terminals at once. Set `revoked = true` in the pass and the next `spend` or

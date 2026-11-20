@@ -148,7 +148,10 @@ A name never grants: it is looked at only after the address, protocol and
 port matched. Names compare in canonical form (ASCII lower case, no
 trailing dot); the pass must spell them that way, a query need not.
 
-### `spend(pass, counter, n, note, expected digest, needed, now)`
+### `spend(pass, counter, n, note, expected digest, needed, target, name, now)`
+
+`target` and `name` are optional. With a target, one spend answers "may I
+send this much to this destination now, and count it".
 
 1. Request checks, before any file is touched: `n` from 1 to 10^12, note one
    line of at most 500 characters with no control character (newline, tab,
@@ -156,6 +159,8 @@ trailing dot); the pass must spell them that way, a query need not.
    U+2029) and no bidirectional control (U+061C, U+200E, U+200F,
    U+202A-U+202E, U+2066-U+2069). Failure is a usage error. (Reading a
    ledger accepts notes that only avoid control characters, the 0.1 rule.)
+   A name without a target, a negative `needed`, and a `now` outside the
+   years 0001 to 9999 in UTC are usage errors too.
 2. Load and validate the pass. Find the state directory, create it if
    needed (0700), check that it is a private directory and writable, and
    take an exclusive lock on `<pass id>.lock` in it. Read the witness.
@@ -172,8 +177,13 @@ trailing dot); the pass must spell them that way, a query need not.
    witness now, with a warning.
 6. Refuse, recording nothing in the ledger, in this order: `pass-changed`
    (an expected digest was given and differs), the window rules (`revoked`,
-   `not-yet-valid`, `expired`, `window-too-short`), `unknown-counter` (not
-   in `[ceilings]`), `ceiling-reached` (spent + n > total).
+   `not-yet-valid`, `expired`, `window-too-short`), when a target was given
+   every refusal of `permits` for it, with the name and `needed`
+   (`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`,
+   `port-not-listed`, `name-required`, `name-not-listed`),
+   `unknown-counter` (not in `[ceilings]`), `ceiling-reached` (spent + n >
+   total). The destination is decided against the pass as read under the
+   locks, the same reading the entry's digest names.
 7. Otherwise append one entry (time, counter, n, digest of the pass as just
    read, note, sequence number, hash of the previous line), sync it to disk,
    then replace the witness (written aside, synced, renamed), and release
@@ -277,7 +287,8 @@ hallpass [--format text|json] <command>
   check FILE
   status FILE
   permits FILE --to ADDR:PORT/PROTO [--name HOSTNAME] [--duration SECONDS]
-  spend FILE COUNTER [--n N] [--note TEXT] [--digest DIGEST] [--duration SECONDS]
+  spend FILE COUNTER [--to ADDR:PORT/PROTO [--name HOSTNAME]] [--n N] [--note TEXT]
+        [--digest DIGEST] [--duration SECONDS]
   digest FILE
   ledger FILE [--counter NAME]
   adopt FILE --reason TEXT
@@ -286,9 +297,14 @@ hallpass [--format text|json] <command>
 Exit codes: **0** ok or allowed; **2** refused by the pass; **1** any other
 error, including command-line usage errors. Text output goes to standard
 output, except errors, which go to standard error. With `--format json`
-every command prints one JSON object on standard output, errors included,
-except command-line parse errors (unknown command, missing argument), which
-print the parser's text on standard error with exit 1.
+every command prints one JSON object on standard output, errors included.
+A command line that cannot be read (unknown command, missing argument, bad
+option value) prints the parser's text on standard error, exit 1, and with
+`--format json` (or `--format=json`) also an error object with code `usage`
+and `command` and `file` null. `--help` and `--version` print text and exit
+0 wherever they appear, so a caller requires `result` as well as the exit
+code, and puts options first and `--` before `FILE`. How another tool should
+call hallpass: [INTEGRATING.md](INTEGRATING.md).
 
 | Command | Exit 0 | Exit 2 | Exit 1 |
 |---|---|---|---|
@@ -296,7 +312,7 @@ print the parser's text on standard error with exit 1.
 | `check` | the pass validates | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
 | `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
-| `spend` | recorded | refused, nothing recorded | any error, nothing recorded |
+| `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | any error, nothing recorded |
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
 | `adopt` | adoption recorded | never | invalid pass, damaged ledger, nothing to adopt, missing reason, unusable state directory |
@@ -345,7 +361,9 @@ Every object has `command` and `result` (`ok`, `allowed`, `refused`,
 - **spend**: `digest`, `pass_id`, `now`, `test_clock`, `counter`, `n`,
   `total` (null for an unknown counter), `spent` (after the spend if
   recorded, else current), `remaining` (or null), `seq` (the new entry's
-  sequence number, or null), `note`, `refusal` (or null).
+  sequence number, or null), `note`, `target` and `name` (normalized, null
+  without `--to` or `--name`), `label` (the permitting destination when
+  recorded with `--to`, else null), `refusal` (or null).
 - **digest**: `digest`, `pass_id`.
 - **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
   pass now), `counter` (the `--counter` filter or null), `verified` (always
@@ -398,7 +416,8 @@ Crate `hallpass` (re-exports `time`):
 | `Pass::permits_named(&Target, Option<&HostName>, now, needed) -> Decision` | the same for a request that carries a host name; needed when the destination lists `names` |
 | `HostName` | a canonical DNS name; `str::parse` normalizes a query, `HostName::canonical` requires the pass spelling |
 | `Pass::destination_for(ip, port, protocol)` | the matching destination, window and `names` not checked |
-| `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend with the witness in `StateDir::from_env()`; `SpendOutcome.refusal` is `None` when recorded; `SpendOutcome.warnings` |
+| `SpendRequest::new(counter, amount)` | a request; set `note`, `expect_digest`, `needed`, `target`, `name` as needed (the struct is `non_exhaustive`: fields may be added) |
+| `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend with the witness in `StateDir::from_env()`; with `target` set it also decides the destination; `SpendOutcome.refusal` is `None` when recorded; `SpendOutcome.label`, `SpendOutcome.warnings` |
 | `spend_in(path, &SpendRequest, now, &StateDir)` | the same with an explicit state directory |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
@@ -452,8 +471,8 @@ pass is revoked. [DESIGN.md](DESIGN.md) explains each.
   `valid_until`, and re-reads the pass every few seconds to stop the
   command when it is revoked, expired, unreadable, invalid or a destination
   in use changes. playpen does not spend: it limits where packets go, not
-  how many. Planned: the SIP assessment toolbox calling `hallpass ...
-  --format json` before each send and `spend` per call; the web tester
+  how many. Planned: the SIP assessment toolbox calling `hallpass
+  --format json spend --to ...` before each call ([INTEGRATING.md](INTEGRATING.md)); the web tester
   using the library per request.
 - **Protocols beyond tcp and udp**, and link-local destinations with an
   interface field: would need a new format version; not planned in detail.
