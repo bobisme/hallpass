@@ -108,6 +108,8 @@ pub struct Pass {
     pub destinations: Vec<Destination>,
     /// Named ceilings: counter name to total.
     pub ceilings: BTreeMap<String, u64>,
+    /// Counter names that every debit must charge, in sorted order.
+    pub required_counters: Vec<String>,
 }
 
 struct Walker {
@@ -327,6 +329,7 @@ impl Pass {
                 "approval",
                 "destination",
                 "ceilings",
+                "required_counters_v1",
             ],
         );
         match table.get("format") {
@@ -352,6 +355,7 @@ impl Pass {
         let approval = parse_approval(&mut w, &table);
         let destinations = parse_destinations(&mut w, &table);
         let ceilings = parse_ceilings(&mut w, &table);
+        let required_counters = parse_required_counters(&mut w, &table, ceilings.as_ref());
         if !w.problems.is_empty() {
             return Err(w.problems);
         }
@@ -363,6 +367,7 @@ impl Pass {
                     approval,
                     destinations,
                     ceilings,
+                    required_counters,
                 })
             }
             _ => Err(vec![Problem {
@@ -815,6 +820,46 @@ fn parse_ports(w: &mut Walker, t: &Table, p: &str) -> Option<PortSet> {
             None
         }
     }
+}
+
+fn parse_required_counters(
+    w: &mut Walker,
+    table: &Table,
+    ceilings: Option<&BTreeMap<String, u64>>,
+) -> Vec<String> {
+    const FIELD: &str = "required_counters_v1";
+    let Some(value) = table.get(FIELD) else {
+        return Vec::new();
+    };
+    let Some(items) = value.as_array() else {
+        w.problem(FIELD, "must be an array of names from [ceilings]");
+        return Vec::new();
+    };
+    if !(1..=MAX_COUNTERS).contains(&items.len()) {
+        w.problem(
+            FIELD,
+            format!("list 1 to {MAX_COUNTERS} distinct counter names, or omit this key"),
+        );
+        return Vec::new();
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for (i, item) in items.iter().enumerate() {
+        let field = format!("{FIELD}[{}]", i + 1);
+        let Some(name) = item.as_str().filter(|name| is_counter_name(name)) else {
+            w.problem(field, "must be a valid quoted counter name");
+            continue;
+        };
+        if !names.insert(name.to_owned()) {
+            w.problem(&field, format!("duplicate required counter `{name}`"));
+        }
+        if ceilings.is_some_and(|limits| !limits.contains_key(name)) {
+            w.problem(
+                field,
+                format!("required counter `{name}` must be declared in [ceilings]"),
+            );
+        }
+    }
+    names.into_iter().collect()
 }
 
 fn parse_ceilings(w: &mut Walker, table: &Table) -> Option<BTreeMap<String, u64>> {

@@ -38,6 +38,8 @@ use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_to
 use crate::{MAX_TARGETS, NamedTarget};
 
 mod debit;
+pub mod evidence;
+pub mod scenario;
 pub use debit::*;
 use debit::{DebitLine, parse_debit};
 
@@ -421,6 +423,7 @@ pub struct LedgerView {
 
 /// A ledger parsed and verified.
 struct Parsed {
+    pass_id: String,
     tally: Tally,
     entries: Vec<LedgerEntry>,
     debits: Vec<LedgerDebit>,
@@ -429,7 +432,6 @@ struct Parsed {
     /// with sequence number `n`.
     tail: Digest,
     prefix: Option<(u64, Digest)>,
-    collect: bool,
     last_time: Option<OffsetDateTime>,
     adoption_count: u64,
     /// The last sequence number (0 when there are only the header).
@@ -437,6 +439,18 @@ struct Parsed {
 }
 
 impl Parsed {
+    fn for_pass(self, path: &Path, id: &str) -> Result<Self, Error> {
+        if self.pass_id == id {
+            Ok(self)
+        } else {
+            Err(Error::LedgerForeign {
+                path: path.to_owned(),
+                ledger_id: self.pass_id,
+                pass_id: id.to_owned(),
+            })
+        }
+    }
+
     const fn tail(&self) -> Digest {
         self.tail
     }
@@ -488,6 +502,24 @@ fn parse_ledger(
     collect: bool,
     requested: Option<u64>,
 ) -> Result<Parsed, Error> {
+    scan_ledger(path, reader, collect, requested, &mut |_| Ok(()))?.for_pass(path, pass_id)
+}
+
+enum VerifiedEvent {
+    Spend(LedgerEntry),
+    Debit(LedgerDebit),
+    Adopt(Adoption),
+}
+
+type Visitor<'a> = dyn FnMut(&VerifiedEvent) -> Result<(), Error> + 'a;
+
+fn scan_ledger(
+    path: &Path,
+    reader: impl BufRead,
+    collect: bool,
+    requested: Option<u64>,
+    visit: &mut Visitor<'_>,
+) -> Result<Parsed, Error> {
     let corrupt = |line: usize, detail: &str| Error::LedgerCorrupt {
         path: path.to_path_buf(),
         line,
@@ -515,17 +547,14 @@ fn parse_ledger(
             "the ledger version is not one this hallpass reads (if a newer hallpass wrote it, use that one)",
         ));
     }
-    // Defer identity mismatch until every line has been verified. In particular,
-    // checkpoint verification must not hide a damaged suffix behind a foreign ID.
-    let foreign_id = (header.pass_id != pass_id).then_some(header.pass_id);
     let mut parsed = Parsed {
+        pass_id: header.pass_id,
         tally: Tally::default(),
         entries: Vec::new(),
         debits: Vec::new(),
         adoptions: Vec::new(),
         tail: Digest::of(&first),
         prefix: (requested == Some(0)).then(|| (0, Digest::of(&first))),
-        collect,
         last_time: None,
         adoption_count: 0,
         seq: 0,
@@ -564,15 +593,18 @@ fn parse_ledger(
                 "the line does not follow the one before it (a line was changed, removed or moved)",
             ));
         }
-        match record {
-            Line::Spend(entry) => {
-                parse_spend(&mut parsed, entry).map_err(|detail| corrupt(number, detail))?;
-            }
-            Line::Debit(debit) => {
-                parse_debit(&mut parsed, debit).map_err(|detail| corrupt(number, detail))?;
-            }
-            Line::Adopt(adopt) => {
-                parse_adopt(&mut parsed, adopt).map_err(|detail| corrupt(number, detail))?;
+        let event = match record {
+            Line::Spend(entry) => parse_spend(&mut parsed, entry).map(VerifiedEvent::Spend),
+            Line::Debit(debit) => parse_debit(&mut parsed, debit).map(VerifiedEvent::Debit),
+            Line::Adopt(adopt) => parse_adopt(&mut parsed, adopt).map(VerifiedEvent::Adopt),
+        }
+        .map_err(|detail| corrupt(number, detail))?;
+        visit(&event)?;
+        if collect {
+            match event {
+                VerifiedEvent::Spend(entry) => parsed.entries.push(entry),
+                VerifiedEvent::Debit(debit) => parsed.debits.push(debit),
+                VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(adopt),
             }
         }
         parsed.seq = seq;
@@ -581,17 +613,10 @@ fn parse_ledger(
             parsed.prefix = Some((seq, parsed.tail));
         }
     }
-    if let Some(ledger_id) = foreign_id {
-        return Err(Error::LedgerForeign {
-            path: path.to_path_buf(),
-            ledger_id,
-            pass_id: pass_id.to_owned(),
-        });
-    }
     Ok(parsed)
 }
 
-fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<(), &'static str> {
+fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<LedgerEntry, &'static str> {
     if !is_counter_name(&entry.counter) || entry.n == 0 || entry.n > MAX_CEILING {
         return Err("the counter name or amount is not valid");
     }
@@ -612,20 +637,17 @@ fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<(), &'static str> {
     add(&mut parsed.tally.spent, &entry.counter, entry.n)
         .ok_or("the recorded amounts add up beyond any ceiling")?;
     parsed.tally.entries += 1;
-    if parsed.collect {
-        parsed.entries.push(LedgerEntry {
-            seq: entry.seq,
-            time,
-            counter: entry.counter,
-            amount: entry.n,
-            digest,
-            note: entry.note,
-        });
-    }
-    Ok(())
+    Ok(LedgerEntry {
+        seq: entry.seq,
+        time,
+        counter: entry.counter,
+        amount: entry.n,
+        digest,
+        note: entry.note,
+    })
 }
 
-fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<(), &'static str> {
+fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'static str> {
     let bad = "the adoption record is not valid";
     let (Ok(digest), Ok(time)) = (
         line.digest.parse::<Digest>(),
@@ -662,17 +684,14 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<(), &'static str>
         add(&mut parsed.tally.spent, counter, *n)
             .ok_or("the recorded amounts add up beyond any ceiling")?;
     }
-    if parsed.collect {
-        parsed.adoptions.push(Adoption {
-            seq: line.seq,
-            time,
-            reason: line.reason,
-            digest,
-            carried: line.carried,
-            previous,
-        });
-    }
-    Ok(())
+    Ok(Adoption {
+        seq: line.seq,
+        time,
+        reason: line.reason,
+        digest,
+        carried: line.carried,
+        previous,
+    })
 }
 
 /// Check an adoption reason: required, and a note in every other way.
@@ -880,6 +899,15 @@ pub fn read_summary(loaded: &LoadedPass, state: &StateDir) -> Result<LedgerView,
 }
 
 fn read_view(loaded: &LoadedPass, state: &StateDir, collect: bool) -> Result<LedgerView, Error> {
+    visit_view(loaded, state, collect, &mut |_| Ok(()))
+}
+
+fn visit_view(
+    loaded: &LoadedPass,
+    state: &StateDir,
+    collect: bool,
+    visit: &mut Visitor<'_>,
+) -> Result<LedgerView, Error> {
     let path = ledger_path(&loaded.path);
     let id = &loaded.pass.id;
     let file = if exists(&path)? {
@@ -898,7 +926,9 @@ fn read_view(loaded: &LoadedPass, state: &StateDir, collect: bool) -> Result<Led
         .map(|w| w.seq);
     let parsed = file
         .as_ref()
-        .map(|f| parse_ledger(&path, BufReader::new(f), id, collect, requested))
+        .map(|f| {
+            scan_ledger(&path, BufReader::new(f), collect, requested, visit)?.for_pass(&path, id)
+        })
         .transpose()?;
     let (witness, moved) = match saved_witness {
         Err(e) => (
@@ -912,13 +942,13 @@ fn read_view(loaded: &LoadedPass, state: &StateDir, collect: bool) -> Result<Led
     let warnings = warnings(&witness, moved.as_ref(), id, false);
     let exists = parsed.is_some();
     let parsed = parsed.unwrap_or_else(|| Parsed {
+        pass_id: id.clone(),
         tally: Tally::default(),
         entries: Vec::new(),
         debits: Vec::new(),
         adoptions: Vec::new(),
         tail: Digest::of(b""),
         prefix: None,
-        collect: true,
         last_time: None,
         adoption_count: 0,
         seq: 0,
@@ -1014,20 +1044,8 @@ pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<Checkpo
         ));
     }
     let hash = checkpoint.hash.parse::<Digest>().map_err(Error::Usage)?;
-    let file = open_no_follow(path, OpenOptions::new().read(true))?;
-    check_private(path, &file)?;
-    file.lock_shared().map_err(|e| Error::io(path, &e))?;
-    let parsed = match parse_ledger(
-        path,
-        BufReader::new(&file),
-        &checkpoint.pass_id,
-        false,
-        Some(checkpoint.seq),
-    ) {
-        Err(Error::LedgerForeign { .. }) => return Ok(CheckpointStatus::Mismatch),
-        other => other?,
-    };
-    if parsed.prefix != Some((checkpoint.seq, hash)) {
+    let parsed = inspect_candidate(path, Some(checkpoint.seq))?;
+    if parsed.pass_id != checkpoint.pass_id || parsed.prefix != Some((checkpoint.seq, hash)) {
         return Ok(CheckpointStatus::Mismatch);
     }
     if parsed.seq == checkpoint.seq {
@@ -1035,6 +1053,16 @@ pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<Checkpo
     } else {
         Ok(CheckpointStatus::Extended(parsed.seq - checkpoint.seq))
     }
+}
+
+/// Identity comparisons use the result only after verifying the complete suffix.
+fn inspect_candidate(path: &Path, requested: Option<u64>) -> Result<Parsed, Error> {
+    let file = open_no_follow(path, OpenOptions::new().read(true))?;
+    check_private(path, &file)?;
+    file.lock_shared().map_err(|e| Error::io(path, &e))?;
+    scan_ledger(path, BufReader::new(&file), false, requested, &mut |_| {
+        Ok(())
+    })
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1082,6 +1110,20 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Apply the same mandatory-charge policy after scope checks for every debit shape.
+fn check_required_charges(
+    pass: &crate::Pass,
+    supplied: impl Fn(&str) -> bool,
+) -> Result<(), Refusal> {
+    if let Some(missing) = pass.required_counters.iter().find(|name| !supplied(name)) {
+        return Err(refused_spend(
+            RefusalCode::RequiredCounterMissing,
+            format!("every debit must charge `{missing}`; include its positive cost"),
+        ));
+    }
+    Ok(())
+}
+
 /// Check one counter against the pass and the locked ledger totals.
 fn decide_ceiling(
     loaded: &LoadedPass,
@@ -1105,7 +1147,7 @@ fn decide_ceiling(
             ),
         ));
     };
-    if spent.saturating_add(amount) > total {
+    if spent.checked_add(amount).is_none_or(|next| next > total) {
         return Err(refused_spend(
             RefusalCode::CeilingReached,
             format!(
@@ -1464,7 +1506,9 @@ fn evaluate_spend(
         now,
         request.needed,
     ) {
-        Ok(labels) => match decide_ceiling(loaded, request.counter, request.amount, total, spent) {
+        Ok(labels) => match check_required_charges(&loaded.pass, |name| name == request.counter)
+            .and_then(|()| decide_ceiling(loaded, request.counter, request.amount, total, spent))
+        {
             Ok(()) => {
                 outcome.label = labels.first().cloned();
                 outcome.labels = labels;
@@ -1544,7 +1588,7 @@ impl LedgerView {
     }
 }
 
-fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
+fn verified_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
     let loaded = load(path)?;
     let view = read_summary(&loaded, state)?;
     if let WitnessStatus::NotChecked { reason } = view.witness {
@@ -1554,6 +1598,11 @@ fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, Ledger
             detail: reason,
         });
     }
+    Ok((loaded, view))
+}
+
+fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
+    let (loaded, view) = verified_snapshot(path, state)?;
     check_preview_write_access(path, &view.path, view.exists, state, &loaded.pass.id)?;
     Ok((loaded, view))
 }

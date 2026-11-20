@@ -1,0 +1,24 @@
+# Metered approval fixture for required counters and scenario rehearsal.
+format = 1
+id = "metered-example"
+name = "Metered API"
+required_counters_v1 = ["requests", "bytes"]
+
+[approval]
+owner = "Example owner"
+reference = "Documentation fixture"
+operator = "Example reviewer"
+valid_from = 2026-11-20T08:00:00Z
+valid_until = 2026-11-20T17:00:00Z
+revoked = false
+
+[[destination]]
+label = "web"
+address = "192.0.2.10"
+protocol = "tcp"
+ports = 443
+names = ["app.example.org"]
+
+[ceilings]
+requests = 5
+bytes = 100

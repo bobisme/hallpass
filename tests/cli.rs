@@ -1444,7 +1444,7 @@ fn discover_every_command_from_machine_help() {
     assert!(root["topic"].is_null());
     assert_eq!(
         root["exit_codes"]["2"],
-        "policy refusal or verification mismatch"
+        "policy refusal, verification mismatch, coverage gaps or inconclusive evidence"
     );
     let commands = root["commands"].as_array().expect("command directory");
     assert!(commands.iter().any(|c| c["name"] == "spend"));
@@ -2491,3 +2491,6 @@ fn approval_id_handles_punctuation_owner_separation_and_revision_stability() {
     assert_eq!(first, same);
     assert_ne!(first, other);
 }
+
+#[path = "evidence/cases.rs"]
+mod evidence;

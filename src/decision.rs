@@ -85,6 +85,8 @@ pub enum RefusalCode {
     NameNotListed,
     /// The counter is not one of the pass's ceilings.
     UnknownCounter,
+    /// A debit omitted a counter required by the approval.
+    RequiredCounterMissing,
     /// The spend would exceed the ceiling.
     CeilingReached,
     /// The pass on disk is not the one the caller expected.
@@ -107,6 +109,7 @@ impl RefusalCode {
             Self::NameRequired => "name-required",
             Self::NameNotListed => "name-not-listed",
             Self::UnknownCounter => "unknown-counter",
+            Self::RequiredCounterMissing => "required-counter-missing",
             Self::CeilingReached => "ceiling-reached",
             Self::PassChanged => "pass-changed",
         }

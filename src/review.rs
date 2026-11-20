@@ -11,6 +11,11 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use toml::Value;
 
+mod examples;
+pub use examples::{DecisionExample, ExampleDecision, ExampleReport, decision_examples};
+mod coverage;
+pub use coverage::{Capabilities, CoverageFinding, CoverageReport, consumer_coverage};
+
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldChange {
     pub field: String,
@@ -187,6 +192,13 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
             true,
         );
     }
+    change(
+        &mut changes,
+        "required_counters_v1",
+        a.required_counters.join(","),
+        b.required_counters.join(","),
+        true,
+    );
     let counters: BTreeSet<_> = a.ceilings.keys().chain(b.ceilings.keys()).collect();
     for counter in counters {
         change(

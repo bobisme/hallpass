@@ -1,0 +1,18 @@
+version = 1
+
+[[step]]
+id = "first"
+at = "2026-11-20T09:00:00Z"
+duration = 20
+targets = ["192.0.2.10:443/tcp@app.example.org"]
+charges = [{ counter = "requests", n = 1 }, { counter = "bytes", n = 40 }]
+
+[[step]]
+id = "second"
+at = "2026-11-20T09:01:00Z"
+charges = [{ counter = "requests", n = 1 }, { counter = "bytes", n = 40 }]
+
+[[step]]
+id = "third"
+at = "2026-11-20T09:02:00Z"
+charges = [{ counter = "requests", n = 1 }, { counter = "bytes", n = 40 }]

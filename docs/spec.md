@@ -16,6 +16,26 @@ nameless rules for the same address family, protocol, and ports; each claimed
 effective allowance is replayed through `permits_named` at the supplied time.
 Lint reports at most 256 findings and indicates when it truncated the list.
 
+`diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
+destination decisions using the ordinary evaluator at the supplied offset
+timestamp. The report retains the field diff and review flags. Each
+`examples.rows` entry includes the target, optional name, instant and
+before/after label or refusal code. `examples.candidates` counts visits,
+`evaluated` counts distinct requests, and `truncated` signals omitted work.
+Sampling ends after 512 visits or 64 changed rows.
+
+`consumer-coverage PASS --can CAPABILITY` compares the full validated approval
+with declared checks for literal endpoints, names, time and revocation, and
+each charged counter. The response identifies its `pass_id`, `digest`,
+`declared` features and individual `findings`. The operator supplies the
+declaration. Live decisions and charges happen independently.
+
+`verify-approval` uses OpenSSH detached signatures under the fixed namespace
+`hallpass-approval-v1`. A verified result includes the expected principal,
+pass ID and digest of the exact bytes supplied to the verifier. The operator
+provisions the trust file and selects the principal. See the signing and
+digest-pinning workflow in the [integration guide](INTEGRATING.md).
+
 `hallpass test-pass PASS SUITE` checks up to 1,024 ordered cases offline.
 Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
 invalid input or an error. See the [example suite](review-suite.toml).
@@ -43,8 +63,10 @@ the same questions.
 - **Name resolution.** hallpass never resolves a host name and never
   accepts one as authorization.
 - **Storing secrets.** A pass holds no credentials.
-- **Signing or proving approval.** A pass records the reference to the
-  written approval; it is not cryptographic proof of it.
+- **Issuing approvals.** The owner creates the written approval and distributes
+  their public key through an independent trust channel. The optional offline
+  `verify-approval` command verifies a detached SSH signature over a pass.
+  Ordinary loading and live decisions use the pass and any supplied digest pin.
 - **Managing many passes.** One file is one approval.
 
 ## Concepts
@@ -201,6 +223,7 @@ send this much to this destination now, and count it".
    every refusal of `permits` for it, with the name and `needed`
    (`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`,
    `port-not-listed`, `name-required`, `name-not-listed`),
+   `required-counter-missing` (the debit omitted an owner-required charge),
    `unknown-counter` (not in `[ceilings]`), `ceiling-reached` (spent + n >
    total). The destination is decided against the pass as read under the
    locks, the same reading the entry's digest names.
@@ -292,6 +315,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
+| the spend exhausted its optional writer lock wait budget before appending | `lock-timeout` |
 | the append or its sync failed and the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
@@ -317,7 +341,7 @@ commands use their established plain output in both modes. The help command
 uses a compact listing in text and the expanded listing in pretty.
 
 Exit **0** indicates success, **1** indicates a usage, file or accounting
-error, and **2** indicates a policy refusal or verification mismatch. Text
+error, and **2** indicates a policy refusal, verification mismatch or coverage gaps. Text
 errors go to stderr. In JSON mode every command emits one object on stdout,
 including usage errors, help and version. Parser failures also print their
 diagnostic to stderr and return `error.code = "usage"` with null `command`
@@ -333,6 +357,9 @@ and `file`. Help and version requests return their own command name and
 | `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
 | `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `digest` | printed | never | invalid pass |
+| `diff` | field comparison completed, including any requested sample | never | invalid pass, instant or usage |
+| `consumer-coverage` | `covered` | `gaps` | invalid declaration or pass |
+| `verify-approval` | `verified` | `unverified` | invalid pass, unavailable verifier or input |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
 | `adopt` | adoption recorded | never | invalid pass, damaged ledger, nothing to adopt, missing reason, unusable state directory |
 
@@ -416,7 +443,7 @@ fields are null except the one that applies. Times are UTC, whole seconds,
 
 Refusal codes: `not-yet-valid`, `expired`, `revoked`, `window-too-short`,
 `embedded-ipv4`, `network-or-broadcast`, `address-not-listed`, `port-not-listed`, `name-required`, `name-not-listed`,
-`unknown-counter`, `ceiling-reached`, `pass-changed`.
+`required-counter-missing`, `unknown-counter`, `ceiling-reached`, `pass-changed`.
 
 ### Test clock
 
@@ -534,6 +561,13 @@ filesystem failures can change the result of the real spend.
 | Unusable witness state | evaluate with warning | report not-checked | error |
 | Missing or divergent witnessed history | error | error | error |
 
+On a committing spend, `--lock-timeout-ms N` gives both writer locks one
+shared monotonic wait budget. Zero requests one nonblocking attempt per lock.
+Omitting the option uses blocking locks. A timeout exits 1 with
+`error.code = "lock-timeout"` and `error.recording = "not-recorded"`.
+The budget covers lock acquisition. It places no deadline on a subsequent
+append or sync. An external process timeout can leave the outcome unknown.
+
 After `witness-not-updated`, `error.recording` is `recorded` and the JSON
 error contains `seq` and `ledger`. A `ledger-append-uncertain` error includes
 the ledger path and `recording = "uncertain"`. Both exit 1. Inspect the
@@ -579,3 +613,26 @@ reference correlates the caller's own run record with the digest and
 sequence. An older incompatible reader fails closed on a versioned debit.
 Charges remain monotone through restoration and adoption. Callers commit
 at first send and reconcile ambiguous append outcomes against the ledger.
+
+### Rehearsing a budget
+
+Run `hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml`
+to project three ordered debits of 40 bytes against a 100-byte ceiling. The first
+two steps leave 20 bytes. The third returns `simulation-refused` (exit 2) and
+preserves both balances. A complete projection returns `simulated` (exit 0).
+Submit each actual unit with `spend` to check the current approval and balances.
+
+A local UTF-8 TOML scenario has `version = 1` and 1–128 ordered `[[step]]`
+tables. Each table supplies a unique pass-style identifier `id`, a quoted RFC
+3339 `at` instant and an ordered list of `charges = [{counter = "bytes", n = 40}]`.
+Instants may be equal and must be nondecreasing. Optional `duration` is an
+unsigned 32-bit count of seconds. Optional `targets` lists up to 64 literal
+endpoints in spend's `ADDR:PORT/PROTO[@NAME]` syntax. Each step has 1–64
+distinct positive charges. The scenario file limit is 256 KiB.
+
+The command reads one validated pass and compares its ledger with the witness.
+The result identifies the pass digest, witness status and starting totals,
+including historical charges and adoption carry. Each evaluated step reports
+the before and after totals for its requested counters, remaining budget,
+matched labels or refusal evidence. Following steps report `unevaluated`.
+Every projection stays in memory. A subsequent live debit reads current state.

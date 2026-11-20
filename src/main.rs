@@ -4,6 +4,7 @@
 //! Every command accepts `--format json` and then prints one JSON object on
 //! standard output.
 
+mod cli_evidence;
 mod cli_help;
 
 use std::ffi::{OsStr, OsString};
@@ -65,6 +66,13 @@ enum Command {
     Check {
         /// The pass file.
         file: PathBuf,
+    },
+    /// Simulate ordered debits against one verified accounting snapshot.
+    Rehearse {
+        /// The pass file supplying policy, ledger and witness identity.
+        file: PathBuf,
+        /// Local version 1 TOML scenario with ordered steps, explicit instants and charge lists.
+        scenario: PathBuf,
     },
     /// Show who approved, the window, destinations and ceilings.
     Status {
@@ -163,6 +171,29 @@ enum Command {
         /// Full sha256 digest from archive or a ledger entry.
         digest: String,
     },
+    /// Find retained debit receipts for one exact caller reference across revisions.
+    Receipt {
+        /// Pass whose available ledger history to search.
+        file: PathBuf,
+        /// Exact, case-sensitive opaque reference supplied at debit time.
+        #[arg(long, value_name = "TEXT")]
+        caller_ref: String,
+    },
+    /// Replay retained endpoint decisions using their exact archived passes.
+    AuditReceipts {
+        /// Pass identifying the ledger to verify.
+        file: PathBuf,
+        /// Private directory populated by archive.
+        directory: PathBuf,
+    },
+    /// Compare explicit ledger backups against a single local witness.
+    CompareBackups {
+        /// Pass identifying the local witness. The live ledger may be missing.
+        file: PathBuf,
+        /// One to 32 ledger files, in the order to report.
+        #[arg(required = true, num_args = 1.., value_name = "CANDIDATE")]
+        candidates: Vec<PathBuf>,
+    },
     /// Export a checkpoint to retain separately from the ledger.
     Checkpoint {
         /// Pass with an existing ledger to checkpoint.
@@ -192,12 +223,40 @@ enum Command {
         #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
         token: Option<String>,
     },
+    /// Verify an owner's detached SSH signature over the exact validated pass.
+    VerifyApproval {
+        /// Signed pass file.
+        file: PathBuf,
+        /// Detached signature produced by the owner.
+        #[arg(long)]
+        signature: PathBuf,
+        /// Trusted OpenSSH allowed-signers file supplied independently by the verifier.
+        #[arg(long)]
+        allowed_signers: PathBuf,
+        /// Expected signer identity selected by the verifier.
+        #[arg(long)]
+        principal: String,
+    },
     /// Compare two pass revisions without authorizing either one.
     Diff {
         /// Previously reviewed pass.
         old: PathBuf,
         /// Proposed replacement pass.
         new: PathBuf,
+        /// Sample changed destination decisions at the supplied review instant.
+        #[arg(long, requires = "at")]
+        examples: bool,
+        /// RFC 3339 review instant including an offset. Requires --examples.
+        #[arg(long, requires = "examples", value_name = "TIMESTAMP")]
+        at: Option<String>,
+    },
+    /// Compare an entire approval with a consumer's declared features.
+    ConsumerCoverage {
+        /// Pass whose enforced terms should be covered.
+        file: PathBuf,
+        /// Repeat for endpoints, names, live-window and charge:COUNTER, or use none alone.
+        #[arg(long, required = true, value_name = "CAPABILITY")]
+        can: Vec<String>,
     },
     /// Report name-restriction overlaps as advisory findings.
     Lint {
@@ -230,6 +289,7 @@ impl Command {
             Self::Version => "version",
             Self::Init { .. } => "init",
             Self::Check { .. } => "check",
+            Self::Rehearse { .. } => "rehearse",
             Self::Status { .. } => "status",
             Self::Permits { .. } => "permits",
             Self::Spend { .. } => "spend",
@@ -238,9 +298,14 @@ impl Command {
             Self::Adopt { .. } => "adopt",
             Self::Archive { .. } => "archive",
             Self::Retrieve { .. } => "retrieve",
+            Self::Receipt { .. } => "receipt",
+            Self::AuditReceipts { .. } => "audit-receipts",
+            Self::CompareBackups { .. } => "compare-backups",
             Self::Checkpoint { .. } => "checkpoint",
             Self::VerifyCheckpoint { .. } => "verify-checkpoint",
+            Self::VerifyApproval { .. } => "verify-approval",
             Self::Diff { .. } => "diff",
+            Self::ConsumerCoverage { .. } => "consumer-coverage",
             Self::Lint { .. } => "lint",
             Self::Cases { .. } => "test-pass",
             Self::ApprovalId { .. } => "approval-id",
@@ -440,7 +505,24 @@ fn check(file: &Path) -> Output {
     }
 }
 
-fn review_diff(old: &Path, new: &Path) -> Output {
+mod cli_verify;
+
+fn review_diff(old: &Path, new: &Path, at: Option<&str>) -> Output {
+    let review_at = match at
+        .map(|s| OffsetDateTime::parse(s, &hallpass::time::format_description::well_known::Rfc3339))
+        .transpose()
+    {
+        Ok(instant) => instant,
+        Err(e) => {
+            return error_output(
+                "diff",
+                None,
+                &Error::Usage(format!(
+                    "supply --at as an RFC 3339 timestamp with an offset ({e})"
+                )),
+            );
+        }
+    };
     let a = match hallpass::load(old) {
         Ok(v) => v,
         Err(e) => return error_output("diff", Some(old), &e),
@@ -480,11 +562,70 @@ fn review_diff(old: &Path, new: &Path) -> Output {
     if report.order_changed {
         text.push_str("WARNING: common destination order changed; returned label may change.\n");
     }
-    text.push_str("This is a declared-field diff only; it never authorizes a spend.\n");
-    Output {
+    let mut output = Output {
         code: OK,
         json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":[]}),
         text,
+    };
+    if let Some(instant) = review_at {
+        let sample = hallpass::review::decision_examples(&a.pass, &b.pass, instant);
+        let _ = writeln!(
+            output.text,
+            "Sampled {} distinct requests at {}. The sample cannot establish policy equivalence.",
+            sample.evaluated, sample.at
+        );
+        for row in &sample.rows {
+            let _ = writeln!(
+                output.text,
+                "{} ({}): {} -> {}",
+                row.target,
+                row.name.as_deref().unwrap_or("unnamed"),
+                row.before,
+                row.after
+            );
+        }
+        if sample.truncated {
+            output
+                .text
+                .push_str("Sampling limit reached. Additional candidates were omitted.\n");
+        }
+        output.json["examples"] = json!(sample);
+    } else {
+        output
+            .text
+            .push_str("This is a declared-field diff only; it never authorizes a spend.\n");
+    }
+    output
+}
+
+fn consumer_coverage(file: &Path, tokens: &[String]) -> Output {
+    use hallpass::review::{Capabilities, consumer_coverage as coverage};
+    let caps = match Capabilities::parse(tokens) {
+        Ok(caps) => caps,
+        Err(e) => return error_output("consumer-coverage", Some(file), &Error::Usage(e)),
+    };
+    let loaded = match hallpass::load(file) {
+        Ok(p) => p,
+        Err(e) => return error_output("consumer-coverage", Some(file), &e),
+    };
+    let report = coverage(&loaded, &caps);
+    let (code, result) = if report.findings.is_empty() {
+        (OK, "covered")
+    } else {
+        (REFUSED, "gaps")
+    };
+    let mut text = format!(
+        "Declared consumer coverage for {} ({}): {result}.\n",
+        report.pass_id, report.digest
+    );
+    for f in &report.findings {
+        let _ = writeln!(text, "{f}");
+    }
+    text.push_str("Each live operation still requires a policy decision.\n");
+    Output {
+        code,
+        text,
+        json: json!({"command":"consumer-coverage","result":result,"pass_id":report.pass_id,"digest":report.digest,"declared":caps,"findings":report.findings,"file":file.display().to_string()}),
     }
 }
 
@@ -648,6 +789,13 @@ fn status_text(
             }
         );
     }
+    if !pass.required_counters.is_empty() {
+        let _ = writeln!(
+            text,
+            "Required on every debit: {}",
+            pass.required_counters.join(", ")
+        );
+    }
     text.push_str("Ceilings:\n");
     if pass.ceilings.is_empty() {
         text.push_str("  none\n");
@@ -675,6 +823,39 @@ fn status_text(
         let _ = writeln!(text, "This pass permits NOTHING now: {}.", safe(&r.message));
     }
     text
+}
+
+fn rehearse(file: &Path, scenario: &Path) -> Output {
+    let report = match hallpass::scenario::rehearse(file, scenario, &StateDir::from_env()) {
+        Ok(report) => report,
+        Err(error) => return error_output("rehearse", Some(file), &error),
+    };
+    let (code, result) = if report.stopped_at.is_some() {
+        (REFUSED, "simulation-refused")
+    } else {
+        (OK, "simulated")
+    };
+    let mut text = format!(
+        "Simulation {result} for {} ({})\n",
+        report.pass_id, report.digest
+    );
+    for step in &report.steps {
+        let _ = writeln!(text, "  {} at {}: {}", step.id, step.at, step.status);
+        for balance in &step.balances {
+            let _ = writeln!(
+                text,
+                "    {}: {} -> {}",
+                balance.counter, balance.before, balance.after
+            );
+        }
+        if let Some(reason) = &step.refusal {
+            let _ = writeln!(text, "    {}: {}", reason.code, reason.message);
+        }
+    }
+    let mut json = json!(report);
+    json["command"] = json!("rehearse");
+    json["result"] = json!(result);
+    Output { code, json, text }
 }
 
 fn status(file: &Path, clock: &Clock) -> Output {
@@ -770,6 +951,7 @@ fn status_with_clock(
             "destinations": destinations,
             "breadth": breadth,
             "counters": counters,
+            "required_counters": pass.required_counters,
             "unlisted_spends": unlisted,
             "ledger": ledger_json(&view),
             "warnings": warnings,
@@ -1553,32 +1735,37 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
     }
 }
 
-fn run(cli: &Cli, format: Format) -> Output {
-    let name = cli.command.name();
+fn command_clock(command: &Command) -> Result<Clock, Error> {
     let needs_clock = matches!(
-        cli.command,
+        command,
         Command::Status { .. }
             | Command::Permits { .. }
             | Command::Spend { .. }
             | Command::Adopt { .. }
             | Command::Lint { .. }
     );
-    let clock = if needs_clock {
-        match clock() {
-            Ok(c) => c,
-            Err(e) => return error_output(name, None, &e),
-        }
+    if needs_clock {
+        clock()
     } else {
-        Clock {
+        Ok(Clock {
             now: OffsetDateTime::now_utc(),
             test: false,
-        }
+        })
+    }
+}
+
+fn run(cli: &Cli, format: Format) -> Output {
+    let name = cli.command.name();
+    let clock = match command_clock(&cli.command) {
+        Ok(clock) => clock,
+        Err(e) => return error_output(name, None, &e),
     };
     match &cli.command {
         Command::Help { topic } => cli_help::help(topic.as_deref(), format),
         Command::Version => cli_help::version(),
         Command::Init { file } => init(file),
         Command::Check { file } => check(file),
+        Command::Rehearse { file, scenario } => rehearse(file, scenario),
         Command::Status { file } => status(file, &clock),
         Command::Permits {
             file,
@@ -1630,6 +1817,9 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Ledger { file, counter } => ledger(file, counter.as_deref()),
         Command::Archive { file, directory } => archive(file, directory),
         Command::Retrieve { directory, digest } => retrieve(directory, digest),
+        Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
+        Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
+        Command::CompareBackups { file, candidates } => cli_evidence::backups(file, candidates),
         Command::Checkpoint { file } => checkpoint(file),
         Command::VerifyCheckpoint { ledger, checkpoint } => verify_checkpoint(ledger, checkpoint),
         Command::Adopt {
@@ -1649,7 +1839,14 @@ fn run(cli: &Cli, format: Format) -> Output {
                 )
             }
         }
-        Command::Diff { old, new } => review_diff(old, new),
+        Command::VerifyApproval {
+            file,
+            signature,
+            allowed_signers,
+            principal,
+        } => cli_verify::verify_approval(file, signature, allowed_signers, principal),
+        Command::Diff { old, new, at, .. } => review_diff(old, new, at.as_deref()),
+        Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),
         Command::Lint { file } => review_lint(file, &clock),
         Command::Cases { file, cases } => review_cases(file, cases),
         Command::ApprovalId { owner, reference } => approval_id(owner, reference),

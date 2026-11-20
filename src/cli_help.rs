@@ -4,13 +4,17 @@ use serde_json::{Value, json};
 
 use super::{Cli, Error, Format, OK, Output, error_output};
 
-const EXITS: &str = "Exit codes\n  0  Success (inspect command and result)\n  1  Usage, file or accounting error\n  2  Policy refusal or verification mismatch";
+const EXITS: &str = "Exit codes\n  0  Success (inspect command and result)\n  1  Usage, file or accounting error\n  2  Policy refusal, verification mismatch, coverage gaps or inconclusive evidence";
 
 struct Guide {
     examples: &'static [&'static str],
     workflow: &'static str,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one declarative help entry per CLI command"
+)]
 fn guide(name: &str) -> Guide {
     let (examples, workflow): (&[&str], &str) = match name {
         "hallpass" => (
@@ -37,6 +41,10 @@ fn guide(name: &str) -> Guide {
             &["hallpass --format json check engagement.pass.toml"],
             "On an invalid pass, correct each problems[].field using the owner's approval. After validation, use status to inspect the live window, balances and witness.",
         ),
+        "rehearse" => (
+            &["hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml"],
+            "Read a version 1 TOML scenario. Each [[step]] needs a unique id, a quoted RFC 3339 at, and charges = [{counter = 'bytes', n = 40}]. Optional duration is in seconds and targets use ADDR:PORT/PROTO[@NAME]. Inspect starting_spent, steps[].balances and stopped_at. Exit 2 marks the first simulated refusal. A simulation reserves nothing. Submit live spend for each actual unit.",
+        ),
         "status" => (
             &["hallpass --format json status engagement.pass.toml"],
             "Review the owner, literal destinations, window, ceilings and warnings. Capture digest for the next permits or spend request. A valid window alone grants no target or debit.",
@@ -53,7 +61,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --dry-run",
                 "hallpass --format json spend engagement.pass.toml --charge calls=1 --charge bytes=100 --to 192.0.2.10:5060/udp --duration 30 --digest \"$digest\"",
             ],
-            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Preview with --dry-run, then submit once with the reviewed digest and all required targets and charges. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. After a lost reply or recorded/uncertain error, inspect ledger before retrying.",
+            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Preview with --dry-run, then submit once with the reviewed digest and all required targets and charges. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. After a lost reply or recorded/uncertain error, use receipt with the original caller reference, or inspect ledger, and reconcile with your run record before retrying.",
         ),
         "digest" => (
             &["hallpass --format json digest engagement.pass.toml"],
@@ -74,6 +82,60 @@ fn guide(name: &str) -> Guide {
             &["hallpass --format json retrieve approval-archive \"$digest\""],
             "Supply the full digest from archive or ledger. Read bytes for the exact pass text. Select --format text when redirecting the original bytes to a file.",
         ),
+        "verify-approval" => (
+            &[
+                "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org",
+            ],
+            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. Those live operations check current policy.",
+        ),
+        "diff" => (
+            &[
+                "hallpass --format json diff reviewed.pass.toml proposed.pass.toml",
+                "hallpass --format json diff reviewed.pass.toml proposed.pass.toml --examples --at 2026-11-20T09:00:00Z",
+            ],
+            "Inspect review_required, changes and destination order. For replayable decision changes supply --examples with an explicit offset timestamp. Inspect examples.rows and truncated. An empty sample cannot establish policy equivalence. Exit 0 means the comparison completed.",
+        ),
+        "consumer-coverage" => (
+            &[
+                "hallpass --format json consumer-coverage engagement.pass.toml --can endpoints --can live-window --can charge:calls",
+            ],
+            "Declare features your consumer implements. Supply --can names when it checks the application name and repeat --can charge:COUNTER for every budget it charges. Use --can none for an empty profile. Inspect findings on exit 2 (gaps). Exit 0 (covered) describes declared features. Live requests still need permits or spend.",
+        ),
+        "lint" => (
+            &["hallpass --format json lint engagement.pass.toml"],
+            "Inspect findings for overlapping destination names and ports, and truncated for omitted findings. Lint is advisory and can return exit 0 with findings.",
+        ),
+        "test-pass" => (
+            &["hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml"],
+            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. Inspect mismatches and results. All evaluations are offline.",
+        ),
+        "approval-id" => (
+            &[
+                "hallpass --format json approval-id --owner 'Example Corp' --reference 'approval-42'",
+            ],
+            "Use the id in revisions of the same written approval. Preserve the owner and reference strings exactly. Distinct approvals need distinct identities and budgets.",
+        ),
+        _ => return history_guide(name),
+    };
+    Guide { examples, workflow }
+}
+
+fn history_guide(name: &str) -> Guide {
+    let (examples, workflow): (&[&str], &str) = match name {
+        "receipt" => (
+            &["hallpass --format json receipt engagement.pass.toml --caller-ref run-42"],
+            "After a lost spend reply, supply the exact reference from your durable run record. Compare matching sequences, digests, charges and retained targets. Found exits 0. Absent or ambiguous exits 2. Reconcile before retrying. A receipt records a debit and cannot establish that the external action occurred.",
+        ),
+        "audit-receipts" => (
+            &["hallpass --format json audit-receipts engagement.pass.toml approval-archive"],
+            "Archive each reviewed revision before spending with --record-target. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps and the independent witness status. Complete exits 0. Incomplete or mismatch exits 2. A damaged input exits 1.",
+        ),
+        "compare-backups" => (
+            &[
+                "hallpass --format json compare-backups engagement.pass.toml backup-a.ledger backup-b.ledger",
+            ],
+            "Supply up to 32 candidate ledger files and the pass identifying the witness. Inspect each verified tip, relation and tip_group, then review the assessment. Distinct extensions can conflict. Recheck the chosen file after restoration. Per-file input failures exit 1, preserving other rows.",
+        ),
         "checkpoint" => (
             &["hallpass --format json checkpoint engagement.pass.toml > checkpoint.json"],
             "After a ledger exists, retain this JSON separately from it. Use verify-checkpoint on the ledger and the retained JSON to check the history later.",
@@ -90,24 +152,6 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json adopt engagement.pass.toml --reason 'restored from backup' --token \"$token\"",
             ],
             "Use this for recovery. Inspect case, present, carry and totals in the preview. After reviewing them, supply its token and a reason to record the adoption. A stale token requires a new review. An appended adoption still counts after a witness update failure.",
-        ),
-        "diff" => (
-            &["hallpass --format json diff reviewed.pass.toml proposed.pass.toml"],
-            "Inspect review_required, changes, and destination order before accepting a revision. Exit 0 means the comparison completed. Use test-pass to check the owner's expected decisions.",
-        ),
-        "lint" => (
-            &["hallpass --format json lint engagement.pass.toml"],
-            "Inspect findings for overlapping destination names and ports, and truncated for omitted findings. Lint is advisory and can return exit 0 with findings.",
-        ),
-        "test-pass" => (
-            &["hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml"],
-            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. Inspect mismatches and results. All evaluations are offline.",
-        ),
-        "approval-id" => (
-            &[
-                "hallpass --format json approval-id --owner 'Example Corp' --reference 'approval-42'",
-            ],
-            "Use the id in revisions of the same written approval. Preserve the owner and reference strings exactly. Distinct approvals need distinct identities and budgets.",
         ),
         _ => unreachable!("missing help for {name}"),
     };
@@ -189,7 +233,7 @@ pub fn help(topic: Option<&str>, format: Format) -> Output {
             "usage":usage, "arguments":arguments(command),
             "commands":command.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| json!({"name":c.get_name(),"description":c.get_about().map(ToString::to_string)})).collect::<Vec<_>>(),
             "examples":info.examples, "workflow":info.workflow,
-            "exit_codes":{"0":"success; inspect command and result","1":"usage, file or accounting error","2":"policy refusal or verification mismatch"}
+            "exit_codes":{"0":"success; inspect command and result","1":"usage, file or accounting error","2":"policy refusal, verification mismatch, coverage gaps or inconclusive evidence"}
         }),
         text: format!("{text}\n"),
     }

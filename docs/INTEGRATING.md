@@ -2,9 +2,40 @@
 
 ## Review and case suites
 
+An owner with an existing SSH signing key can endorse the exact pass bytes.
+OpenSSH writes a detached signature beside the file.
+
+```text
+ssh-keygen -Y sign -n hallpass-approval-v1 -f ~/.ssh/approval_key engagement.pass.toml
+```
+
+Obtain the owner's public key through your trusted provisioning channel. In
+your own OpenSSH allowed-signers file, bind the expected principal to that
+key, for example `owner@example.org ssh-ed25519 AAAA...`. The verifier
+decides which principal may speak for the named approval owner. Keep that
+trust file under your control, separately from the submitted pass and signature.
+
+```text
+hallpass --json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig \
+  --allowed-signers /etc/hallpass/trusted_signers --principal owner@example.org
+```
+
+Exit 0 with `result=verified` identifies the signer, pass ID and exact digest.
+An unverified signature exits 2. Input and missing-verifier errors exit 1.
+Historical verification can succeed after expiry. Supply the returned digest
+to `permits --digest` or `spend --digest` for the live decision.
+
 Run `hallpass diff OLD NEW` to inspect the changed terms and both byte
 digests. Run `hallpass lint NEW` to see where a second destination relaxes a
 name restriction.
+
+For concrete changes, add `--examples --at 2026-11-20T09:00:00Z` to
+`diff`. It samples literal network boundaries, range endpoints and adjacent
+ports with and without declared names. Each row records the exact review
+instant and both decisions, including the label or refusal code. It visits
+up to 512 candidates and returns up to 64 changed rows. Check
+`examples.truncated` for omitted work. An empty sample cannot establish
+equivalence. Continue to review the declared fields and `review_required`.
 
 Try the owner example from the repository root with
 `hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml`.
@@ -54,8 +85,9 @@ hallpass --format json spend --to ADDRESS:PORT/PROTOCOL [--name HOSTNAME] [--n N
 
 Before sending, require exit 0 and a production `spend` response with
 `"result": "allowed"`, `"test_clock": false` and a positive recorded sequence.
-Match the pass ID, digest, counter and amount to the request. The reference
-decoder below exercises this contract with a callback.
+Match the file, pass ID, digest, ordered targets and names, ordered charges,
+and requested receipt data to the original invocation. The reference decoder
+below exercises this contract with a callback.
 
 `spend --to` decides the destination, the window, revocation and the
 ceiling together, under one lock, against one reading of the pass file. If
@@ -114,6 +146,24 @@ $ hallpass --format json check -- engagement.pass.toml
 exit 0
 {"result": "ok", "pass_id": "example-2026-11", "problems": []}
 ```
+
+Before wiring up a consumer, compare its features with the complete approval.
+This packet filter checks literal address, protocol and port and its wrapper
+checks the live window and revocation. A cooperating component must also
+charge each call before sending. For a destination with restricted names, the
+component that controls the application request must check the name it carries.
+The informational `hostname` field creates no such requirement.
+
+```console
+$ hallpass --json consumer-coverage engagement.pass.toml --can endpoints --can live-window
+exit 2
+{"result":"gaps","findings":[{"code":"missing-counter","counter":"calls"}]}
+```
+
+Declare the combined components with another `--can charge:calls` once that
+accounting is in place. Exit 0 with `covered` describes the operator-supplied
+declaration. This comparison reads no ledger, spends no budget and grants
+no live permission. Invalid declarations give a usage error and exit 1.
 
 Before the first packet of the first call. The call may last two minutes, so
 the window must stay open that long:
@@ -230,7 +280,9 @@ The Rust path is `permits_in` with an ordered slice of `NamedTarget` values.
 A spend error with `error.recording = "recorded"` identifies a durable debit
 by `error.ledger` and `error.seq`. With `"uncertain"`, the append or sync
 failed. Stop and inspect the ledger before deciding whether another spend is
-appropriate. Never automatically retry either outcome.
+appropriate. Never automatically retry either outcome. If the caller recorded a
+reference before submitting, use `hallpass --json receipt FILE --caller-ref REF`
+to match the debit to that durable run record. [Worked reconciliation](EVIDENCE.md#reconcile-a-lost-spend-response)
 
 A real spend can bound writer lock acquisition with `--lock-timeout-ms N`
 or `SpendRequest::lock_timeout` (also on the policy of a multi-charge request).
@@ -247,7 +299,9 @@ Run `python3 docs/conformance/check.py` from the checkout. The reference
 decoder exercises a callback spy over a versioned JSON corpus. To test your
 own wrapper, feed each case's exit status and raw stdout to its normal
 decoder and compare the action, callback count and warnings. A null exit
-denotes launch failure. Both stop and reconcile must invoke zero callbacks.
+denotes launch failure. Reject duplicate JSON object members at every depth and
+nonstandard numeric literals (`NaN`, `Infinity`, `-Infinity`). Both stop and
+reconcile must invoke zero callbacks.
 The integration suite also supplies real CLI output acquired with the
 production clock. [Fixtures](conformance/cases.json) · [Reference decoder](conformance/check.py)
 

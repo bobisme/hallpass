@@ -70,7 +70,7 @@ pub use address::{
 pub use archive::{archive_pass, retrieve_pass};
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
 pub use error::{Error, MissingLedger};
-pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load};
+pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load, load_with_bytes};
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
     CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry, LedgerView,
@@ -80,6 +80,7 @@ pub use ledger::{
     read_ledger, read_summary, spend, spend_charges, spend_charges_in, spend_charges_with_clock_in,
     spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
+pub use ledger::{evidence, scenario};
 pub use name::{HostName, MAX_NAMES};
 pub use pass::{
     Approval, Destination, FORMAT_VERSION, IPV4_CAP, IPV4_FLOOR, IPV6_CAP, IPV6_FLOOR, MAX_CEILING,

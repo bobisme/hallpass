@@ -91,7 +91,7 @@ pub(super) struct DebitLine {
     pub(super) prev: String,
 }
 
-fn check_charges<'a>(
+pub(super) fn check_charges<'a>(
     count: usize,
     charges: impl Iterator<Item = (&'a str, u64)>,
 ) -> Result<(), &'static str> {
@@ -110,7 +110,7 @@ fn check_charges<'a>(
     Ok(())
 }
 
-fn valid_text(text: &str, max: usize) -> bool {
+pub(super) fn valid_text(text: &str, max: usize) -> bool {
     !text.trim().is_empty()
         && text.chars().count() <= max
         && !text.chars().any(|c| c.is_control() || is_disguising(c))
@@ -136,7 +136,10 @@ fn valid_receipt(receipt: &DebitReceipt) -> bool {
         })
 }
 
-pub(super) fn parse_debit(parsed: &mut Parsed, line: DebitLine) -> Result<(), &'static str> {
+pub(super) fn parse_debit(
+    parsed: &mut Parsed,
+    line: DebitLine,
+) -> Result<LedgerDebit, &'static str> {
     if line.event != "debit" || line.version != DEBIT_VERSION {
         return Err("unsupported debit event or version");
     }
@@ -161,17 +164,14 @@ pub(super) fn parse_debit(parsed: &mut Parsed, line: DebitLine) -> Result<(), &'
     }
     parsed.tally.entries += 1;
     parsed.last_time = Some(time);
-    if parsed.collect {
-        parsed.debits.push(LedgerDebit {
-            seq: line.seq,
-            time,
-            charges: line.charges,
-            digest,
-            note: line.note,
-            receipt: line.receipt,
-        });
-    }
-    Ok(())
+    Ok(LedgerDebit {
+        seq: line.seq,
+        time,
+        charges: line.charges,
+        digest,
+        note: line.note,
+        receipt: line.receipt,
+    })
 }
 
 use std::path::Path;
@@ -414,7 +414,7 @@ fn spend_using(
     Ok(result)
 }
 
-fn decide_debit(
+pub(super) fn decide_debit(
     loaded: &LoadedPass,
     tally: &Tally,
     request: &SpendChargesRequest<'_>,
@@ -451,6 +451,13 @@ fn decide_debit(
         refusal
     })
     .and_then(|labels| {
+        super::check_required_charges(&loaded.pass, |name| {
+            request.charges.iter().any(|c| c.counter == name)
+        })
+        .map_err(|reason| TargetRefusal {
+            reason,
+            index: None,
+        })?;
         for c in &charges {
             decide_ceiling(loaded, &c.counter, c.amount, c.total, c.spent).map_err(|reason| {
                 TargetRefusal {
@@ -467,7 +474,8 @@ fn decide_debit(
     };
     if request.dry_run && refusal.is_none() {
         for charge in &mut charges {
-            charge.projected_spent = Some(charge.spent + charge.amount);
+            // decide_ceiling accepted this exact sum for every charge.
+            charge.projected_spent = charge.spent.checked_add(charge.amount);
         }
     }
     SpendChargesOutcome {

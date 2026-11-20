@@ -87,11 +87,24 @@ def _matches_request(reply, expected):
             and reply.get("refusal") is None and reply.get("refused_target") is None)
 
 
+def _unique_members(pairs):
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError(f"duplicate JSON member {name!r}")
+        result[name] = value
+    return result
+
+
+def _reject_constant(token):
+    raise ValueError(f"invalid JSON number {token}")
+
+
 def _inspect(code, stdout, expected, on_allowed, show_warning, matches):
     if type(code) is not int:
         return "stop"
     try:
-        reply = json.loads(stdout)
+        reply = json.loads(stdout, object_pairs_hook=_unique_members, parse_constant=_reject_constant)
     except (ValueError, TypeError, UnicodeError):
         return "stop"
     if not isinstance(reply, dict):

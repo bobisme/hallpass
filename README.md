@@ -32,13 +32,21 @@ Run `hallpass help` to see the command directory. An agent can request the same
 directory, inspect one command, or identify the installed version in JSON.
 
 ```sh
-hallpass help --format json
+hallpass help --json
 hallpass help spend --format json
 hallpass version --format json
 ```
 
 Each help page includes arguments, examples, an agent workflow and exit codes.
 JSON callers should check the returned `command`, `result` and exit code.
+
+| If you need to… | Start with |
+|---|---|
+| Review an owner's signed approval or proposed scope edits | `verify-approval`, `diff --examples --at TIMESTAMP` |
+| Check whether a consumer covers every restriction | `consumer-coverage` |
+| See where a sequence of debits would first exceed a budget | `rehearse` |
+| Reconcile a lost spend reply or replay a receipt against its approval | `receipt`, `audit-receipts` |
+| Find backups containing the last witnessed ledger entry | `compare-backups` |
 
 ## Two-minute example
 
@@ -214,6 +222,8 @@ points `XDG_STATE_HOME` and `HOME` (or the library's `StateDir`) at a
 temporary directory, so the suite never touches your real witnesses.
 
 ### Retaining and checking history
+
+For lost spend replies, historical endpoint audits and ledger backup comparison, see [Reading accounting evidence](docs/EVIDENCE.md).
 
 Create a private archive directory, then retain the exact approved pass bytes:
 

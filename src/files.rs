@@ -6,6 +6,7 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 
@@ -14,11 +15,19 @@ use crate::pass::Pass;
 
 /// One monotonic budget for the witness and ledger writer locks.
 #[derive(Clone, Copy, Default)]
-pub struct WriterWait(Option<(std::time::Instant, std::time::Duration)>);
+pub struct WriterWait(Option<(std::time::Instant, Duration)>);
 
 impl WriterWait {
-    pub(crate) fn new(limit: Option<std::time::Duration>) -> Self {
+    pub(crate) fn new(limit: Option<Duration>) -> Self {
         Self(limit.map(|limit| (std::time::Instant::now(), limit)))
+    }
+
+    fn poll_interval(left: Duration) -> Duration {
+        // Leave time for another attempt even when the entire budget is below 5 ms.
+        // The floor avoids polling repeatedly at sub-microsecond intervals.
+        (left / 4)
+            .clamp(Duration::from_micros(50), Duration::from_millis(5))
+            .min(left)
     }
 
     pub(crate) fn exclusive(
@@ -44,7 +53,7 @@ impl WriterWait {
             if left.is_zero() {
                 break;
             }
-            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+            std::thread::sleep(Self::poll_interval(left));
         }
         Err(Error::LockTimeout {
             path: path.to_owned(),
@@ -206,29 +215,59 @@ pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
 /// other may write it), [`Error::TooLarge`], [`Error::Io`], and
 /// [`Error::Invalid`] with every problem found.
 pub fn load(path: &Path) -> Result<LoadedPass, Error> {
+    load_with_bytes(path).map(|(loaded, _)| loaded)
+}
+
+/// Read one validated snapshot, retaining the exact bytes used for its digest.
+///
+/// # Errors
+/// Returns the same validation and file errors as [`load`].
+pub fn load_with_bytes(path: &Path) -> Result<(LoadedPass, Vec<u8>), Error> {
     let bytes = read_pass_bytes(path)?;
     let digest = Digest::of(&bytes);
-    let text = String::from_utf8(bytes).map_err(|_| Error::Invalid {
+    let text = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid {
         path: path.to_path_buf(),
         problems: vec![crate::pass::Problem {
             field: "(file)".to_owned(),
             message: "the file is not UTF-8 text; save it as UTF-8".to_owned(),
         }],
     })?;
-    let pass = Pass::parse(&text).map_err(|problems| Error::Invalid {
+    let pass = Pass::parse(text).map_err(|problems| Error::Invalid {
         path: path.to_path_buf(),
         problems,
     })?;
-    Ok(LoadedPass {
-        pass,
-        digest,
-        path: path.to_path_buf(),
-    })
+    Ok((
+        LoadedPass {
+            pass,
+            digest,
+            path: path.to_path_buf(),
+        },
+        bytes,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_writer_deadlines_leave_time_for_more_probes() {
+        let short = Duration::from_millis(4);
+        let first = WriterWait::poll_interval(short);
+        assert!(first > Duration::ZERO && first < short);
+        let remaining = short.checked_sub(first).expect("within deadline");
+        let second = WriterWait::poll_interval(remaining);
+        assert!(second > Duration::ZERO && second < remaining);
+        assert_eq!(
+            WriterWait::poll_interval(Duration::from_secs(1)),
+            Duration::from_millis(5)
+        );
+        // Honor even the smallest residual budget, without a zero-length sleep.
+        assert_eq!(
+            WriterWait::poll_interval(Duration::from_nanos(1)),
+            Duration::from_nanos(1)
+        );
+    }
 
     #[test]
     fn digest_round_trip() {
