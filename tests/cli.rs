@@ -307,6 +307,27 @@ fn check_refuses_timestamp_without_offset_and_reports_all() {
 }
 
 #[test]
+fn a_window_end_beyond_the_calendar_is_a_problem_not_a_crash() {
+    // Year 10000 in UTC. `check` used to accept it and `status` and
+    // `permits` then aborted with exit code 101 and no message.
+    let text = PASS.replace("2026-11-20T17:00:00Z", "9999-12-31T23:59:59-01:00");
+    let p = check_problems(&text);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert_eq!(p[0].0, "approval.valid_until");
+    let case = Case::new();
+    let file = case.pass("p.toml", &text);
+    for args in [
+        vec!["status", s(&file)],
+        vec!["permits", s(&file), "--to", "192.0.2.10:5060/udp"],
+        vec!["spend", s(&file), "calls"],
+    ] {
+        let (rc, out) = json(&args, Some(NOW));
+        assert_eq!(rc, 1, "{args:?}: {out}");
+        assert_eq!(out["error"]["code"], "invalid-pass", "{args:?}");
+    }
+}
+
+#[test]
 fn check_refuses_bad_toml_and_files() {
     let p = check_problems("format = 1\nid = \n");
     assert_eq!(p[0].0, "(file)");

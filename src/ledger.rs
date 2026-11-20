@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime};
 
-use crate::decision::{Refusal, RefusalCode, stamp};
+use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
 use crate::error::{Error, MissingLedger};
 use crate::files::{Digest, LoadedPass, load, open_no_follow};
 use crate::pass::{MAX_CEILING, is_counter_name};
@@ -944,9 +944,21 @@ fn lock_for_writing(pass_path: &Path, state: &StateDir, adopting: bool) -> Resul
 }
 
 fn rfc3339(now: OffsetDateTime) -> String {
-    now.to_offset(UtcOffset::UTC)
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| stamp(now))
+    in_utc(now)
+        .and_then(|utc| utc.format(&Rfc3339).ok())
+        .unwrap_or_else(|| stamp(now))
+}
+
+/// Refuse a clock that cannot be written into the ledger (a UTC year
+/// outside 0001 to 9999), before anything is touched.
+fn check_clock(now: OffsetDateTime) -> Result<(), Error> {
+    if in_utc(now).is_some() {
+        return Ok(());
+    }
+    Err(Error::Usage(format!(
+        "the clock says {}, which is outside the years 0001 to 9999 in UTC; fix the clock the caller passes. Nothing was recorded",
+        stamp(now)
+    )))
 }
 
 /// Append one line (without its newline) to the locked ledger and sync it.
@@ -1008,6 +1020,7 @@ pub fn spend_in(
     now: OffsetDateTime,
     state: &StateDir,
 ) -> Result<SpendOutcome, Error> {
+    check_clock(now)?;
     if request.amount == 0 || request.amount > MAX_CEILING {
         return Err(Error::Usage(format!(
             "the amount must be a whole number from 1 to {MAX_CEILING}; nothing was recorded"
@@ -1138,6 +1151,7 @@ pub fn adopt(
     now: OffsetDateTime,
     state: &StateDir,
 ) -> Result<AdoptOutcome, Error> {
+    check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     let mut locked = lock_for_writing(pass_path, state, true)?;
     let id = locked.loaded.pass.id.clone();
@@ -1843,6 +1857,27 @@ mod tests {
         let v = view(&path, &state).expect("read");
         assert!(matches!(v.witness, WitnessStatus::NotChecked { .. }));
         assert!(v.warnings[0].contains("chmod 700"), "{:?}", v.warnings);
+    }
+
+    #[test]
+    fn a_clock_outside_the_calendar_is_refused_not_a_panic() {
+        let (_dir, path, state) = setup();
+        ok(&path, &state, "calls", 1);
+        fs::remove_file(ledger_path(&path)).expect("lose");
+        // Year 10000 in UTC: it cannot be written into the ledger.
+        let edge = datetime!(9999-12-31 23:59:59 -1);
+        for result in [
+            adopt(&path, "lost", edge, &state).map(|_| ()),
+            spend_in(&path, &request("calls", 1), edge, &state).map(|_| ()),
+        ] {
+            match result {
+                Err(Error::Usage(message)) => {
+                    assert!(message.contains("clock"), "{message}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(!ledger_path(&path).exists(), "nothing was recorded");
     }
 
     #[test]

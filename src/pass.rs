@@ -182,6 +182,16 @@ impl Walker {
                 kind(other)
             )),
         };
+        // Kept in UTC. A timestamp that has no UTC form in the years 0001
+        // to 9999 (9999-12-31T23:59:59-01:00) cannot be compared or shown.
+        let parsed = parsed.and_then(|instant| {
+            crate::decision::in_utc(instant).ok_or_else(|| {
+                format!(
+                    "`{}` is outside the years 0001 to 9999 in UTC; copy the timestamp from the written approval ({example})",
+                    crate::decision::stamp(instant)
+                )
+            })
+        });
         match parsed {
             Ok(instant) => Some(instant),
             Err(message) => {
@@ -1057,6 +1067,45 @@ requests = 500
         assert_eq!(fields(&text), vec!["id"]);
         let text = GOOD.replace("format = 1", "format = 1\nformat = 1");
         assert_eq!(fields(&text), vec!["(file)"]);
+    }
+
+    #[test]
+    fn a_window_that_does_not_fit_in_utc_is_refused_not_a_panic() {
+        // 9999-12-31T23:59:59-01:00 is year 10000 in UTC; every later
+        // `stamp` of it used to panic (status, permits, and library users).
+        for (from, to) in [
+            (
+                "valid_until = \"2026-11-20T18:00:00+01:00\"",
+                "valid_until = 9999-12-31T23:59:59-01:00",
+            ),
+            (
+                "valid_until = \"2026-11-20T18:00:00+01:00\"",
+                "valid_until = \"9999-12-31T23:59:59-01:00\"",
+            ),
+        ] {
+            let text = GOOD.replace(from, to);
+            assert_ne!(text, GOOD);
+            let p = problems(&text);
+            assert_eq!(p.len(), 1, "{p:?}");
+            assert_eq!(p[0].field, "approval.valid_until");
+            assert!(p[0].message.contains("0001 to 9999"), "{p:?}");
+        }
+        // Year 0 and earlier in UTC is not a real approval either.
+        let text = GOOD.replace(
+            "valid_from = 2026-11-20T08:00:00Z",
+            "valid_from = 0000-01-01T00:00:00+01:00",
+        );
+        assert_eq!(fields(&text), vec!["approval.valid_from"]);
+        // The last representable second is still a timestamp.
+        let text = GOOD.replace(
+            "valid_until = \"2026-11-20T18:00:00+01:00\"",
+            "valid_until = 9999-12-31T23:59:59Z",
+        );
+        let pass = Pass::parse(&text).expect("valid");
+        assert_eq!(
+            crate::decision::stamp(pass.approval.valid_until),
+            "9999-12-31T23:59:59Z"
+        );
     }
 
     fn with_names(value: &str) -> Result<Pass, Vec<Problem>> {

@@ -141,10 +141,40 @@ pub enum Decision {
     Refused(Refusal),
 }
 
+/// `instant` in UTC, when its UTC form is a date this library can hold
+/// (years 0001 to 9999). `9999-12-31T23:59:59-01:00` is not: it is year
+/// 10000 in UTC.
+pub(crate) fn in_utc(instant: OffsetDateTime) -> Option<OffsetDateTime> {
+    instant
+        .checked_to_offset(time::UtcOffset::UTC)
+        .filter(|utc| (1..=9999).contains(&utc.year()))
+}
+
 /// `2026-11-20T08:00:00Z`: UTC, whole seconds.
+///
+/// An instant whose UTC form is outside the years 0001 to 9999 is written
+/// with its own offset instead (a validated pass never holds one).
 #[must_use]
 pub fn stamp(instant: OffsetDateTime) -> String {
-    let utc = instant.to_offset(time::UtcOffset::UTC);
+    let Some(utc) = in_utc(instant) else {
+        let (h, m, _) = instant.offset().as_hms();
+        return format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
+            instant.year(),
+            u8::from(instant.month()),
+            instant.day(),
+            instant.hour(),
+            instant.minute(),
+            instant.second(),
+            if instant.offset().is_negative() {
+                '-'
+            } else {
+                '+'
+            },
+            h.unsigned_abs(),
+            m.unsigned_abs()
+        );
+    };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         utc.year(),
@@ -598,6 +628,21 @@ mod tests {
             stamp(datetime!(2026-11-20 09:00 +01:00)),
             "2026-11-20T08:00:00Z"
         );
+    }
+
+    #[test]
+    fn stamp_never_panics() {
+        // Year 10000 in UTC cannot be shown as a UTC stamp; it is shown with
+        // its own offset instead of aborting the caller.
+        let edge = datetime!(9999-12-31 23:59:59 -1);
+        assert_eq!(stamp(edge), "9999-12-31T23:59:59-01:00");
+        let low = datetime!(-9999-01-01 00:00 +1);
+        assert!(!stamp(low).is_empty());
+        // Deciding at such an instant does not panic either.
+        let p = pass();
+        assert!(matches!(p.window_at(edge), WindowState::Expired { .. }));
+        assert!(p.check_window(edge, Duration::MAX).is_err());
+        assert!(matches!(p.window_at(low), WindowState::NotYetValid { .. }));
     }
 
     const NAMED: &str = r#"

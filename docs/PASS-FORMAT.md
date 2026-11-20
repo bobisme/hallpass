@@ -80,7 +80,9 @@ Timestamps are RFC 3339 with an explicit offset: `2026-11-20T08:00:00Z` or
 `2026-11-20T09:00:00+01:00`. Both TOML's unquoted date-time and a quoted
 string are accepted. A local time without an offset (`2026-11-20T08:00:00`)
 and a bare date are refused: their instant depends on the reader's time
-zone. Fractions of a second are kept.
+zone. Fractions of a second are kept. The instant must fall in the years
+0001 to 9999 in UTC (`9999-12-31T23:59:59-01:00` is refused: it is year
+10000 in UTC).
 
 A revoked pass permits nothing, whatever its window. `spend` reads the file
 again under the ledger lock, so setting `revoked = true` stops the next
