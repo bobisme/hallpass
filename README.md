@@ -1,6 +1,6 @@
 # hallpass
 
-![Two faceless, cloaked figures exchange a paper pass beside a stone bridge leading through mist to a lit archway.](docs/hallpass.webp)
+![HALLPASS — Permission slips for authorized tests. Two cloaked figures exchange a paper pass beside a misty stone bridge.](docs/hallpass.webp)
 
 A pass is the written permission slip for an authorized test: who approved
 it, which literal network destinations may be touched, from when until
