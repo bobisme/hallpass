@@ -127,3 +127,13 @@
 1795198416558023	codex	itc:AQ		item.link	bn-2vs	{"link_type":"related_to","target":"bn-1cu"}	blake3:oCCTYjLarmOPlSMISqu2PUCRkx7JSqhY1aQAWVKBRHo
 1795198416671961	codex	itc:AQ		item.link	bn-37i	{"link_type":"related_to","target":"bn-3bz"}	blake3:SC3hE6xhnC66LFNwkRSKl0587ZEDToM5vK8MKRyUSAY
 1795198416785279	codex	itc:AQ		item.link	bn-2yl	{"link_type":"related_to","target":"bn-1na"}	blake3:RexZ9h0COD1VbtGI5RaY1p62uwWqGzZnPccdJbx4LWY
+1795199038917612	codex	itc:AQ		item.move	bn-649	{"state":"doing"}	blake3:cTfLiFl1z8o0ISnmKKOs07T5Cy6edyU14idHCPAZK48
+1795199038933266	codex	itc:AQ		item.assign	bn-649	{"action":"assign","agent":"codex"}	blake3:m4iZ2i0OoxySrJmjLthjqnGIiIfmv68Gmsm-UK8F5YA
+1795199038933919	codex	itc:AQ		item.move	bn-37i	{"state":"doing"}	blake3:Mr3wRxNqBqcMpiBoX70WXJLCUwwQwjXisdbLBm1GGAk
+1795199038934613	codex	itc:AQ		item.assign	bn-37i	{"action":"assign","agent":"codex"}	blake3:M2HVrrupiJRUm-lg9iff8htPDxWPb9cqIgGpfWcrbuc
+1795199038950508	account	itc:AQ		item.move	bn-283	{"state":"doing"}	blake3:XM7uQ6cdShoazGes7Q8asFokn3esoZbERiJjQX7WOEA
+1795199038960932	account	itc:AQ		item.assign	bn-283	{"action":"assign","agent":"account"}	blake3:QglHmLaBtmi9zcc0KPkQzu4My3VePXPqHISUoifcWOY
+1795199038977717	evidence	itc:AQ		item.move	bn-677	{"state":"doing"}	blake3:3of8_MujjDN3sMIhVH3ZFC8LUFO24Irwddxg1jxz_2I
+1795199038987873	evidence	itc:AQ		item.assign	bn-677	{"action":"assign","agent":"evidence"}	blake3:bJ2Xnl9lxvBjcG1K-ZlYSYResWvggiwwV16eRkKxKk8
+1795199039002686	review	itc:AQ		item.move	bn-1cu	{"state":"doing"}	blake3:-rpu0tIFI8uAoD3lqjoIYaSNLcOusg9zMBDoMk27z-M
+1795199039013307	review	itc:AQ		item.assign	bn-1cu	{"action":"assign","agent":"review"}	blake3:ifMMpb92UeIVJukE6tMnDWkd6Lx2d90V-W2tAsWenZo
