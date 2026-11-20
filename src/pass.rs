@@ -592,7 +592,7 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
             let field = join(p, "hostname");
             let name = w.text_value(value, &field, 253);
             if let Some(n) = &name {
-                if n.parse::<IpAddr>().is_ok() {
+                if n.parse::<IpAddr>().is_ok() || crate::name::ends_in_number(n) {
                     w.problem(
                         &field,
                         "holds an address; addresses go in `address` or `network`. `hostname` is only what the owner calls it",
@@ -1024,6 +1024,14 @@ requests = 500
         assert_eq!(problems(&ports).len(), 3);
         let host = GOOD.replace("sip.example.net", "192.0.2.10");
         assert_eq!(fields(&host), vec!["destination[1].hostname"]);
+        for ambiguous in ["010.0.2.10", "192.0.2", "3221225994", "0xc000020a"] {
+            let host = GOOD.replace("sip.example.net", ambiguous);
+            assert_eq!(
+                fields(&host),
+                vec!["destination[1].hostname"],
+                "{ambiguous}"
+            );
+        }
         let none = GOOD
             .split("[[destination]]")
             .next()

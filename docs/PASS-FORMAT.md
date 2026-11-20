@@ -120,6 +120,10 @@ alone would also approve every other party on it. `names` closes that gap.
 - Names are written in full, in lower case, without a trailing dot. There
   are no wildcards. An internationalized name is written in its `xn--`
   form. At most 64 names per destination; an empty list is refused.
+- A name whose last part is a number (`10.1`, `010.0.0.1`, `2130706433`,
+  `0x7f000001`, `example.123`) is refused, in a pass and in a query:
+  `inet_aton` and URL parsers read it as an IPv4 address, in exactly the
+  spellings the address rules refuse. The same holds for `hostname`.
 - A query's name is compared without regard to case, and one trailing dot
   is ignored.
 - hallpass is advisory, and this check more than most: nothing on the

@@ -15,8 +15,9 @@ pub const MAX_NAMES: usize = 64;
 ///
 /// ASCII lower case, no trailing dot, at most 253 characters, labels of 1
 /// to 63 letters, digits, `-` or `_` that do not start or end with `-`. No
-/// wildcards, and not an IP address. An internationalized name is written
-/// in its `xn--` form.
+/// wildcards, not an IP address, and not a name whose last label is a
+/// number (tools read `10.1` or `0x7f000001` as an IPv4 address). An
+/// internationalized name is written in its `xn--` form.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HostName(String);
 
@@ -51,6 +52,18 @@ impl fmt::Display for HostName {
     }
 }
 
+/// True when the last dot-separated part of `text` is a number: all digits,
+/// or `0x` and hexadecimal digits. `inet_aton` and URL parsers read such a
+/// host as an IPv4 address (`2130706433`, `0x7f.0.0.1`, `10.1`,
+/// `010.0.0.1`), so it is never a host name here. No top-level domain is a
+/// number.
+pub(crate) fn ends_in_number(text: &str) -> bool {
+    let last = text.rsplit('.').next().unwrap_or(text);
+    let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
+    (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+        || hex.is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Reads a name as a tool would ask about it: upper case and one trailing
 /// dot are accepted and removed.
 impl FromStr for HostName {
@@ -75,6 +88,11 @@ impl FromStr for HostName {
         if trimmed.parse::<IpAddr>().is_ok() {
             return Err(format!(
                 "`{text}` is an address, not a name; addresses go in `address` or `network`"
+            ));
+        }
+        if ends_in_number(trimmed) {
+            return Err(format!(
+                "`{text}` ends in a number, so tools read it as an IPv4 address (in a shortened, octal or hexadecimal spelling) and not as a name; write the host name, and put an address in `address` or `network`"
             ));
         }
         if trimmed.len() > 253 {
@@ -142,6 +160,41 @@ mod tests {
             long_name.as_str(),
         ] {
             assert!(bad.parse::<HostName>().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn spellings_that_tools_read_as_ipv4_are_not_names() {
+        // The address parser refuses these as ambiguous addresses; a name
+        // must not let them back in. inet_aton and URL parsers read a host
+        // whose last part is a number as an IPv4 address.
+        for bad in [
+            "010.0.0.1",
+            "10.1",
+            "192.0.2",
+            "2130706433",
+            "0x7f.0.0.1",
+            "0x7f000001",
+            "0X7F000001",
+            "1.2.3.4.5",
+            "example.123",
+            "example.0x1f",
+            "foo.0x",
+            "2130706433.",
+        ] {
+            let message = bad.parse::<HostName>().expect_err(bad);
+            assert!(message.contains("ends in a number"), "{bad}: {message}");
+            assert!(HostName::canonical(bad).is_err(), "{bad}");
+        }
+        // A number elsewhere, or letters in the last part, is a name.
+        for good in [
+            "1.example",
+            "123.example.com",
+            "0x7f.example",
+            "a.x1",
+            "a.1a",
+        ] {
+            assert!(good.parse::<HostName>().is_ok(), "{good}");
         }
     }
 
