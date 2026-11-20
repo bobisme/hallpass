@@ -57,7 +57,7 @@ impl fmt::Display for HostName {
 /// host as an IPv4 address (`2130706433`, `0x7f.0.0.1`, `10.1`,
 /// `010.0.0.1`), so it is never a host name here. No top-level domain is a
 /// number.
-pub(crate) fn ends_in_number(text: &str) -> bool {
+pub fn ends_in_number(text: &str) -> bool {
     let last = text.rsplit('.').next().unwrap_or(text);
     let hex = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X"));
     (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))

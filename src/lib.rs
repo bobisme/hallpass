@@ -53,6 +53,7 @@ mod decision;
 mod error;
 mod files;
 mod ledger;
+mod literal;
 mod name;
 mod pass;
 mod ports;

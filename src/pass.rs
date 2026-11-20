@@ -307,7 +307,7 @@ impl Pass {
             }]
         })?;
         let mut w = Walker {
-            problems: Vec::new(),
+            problems: crate::literal::problems(text),
         };
         w.unknown_keys(
             &table,
@@ -1114,6 +1114,94 @@ requests = 500
             crate::decision::stamp(pass.approval.valid_until),
             "9999-12-31T23:59:59Z"
         );
+    }
+
+    #[test]
+    fn numbers_are_written_in_plain_decimal() {
+        // TOML also reads 0x10 (16), 0o17 (15), 0b110 (6), 1_0 (10) and +6.
+        // A reviewer may not: one spelling per number, as for addresses.
+        for (from, to, field) in [
+            ("calls = 6", "calls = 0x10", "ceilings.calls"),
+            ("calls = 6", "calls = 0o17", "ceilings.calls"),
+            ("calls = 6", "calls = 0b110", "ceilings.calls"),
+            ("calls = 6", "calls = 1_0", "ceilings.calls"),
+            ("calls = 6", "calls = +6", "ceilings.calls"),
+            ("ports = 443", "ports = 0x1BB", "destination[2].ports"),
+            (
+                "ports = [5060, \"10000-10100\"]",
+                "ports = [5060, 1_0000]",
+                "destination[1].ports[2]",
+            ),
+            ("format = 1", "format = 0x1", "format"),
+        ] {
+            let text = GOOD.replace(from, to);
+            assert_ne!(text, GOOD, "{to}");
+            let p = problems(&text);
+            assert_eq!(p.len(), 1, "{to}: {p:?}");
+            assert_eq!(p[0].field, field, "{to}");
+            assert!(p[0].message.contains("plain decimal"), "{to}: {p:?}");
+        }
+        let hex = problems(&GOOD.replace("calls = 6", "calls = 0x10"));
+        assert!(hex[0].message.contains("16"), "{hex:?}");
+        // Still one problem, with its own message, for these.
+        for (to, count) in [("calls = -1", 1), ("calls = 0", 0)] {
+            let text = GOOD.replace("calls = 6", to);
+            assert_eq!(
+                Pass::parse(&text).err().map_or(0, |p| p.len()),
+                count,
+                "{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn strings_are_written_without_escapes() {
+        // "192.0.2.1\u0030" is 192.0.2.10 to TOML; the reviewer must read
+        // the same characters the tool uses.
+        for (from, to, field) in [
+            (
+                "address = \"192.0.2.10\"",
+                "address = \"192.0.2.1\\u0030\"",
+                "destination[1].address",
+            ),
+            (
+                "protocol = \"udp\"",
+                "protocol = \"\\u0075dp\"",
+                "destination[1].protocol",
+            ),
+            (
+                "owner = \"Pat Owner, Example Corp\"",
+                "owner = \"Pat \\u004fwner\"",
+                "approval.owner",
+            ),
+            (
+                "id = \"acme-2026-11\"",
+                "id = \"\"\"acme-\\\n  2026-11\"\"\"",
+                "id",
+            ),
+            ("calls = 6", "\"c\\u0061lls\" = 6", "ceilings.calls"),
+        ] {
+            let text = GOOD.replace(from, to);
+            assert_ne!(text, GOOD, "{to}");
+            let p = problems(&text);
+            assert_eq!(p.len(), 1, "{to}: {p:?}");
+            assert_eq!(p[0].field, field, "{to}");
+            assert!(p[0].message.contains("escape"), "{to}: {p:?}");
+        }
+        // A quote or a backslash in free text, and literal strings, are fine.
+        let text = GOOD
+            .replace(
+                "name = \"Example voice edge\"",
+                "name = \"The \\\"voice\\\" edge, C:\\\\share\"",
+            )
+            .replace(
+                "reference = \"email of 2026-11-18\"",
+                "reference = 'email \\u0041 of 2026-11-18'",
+            )
+            .replace("address = \"192.0.2.10\"", "address = '192.0.2.10'");
+        let pass = Pass::parse(&text).expect("valid");
+        assert_eq!(pass.name, "The \"voice\" edge, C:\\share");
+        assert_eq!(pass.approval.reference, "email \\u0041 of 2026-11-18");
     }
 
     fn with_names(value: &str) -> Result<Pass, Vec<Problem>> {

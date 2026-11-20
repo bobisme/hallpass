@@ -46,6 +46,14 @@ requests = 500
   `revoked_reason`, `hostname`) must be quoted strings on one line: no
   control characters (newline, tab), no leading or trailing spaces, not
   empty.
+- **Numbers** (`format`, ports, ceilings) are plain decimal digits. TOML's
+  other spellings are refused: `0x10`, `0o17`, `0b110`, `1_000`, `+6`. A
+  reviewer who reads `0x10` as 10 would approve less than the 16 a tool
+  would use.
+- **Strings and quoted keys are written with the characters they hold.**
+  A backslash escape such as `\u0030` or `\x41`, or a line-continuation
+  backslash, is refused (`"192.0.2.1\u0030"` is `192.0.2.10` to TOML). Only
+  `\"` and `\\` are accepted; a single-quoted string has no escapes.
 - **The file** must be UTF-8, at most 1 MiB, a regular file (not a symbolic
   link), and not writable by group or others (mode 0600 or 0644; `init`
   writes 0600).
