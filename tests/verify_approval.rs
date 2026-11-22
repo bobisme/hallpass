@@ -110,3 +110,198 @@ fn signature_binds_principal_namespace_and_exact_validated_bytes() {
     );
     assert!(!dir.join("state").exists());
 }
+
+#[test]
+fn archive_retains_the_snapshot_sent_to_the_verifier_after_path_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("private directory");
+    let dir = dir.path();
+    keygen(dir, &["-q", "-t", "ed25519", "-N", "", "-f", "owner"]);
+    let public = fs::read_to_string(dir.join("owner.pub")).expect("public key");
+    fs::write(dir.join("trust"), format!("owner@example.org {public}")).expect("trust");
+    let original = PASS.replace('\n', "\r\n");
+    fs::write(dir.join("approval"), &original).expect("pass");
+    fs::set_permissions(dir.join("approval"), fs::Permissions::from_mode(0o600))
+        .expect("private pass");
+    keygen(
+        dir,
+        &[
+            "-q",
+            "-Y",
+            "sign",
+            "-f",
+            "owner",
+            "-n",
+            "hallpass-approval-v1",
+            "approval",
+        ],
+    );
+
+    let real = Command::new("which")
+        .arg("ssh-keygen")
+        .output()
+        .expect("which ssh-keygen");
+    assert!(real.status.success());
+    let real = String::from_utf8(real.stdout).expect("path");
+    let wrapper = dir.join("bin");
+    fs::create_dir(&wrapper).expect("bin");
+    let capture = dir.join("captured");
+    let script = "#!/bin/sh\n/usr/bin/cat > \"$HALLPASS_TEST_CAPTURE\"\nprintf '\\n# replaced after verifier read\\n' >> \"$HALLPASS_TEST_SOURCE\"\nexec \"$HALLPASS_TEST_REAL\" \"$@\" < \"$HALLPASS_TEST_CAPTURE\"\n";
+    let shim = wrapper.join("ssh-keygen");
+    fs::write(&shim, script).expect("shim");
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).expect("executable shim");
+
+    let archive = dir.join("archive");
+    fs::create_dir(&archive).expect("archive");
+    fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).expect("private archive");
+    let out = Command::new(env!("CARGO_BIN_EXE_hallpass"))
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env("PATH", &wrapper)
+        .env("HALLPASS_TEST_CAPTURE", &capture)
+        .env("HALLPASS_TEST_SOURCE", dir.join("approval"))
+        .env("HALLPASS_TEST_REAL", real.trim())
+        .arg("--json")
+        .args([
+            "verify-approval",
+            "approval",
+            "--signature",
+            "approval.sig",
+            "--allowed-signers",
+            "trust",
+            "--principal",
+            "owner@example.org",
+            "--archive",
+        ])
+        .arg(&archive)
+        .output()
+        .expect("verify");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(value["archive"], archive.display().to_string());
+    assert_eq!(
+        value["digest"],
+        hallpass::Digest::of(original.as_bytes()).to_string()
+    );
+    let digest = value["digest"]
+        .as_str()
+        .expect("digest text")
+        .parse::<hallpass::Digest>()
+        .expect("digest");
+    assert_eq!(
+        hallpass::retrieve_pass(&archive, digest).expect("retrieve"),
+        original.as_bytes()
+    );
+    assert_ne!(
+        fs::read(dir.join("approval")).expect("replacement"),
+        original.as_bytes()
+    );
+}
+
+#[test]
+fn archive_is_published_only_after_success_and_checks_private_content_addressing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("private directory");
+    let dir = dir.path();
+    keygen(dir, &["-q", "-t", "ed25519", "-N", "", "-f", "owner"]);
+    let public = fs::read_to_string(dir.join("owner.pub")).expect("public key");
+    fs::write(dir.join("trust"), format!("owner@example.org {public}")).expect("trust");
+    fs::write(dir.join("approval"), PASS).expect("pass");
+    fs::set_permissions(dir.join("approval"), fs::Permissions::from_mode(0o600))
+        .expect("private pass");
+    keygen(
+        dir,
+        &[
+            "-q",
+            "-Y",
+            "sign",
+            "-f",
+            "owner",
+            "-n",
+            "hallpass-approval-v1",
+            "approval",
+        ],
+    );
+    fs::copy(dir.join("approval"), dir.join("approval-wrong-namespace")).expect("copy pass");
+    keygen(
+        dir,
+        &[
+            "-q",
+            "-Y",
+            "sign",
+            "-f",
+            "owner",
+            "-n",
+            "wrong-namespace",
+            "approval-wrong-namespace",
+        ],
+    );
+    let archive = dir.join("archive");
+    fs::create_dir(&archive).expect("archive");
+    fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).expect("private archive");
+    let run = |signature: &str, principal: &str, archive_path: &Path| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hallpass"));
+        cmd.current_dir(dir)
+            .env("HOME", dir)
+            .arg("--json")
+            .args([
+                "verify-approval",
+                "approval",
+                "--signature",
+                signature,
+                "--allowed-signers",
+                "trust",
+                "--principal",
+                principal,
+                "--archive",
+            ])
+            .arg(archive_path);
+        cmd.output().expect("verify")
+    };
+    let wrong_sig = run("approval.sig", "other@example.org", &archive);
+    assert_eq!(wrong_sig.status.code(), Some(2));
+    assert_eq!(fs::read_dir(&archive).expect("empty archive").count(), 0);
+    let wrong_namespace = run(
+        "approval-wrong-namespace.sig",
+        "owner@example.org",
+        &archive,
+    );
+    assert_eq!(wrong_namespace.status.code(), Some(2));
+    assert_eq!(fs::read_dir(&archive).expect("empty archive").count(), 0);
+    let first = run("approval.sig", "owner@example.org", &archive);
+    assert_eq!(first.status.code(), Some(0));
+    let first: Value = serde_json::from_slice(&first.stdout).expect("json");
+    let digest = first["digest"].as_str().expect("digest").to_owned();
+    let second = run("approval.sig", "owner@example.org", &archive);
+    assert_eq!(second.status.code(), Some(0));
+    let second: Value = serde_json::from_slice(&second.stdout).expect("json");
+    assert_eq!(second["digest"], digest);
+    assert_eq!(fs::read_dir(&archive).expect("one entry").count(), 1);
+
+    let insecure = dir.join("insecure");
+    fs::create_dir(&insecure).expect("insecure archive");
+    fs::set_permissions(&insecure, fs::Permissions::from_mode(0o755)).expect("mode");
+    assert_eq!(
+        run("approval.sig", "owner@example.org", &insecure)
+            .status
+            .code(),
+        Some(1)
+    );
+    let conflict = archive.join(digest);
+    fs::write(&conflict, b"bad entry").expect("damage");
+    fs::set_permissions(&conflict, fs::Permissions::from_mode(0o600)).expect("private entry");
+    assert_eq!(
+        run("approval.sig", "owner@example.org", &archive)
+            .status
+            .code(),
+        Some(1)
+    );
+}

@@ -85,8 +85,9 @@ fn guide(name: &str) -> Guide {
         "verify-approval" => (
             &[
                 "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org",
+                "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive",
             ],
-            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. Those live operations check current policy.",
+            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. With --archive, the exact verified bytes are retained after signature success; keep the detached signature, trust file and expected principal separately to verify them again. Those live operations check current policy.",
         ),
         "diff" => (
             &[
@@ -106,8 +107,11 @@ fn guide(name: &str) -> Guide {
             "Inspect findings for overlapping destination names and ports, and truncated for omitted findings. Lint is advisory and can return exit 0 with findings.",
         ),
         "test-pass" => (
-            &["hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml"],
-            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. Inspect mismatches and results. All evaluations are offline.",
+            &[
+                "hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml",
+                "hallpass --format json test-pass engagement.pass.toml owner-suite.toml --strength",
+            ],
+            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. --strength evaluates the baseline, then bounded in-memory copies with destination names removed or an adjacent valid port added. Inspect mutation_strength.mutations and first_distinguishing_case. Survivors and partial analysis exit 2; survivors are review prompts. All evaluations are offline.",
         ),
         "approval-id" => (
             &[
