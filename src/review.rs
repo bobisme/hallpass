@@ -452,7 +452,17 @@ pub fn breadth_warnings(b: &Breadth) -> Vec<String> {
 ///
 /// Returns an error for malformed TOML, unknown fields, duplicate IDs, or an
 /// invalid target, timestamp, duration, or expected decision code.
-pub fn cases(pass: &Pass, text: &str) -> Result<Vec<serde_json::Value>, String> {
+#[derive(Clone)]
+struct ReviewCase {
+    id: String,
+    expected: String,
+    target: Target,
+    name: Option<HostName>,
+    now: OffsetDateTime,
+    duration: u32,
+}
+
+fn parse_cases(text: &str) -> Result<Vec<ReviewCase>, String> {
     const CODES: &[&str] = &[
         "allowed",
         "not-yet-valid",
@@ -541,16 +551,206 @@ pub fn cases(pass: &Pass, text: &str) -> Result<Vec<serde_json::Value>, String> 
                 "case.expected `{expected}` is not a stable decision code"
             ));
         }
-        let actual = match pass.permits_named(
-            &target,
-            name.as_ref(),
+        out.push(ReviewCase {
+            id: id.to_owned(),
+            expected: expected.to_owned(),
+            target,
+            name,
             now,
-            Duration::seconds(i64::from(duration)),
-        ) {
-            Decision::Allowed { .. } => "allowed".to_owned(),
-            Decision::Refused(r) => r.code.as_str().to_owned(),
-        };
-        out.push(serde_json::json!({"id":id,"expected":expected,"actual":actual,"duration":duration,"match":expected==actual}));
+            duration,
+        });
     }
     Ok(out)
+}
+
+fn evaluate_cases(pass: &Pass, cases: &[ReviewCase]) -> Vec<serde_json::Value> {
+    cases
+        .iter()
+        .map(|case| {
+            let actual = match pass.permits_named(
+                &case.target,
+                case.name.as_ref(),
+                case.now,
+                Duration::seconds(i64::from(case.duration)),
+            ) {
+            Decision::Allowed { .. } => "allowed".to_owned(),
+            Decision::Refused(r) => r.code.as_str().to_owned(),
+            };
+            serde_json::json!({"id":case.id,"expected":case.expected,"actual":actual,"duration":case.duration,"match":case.expected==actual})
+        })
+        .collect()
+}
+
+/// Evaluate a validated suite against one pass using the ordinary decision
+/// engine.
+///
+/// # Errors
+///
+/// If the suite is malformed or contains invalid cases.
+pub fn cases(pass: &Pass, text: &str) -> Result<Vec<serde_json::Value>, String> {
+    Ok(evaluate_cases(pass, &parse_cases(text)?))
+}
+
+/// Run an owner's suite against the real pass and bounded in-memory policy
+/// mutations. Survivors identify changes the suite did not distinguish.
+///
+/// # Errors
+///
+/// If the suite is malformed or contains invalid cases.
+#[allow(clippy::too_many_lines)]
+pub fn mutation_strength(pass: &Pass, text: &str) -> Result<serde_json::Value, String> {
+    const MAX_MUTATIONS: usize = 64;
+    const MAX_EVALUATIONS: usize = 4_096;
+
+    #[derive(Clone)]
+    enum Edit {
+        RemoveNames { index: usize },
+        AddPort { index: usize, port: u16 },
+    }
+    struct Candidate {
+        label: String,
+        changed_term: String,
+        edit: Edit,
+    }
+    fn push_candidate(candidates: &mut Vec<Candidate>, candidate: Candidate, limit: usize) -> bool {
+        if candidates.len() == limit {
+            true
+        } else {
+            candidates.push(candidate);
+            false
+        }
+    }
+    let parsed = parse_cases(text)?;
+    let baseline = evaluate_cases(pass, &parsed);
+    let baseline_failed = baseline.iter().any(|row| row["match"] != true);
+    if baseline_failed {
+        return Ok(serde_json::json!({
+            "result": "baseline-failed",
+            "baseline": "failed",
+            "baseline_cases": baseline.len(),
+            "baseline_mismatches": baseline.iter().filter(|row| row["match"] != true).count(),
+            "mutations_tested": 0,
+            "mutations_survived": 0,
+            "evaluations": baseline.len(),
+            "truncated": false,
+            "mutations": [],
+            "note": "Mutation analysis requires a passing baseline suite."
+        }));
+    }
+    let mut candidates = Vec::new();
+    let mut candidate_overflow = false;
+    for (index, destination) in pass.destinations.iter().enumerate() {
+        if !destination.names.is_empty() {
+            let before = destination
+                .names
+                .iter()
+                .map(HostName::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            candidate_overflow = push_candidate(
+                &mut candidates,
+                Candidate {
+                    label: destination.label.clone(),
+                    changed_term: format!(
+                        "destination[{}].names: [{before}] -> []",
+                        destination.label
+                    ),
+                    edit: Edit::RemoveNames { index },
+                },
+                MAX_MUTATIONS,
+            );
+            if candidate_overflow {
+                break;
+            }
+        }
+        let ranges = destination.ports.normalized_ranges();
+        let mut adjacent_ports = BTreeSet::new();
+        for &(start, end) in &ranges {
+            for (port, side) in [
+                (start.checked_sub(1).filter(|port| *port > 0), "lower"),
+                (end.checked_add(1), "upper"),
+            ] {
+                let Some(port) = port else { continue };
+                if !adjacent_ports.insert(port) {
+                    continue;
+                }
+                candidate_overflow = push_candidate(
+                    &mut candidates,
+                    Candidate {
+                        label: destination.label.clone(),
+                        changed_term: format!(
+                            "destination[{}].ports: add adjacent port {port} ({side} endpoint)",
+                            destination.label
+                        ),
+                        edit: Edit::AddPort { index, port },
+                    },
+                    MAX_MUTATIONS,
+                );
+                if candidate_overflow {
+                    break;
+                }
+            }
+            if candidate_overflow {
+                break;
+            }
+        }
+        if candidate_overflow {
+            break;
+        }
+    }
+    let mut evaluations = baseline.len();
+    let mut reports = Vec::new();
+    for candidate in &candidates {
+        if evaluations.saturating_add(parsed.len()) > MAX_EVALUATIONS {
+            candidate_overflow = true;
+            break;
+        }
+        let mut mutated = pass.clone();
+        match &candidate.edit {
+            Edit::RemoveNames { index } => mutated.destinations[*index].names.clear(),
+            Edit::AddPort { index, port } => {
+                let mut ranges = mutated.destinations[*index].ports.normalized_ranges();
+                ranges.push((*port, *port));
+                mutated.destinations[*index].ports = crate::PortSet::from_ranges(ranges)
+                    .map_err(|error| format!("cannot apply adjacent port mutation: {error}"))?;
+            }
+        }
+        let changed = evaluate_cases(&mutated, &parsed);
+        evaluations += changed.len();
+        let first = baseline.iter().zip(&changed).find_map(|(before, after)| {
+            (before["actual"] != after["actual"]).then(|| {
+                serde_json::json!({"id":before["id"],"baseline":before["actual"],"mutated":after["actual"]})
+            })
+        });
+        reports.push(serde_json::json!({
+            "label": candidate.label,
+            "changed_term": candidate.changed_term,
+            "status": if first.is_some() { "distinguished" } else { "survived" },
+            "first_distinguishing_case": first,
+        }));
+    }
+    let truncated = candidate_overflow || reports.len() < candidates.len();
+    let survivors = reports
+        .iter()
+        .filter(|row| row["status"] == "survived")
+        .count();
+    let status = if truncated {
+        "partial"
+    } else if survivors > 0 {
+        "surviving-mutations"
+    } else {
+        "complete"
+    };
+    Ok(serde_json::json!({
+        "result": status,
+        "baseline": if baseline_failed { "failed" } else { "passed" },
+        "baseline_cases": baseline.len(),
+        "baseline_mismatches": baseline.iter().filter(|row| row["match"] != true).count(),
+        "mutations_tested": reports.len(),
+        "mutations_survived": survivors,
+        "evaluations": evaluations,
+        "truncated": truncated,
+        "mutations": reports,
+        "note": "A surviving mutation is a review prompt; never alter the approval to make a suite pass."
+    }))
 }
