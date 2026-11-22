@@ -89,6 +89,10 @@ pub enum RefusalCode {
     RequiredCounterMissing,
     /// A debit omitted a destination required by the approval.
     TargetRequired,
+    /// A guarded caller reference already occurs in the verified available history.
+    DuplicateReference,
+    /// The available history cannot establish that a guarded caller reference is new.
+    ReferenceInconclusive,
     /// The spend would exceed the ceiling.
     CeilingReached,
     /// The pass on disk is not the one the caller expected.
@@ -113,6 +117,8 @@ impl RefusalCode {
             Self::UnknownCounter => "unknown-counter",
             Self::RequiredCounterMissing => "required-counter-missing",
             Self::TargetRequired => "target-required",
+            Self::DuplicateReference => "duplicate-reference",
+            Self::ReferenceInconclusive => "reference-inconclusive",
             Self::CeilingReached => "ceiling-reached",
             Self::PassChanged => "pass-changed",
         }

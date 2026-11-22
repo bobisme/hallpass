@@ -119,6 +119,9 @@ enum Command {
         /// Retain this caller/run reference with the debit.
         #[arg(long, value_name = "TEXT")]
         caller_ref: Option<String>,
+        /// Refuse a caller reference already present in the local ledger, or whose absence is inconclusive.
+        #[arg(long, requires = "caller_ref")]
+        require_new_ref: bool,
         /// Retain the checked literal target, request name and matched destination label.
         #[arg(long, requires = "to")]
         record_target: bool,
@@ -1033,6 +1036,7 @@ struct SpendArgs<'a> {
     unit: &'a cli_debit::DebitUnit,
     lock_timeout_ms: Option<u64>,
     caller_ref: Option<&'a str>,
+    require_new_ref: bool,
     record_target: bool,
     dry_run: bool,
     note: Option<&'a str>,
@@ -1134,6 +1138,7 @@ fn debit_spend(
     let mut request = hallpass::SpendChargesRequest::new(&charges);
     request.policy = policy;
     request.caller_ref = args.caller_ref;
+    request.require_new_ref = args.require_new_ref;
     request.record_targets = args.record_target;
     request.dry_run = args.dry_run;
     let outcome =
@@ -1189,6 +1194,9 @@ fn debit_spend(
         "refusal": outcome.refusal.as_ref().map(refusal_json),
         "warnings": outcome.warnings,
     });
+    if let Some(evidence) = &outcome.reference_evidence {
+        json["reference_evidence"] = json!(evidence);
+    }
     if args.unit.counter.is_some()
         && let Some(charge) = outcome.charges.first()
     {
@@ -1719,6 +1727,7 @@ fn run(cli: &Cli, format: Format) -> Output {
             unit,
             lock_timeout_ms,
             caller_ref,
+            require_new_ref,
             record_target,
             dry_run,
             note,
@@ -1727,6 +1736,7 @@ fn run(cli: &Cli, format: Format) -> Output {
                 unit,
                 lock_timeout_ms: *lock_timeout_ms,
                 caller_ref: caller_ref.as_deref(),
+                require_new_ref: *require_new_ref,
                 record_target: *record_target,
                 dry_run: *dry_run,
                 note: note.as_deref(),

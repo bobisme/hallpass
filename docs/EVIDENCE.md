@@ -21,6 +21,29 @@ If the result is `found`, compare the receipt's digest, charge names and amounts
 
 A reference is case-sensitive. Legacy scalar spends and reference-free debits supply no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
 
+Use `--require-new-ref` with `--caller-ref` so cooperating workers on the same
+local history submit a given reference at most once. Record the intended unit
+and reference before submitting the guarded spend.
+
+```sh
+hallpass --format json spend engagement.toml \
+  --charge requests=1 --charge bytes=4 \
+  --to 192.0.2.10:443/tcp@app.example.com --record-target \
+  --digest "$digest" --caller-ref batch-42 --require-new-ref
+```
+
+After a lost reply, use `receipt` and reconcile the debit with the saved unit
+and your execution record. If another worker submits the same guarded
+reference, the repeat exits 2 with `refusal.code=duplicate-reference` and
+`seq: null`. Read `reference_evidence.sequences` for up to 64 historical
+matches and use `receipt` to compare the recorded charges and targets. The
+repeat provides no permission to send. An absent reference in a history
+that contains an adoption or has events without a local witness returns
+`reference-inconclusive`. A dry run reports the history it observes and
+reserves nothing. Retain your own execution record to decide whether the
+external action occurred. Calls that omit the guard can reuse references
+for correlation.
+
 ## Replay historical endpoint decisions
 
 ```sh

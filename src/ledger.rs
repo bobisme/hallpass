@@ -42,9 +42,11 @@ mod debit;
 pub mod evidence;
 mod evidence_charges;
 mod evidence_manifest;
+mod reference;
 pub mod scenario;
 pub use debit::*;
 use debit::{DebitLine, parse_debit};
+pub use reference::ReferenceEvidence;
 
 /// The ledger format version.
 const LEDGER_VERSION: u32 = 1;
@@ -1279,6 +1281,7 @@ fn lock_for_writing(
     adopting: bool,
     guard: Option<&str>,
     lock_timeout: Option<std::time::Duration>,
+    visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
     let id = load(pass_path)?.pass.id;
     let wait = WriterWait::new(lock_timeout);
@@ -1336,13 +1339,15 @@ fn lock_for_writing(
             loaded.pass.id
         )));
     }
-    let parsed = parse_ledger(
+    let parsed = scan_ledger(
         &path,
         BufReader::new(&file),
-        &id,
         false,
         witness.as_ref().map(|w| w.seq),
-    )?;
+        None,
+        visit,
+    )?
+    .for_pass(&path, &id)?;
     if !created
         && guard.is_some_and(|expected| {
             expected != adoption_token(&loaded, &path, Some(&parsed), witness.as_ref())
@@ -1490,9 +1495,16 @@ pub fn spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
-    let mut locked = lock_for_writing(pass_path, state, false, None, request.lock_timeout)?;
+    let mut locked = lock_for_writing(
+        pass_path,
+        state,
+        false,
+        None,
+        request.lock_timeout,
+        &mut |_| Ok(()),
+    )?;
     let id = locked.loaded.pass.id.clone();
-    let (here, warnings) = prepare_witness(pass_path, &locked, state)?;
+    let (here, warnings) = prepare_witness(pass_path, &locked, state, true)?;
     let now = clock();
     check_clock(now)?;
     let last = locked.parsed.last_time;
@@ -1663,8 +1675,16 @@ impl LedgerView {
 }
 
 fn verified_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
+    visit_verified_snapshot(path, state, &mut |_| Ok(()))
+}
+
+fn visit_verified_snapshot(
+    path: &Path,
+    state: &StateDir,
+    visit: &mut Visitor<'_>,
+) -> Result<(LoadedPass, LedgerView), Error> {
     let loaded = load(path)?;
-    let view = read_summary(&loaded, state)?;
+    let view = visit_view(&loaded, state, false, visit)?;
     if let WitnessStatus::NotChecked { reason } = view.witness {
         return Err(Error::WitnessUnavailable {
             pass_id: loaded.pass.id,
@@ -1676,7 +1696,15 @@ fn verified_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, Ledge
 }
 
 fn preview_snapshot(path: &Path, state: &StateDir) -> Result<(LoadedPass, LedgerView), Error> {
-    let (loaded, view) = verified_snapshot(path, state)?;
+    visit_preview_snapshot(path, state, &mut |_| Ok(()))
+}
+
+fn visit_preview_snapshot(
+    path: &Path,
+    state: &StateDir,
+    visit: &mut Visitor<'_>,
+) -> Result<(LoadedPass, LedgerView), Error> {
+    let (loaded, view) = visit_verified_snapshot(path, state, visit)?;
     check_preview_write_access(path, &view.path, view.exists, state, &loaded.pass.id)?;
     Ok((loaded, view))
 }
@@ -1705,6 +1733,7 @@ fn prepare_witness(
     pass_path: &Path,
     locked: &Locked,
     state: &StateDir,
+    anchor_unwitnessed: bool,
 ) -> Result<(String, Vec<String>), Error> {
     let id = &locked.loaded.pass.id;
     let here = ledger_identity(&locked.path);
@@ -1716,13 +1745,15 @@ fn prepare_witness(
         state,
         id,
     )?;
-    let mut warnings = warnings(&status, moved.as_ref(), id, true);
+    let preserve_unanchored =
+        !anchor_unwitnessed && status == WitnessStatus::Missing && locked.parsed.seq > 0;
+    let mut warnings = warnings(&status, moved.as_ref(), id, !preserve_unanchored);
     if locked.created && status == WitnessStatus::Missing {
         // This call started the ledger: it has no witness because it is
         // new, not because it came from somewhere else.
         warnings.clear();
     }
-    if status != WitnessStatus::Matches || moved.is_some() {
+    if !preserve_unanchored && (status != WitnessStatus::Matches || moved.is_some()) {
         state.write(
             id,
             &Witnessed {
@@ -1943,7 +1974,7 @@ pub fn adopt_guarded(
 ) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
-    let mut locked = lock_for_writing(pass_path, state, true, token, None)?;
+    let mut locked = lock_for_writing(pass_path, state, true, token, None, &mut |_| Ok(()))?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
     let case = if locked.created {

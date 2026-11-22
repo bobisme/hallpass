@@ -30,6 +30,12 @@
   },
   "cases": [
     {
+      "id": "duplicate-reference-is-history-only",
+      "exit": 2,
+      "stdout": "{\"command\":\"spend\",\"result\":\"refused\",\"test_clock\":false,\"seq\":null,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"refusal\":{\"code\":\"duplicate-reference\",\"message\":\"the caller reference already occurs at ledger sequence 1\"},\"reference_evidence\":{\"caller_ref\":\"unit-42\",\"match_count\":1,\"sequences\":[1],\"truncated\":false},\"file\":\"review.pass.toml\"}",
+      "action": "stop"
+    },
+    {
       "id": "two-costs-two-targets",
       "exit": 0,
       "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",
