@@ -11,6 +11,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use toml::Value;
 
+mod containment;
+pub use containment::{Containment, endpoint_containment};
 mod examples;
 pub use examples::{DecisionExample, ExampleDecision, ExampleReport, decision_examples};
 mod coverage;

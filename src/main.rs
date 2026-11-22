@@ -238,21 +238,7 @@ enum Command {
         principal: String,
     },
     /// Compare two pass revisions without authorizing either one.
-    Diff {
-        /// Previously reviewed pass.
-        old: PathBuf,
-        /// Proposed replacement pass.
-        new: PathBuf,
-        /// Project balances under both revisions using the current pass's verified ledger.
-        #[arg(long)]
-        budget_impact: bool,
-        /// Sample changed destination decisions at the supplied review instant.
-        #[arg(long, requires = "at")]
-        examples: bool,
-        /// RFC 3339 review instant including an offset. Requires --examples.
-        #[arg(long, requires = "examples", value_name = "TIMESTAMP")]
-        at: Option<String>,
-    },
+    Diff(DiffArgs),
     /// Compare an entire approval with a consumer's declared features.
     ConsumerCoverage {
         /// Pass whose enforced terms should be covered.
@@ -285,6 +271,26 @@ enum Command {
     },
 }
 
+#[derive(clap::Args)]
+struct DiffArgs {
+    /// Previously reviewed pass.
+    old: PathBuf,
+    /// Proposed replacement pass.
+    new: PathBuf,
+    /// Project balances under both revisions using the current pass's verified ledger.
+    #[arg(long)]
+    budget_impact: bool,
+    /// Sample changed destination decisions at the supplied review instant.
+    #[arg(long, requires = "at")]
+    examples: bool,
+    /// Prove that every proposed endpoint allowance was already in scope.
+    #[arg(long, requires = "at")]
+    containment: bool,
+    /// RFC 3339 instant for --examples or --containment.
+    #[arg(long, value_name = "TIMESTAMP")]
+    at: Option<String>,
+}
+
 impl Command {
     const fn name(&self) -> &'static str {
         match self {
@@ -307,7 +313,7 @@ impl Command {
             Self::Checkpoint { .. } => "checkpoint",
             Self::VerifyCheckpoint { .. } => "verify-checkpoint",
             Self::VerifyApproval { .. } => "verify-approval",
-            Self::Diff { .. } => "diff",
+            Self::Diff(_) => "diff",
             Self::ConsumerCoverage { .. } => "consumer-coverage",
             Self::Lint { .. } => "lint",
             Self::Cases { .. } => "test-pass",
@@ -510,100 +516,6 @@ fn check(file: &Path) -> Output {
 
 mod cli_diff;
 mod cli_verify;
-
-fn review_diff(old: &Path, new: &Path, at: Option<&str>, budget_impact: bool) -> Output {
-    let review_at = match at
-        .map(|s| OffsetDateTime::parse(s, &hallpass::time::format_description::well_known::Rfc3339))
-        .transpose()
-    {
-        Ok(instant) => instant,
-        Err(e) => {
-            return error_output(
-                "diff",
-                None,
-                &Error::Usage(format!(
-                    "supply --at as an RFC 3339 timestamp with an offset ({e})"
-                )),
-            );
-        }
-    };
-    let a = match hallpass::load(old) {
-        Ok(v) => v,
-        Err(e) => return error_output("diff", Some(old), &e),
-    };
-    let b = match hallpass::load(new) {
-        Ok(v) => v,
-        Err(e) => return error_output("diff", Some(new), &e),
-    };
-    let report = hallpass::review::diff(&a, &b);
-    let mut text = format!(
-        "OLD pass {} digest: {}\nNEW pass {} digest: {}\n",
-        report.old_pass_id, report.old_digest, report.new_pass_id, report.new_digest
-    );
-    if report.approval_changed {
-        text.push_str("APPROVAL ID CHANGED: treat as a different ledger identity.\n");
-    }
-    for c in &report.changes {
-        let _ = writeln!(
-            text,
-            "{}: {} -> {}{}",
-            c.field,
-            safe(&c.before),
-            safe(&c.after),
-            if c.review_required {
-                " [review required]"
-            } else {
-                ""
-            }
-        );
-    }
-    for l in &report.introduced {
-        let _ = writeln!(text, "introduced destination: {l}");
-    }
-    for l in &report.removed {
-        let _ = writeln!(text, "removed destination: {l}");
-    }
-    if report.order_changed {
-        text.push_str("WARNING: common destination order changed; returned label may change.\n");
-    }
-    let mut output = Output {
-        code: OK,
-        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":[]}),
-        text,
-    };
-    if budget_impact && let Err(error) = cli_diff::budget(&a, &b, &mut output) {
-        return error_output("diff", Some(old), &error);
-    }
-    if let Some(instant) = review_at {
-        let sample = hallpass::review::decision_examples(&a.pass, &b.pass, instant);
-        let _ = writeln!(
-            output.text,
-            "Sampled {} distinct requests at {}. The sample cannot establish policy equivalence.",
-            sample.evaluated, sample.at
-        );
-        for row in &sample.rows {
-            let _ = writeln!(
-                output.text,
-                "{} ({}): {} -> {}",
-                row.target,
-                row.name.as_deref().unwrap_or("unnamed"),
-                row.before,
-                row.after
-            );
-        }
-        if sample.truncated {
-            output
-                .text
-                .push_str("Sampling limit reached. Additional candidates were omitted.\n");
-        }
-        output.json["examples"] = json!(sample);
-    } else if !budget_impact {
-        output
-            .text
-            .push_str("This is a declared-field diff only; it never authorizes a spend.\n");
-    }
-    output
-}
 
 fn consumer_coverage(file: &Path, tokens: &[String]) -> Output {
     use hallpass::review::{Capabilities, consumer_coverage as coverage};
@@ -1852,13 +1764,7 @@ fn run(cli: &Cli, format: Format) -> Output {
             allowed_signers,
             principal,
         } => cli_verify::verify_approval(file, signature, allowed_signers, principal),
-        Command::Diff {
-            old,
-            new,
-            at,
-            budget_impact,
-            ..
-        } => review_diff(old, new, at.as_deref(), *budget_impact),
+        Command::Diff(args) => cli_diff::review_diff(args),
         Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),
         Command::Lint { file } => review_lint(file, &clock),
         Command::Cases { file, cases } => review_cases(file, cases),

@@ -318,3 +318,128 @@ fn amendment_projects_only_current_history_including_adoption() {
     assert_eq!(command(dir, &args, 1)["error"]["code"], "ledger-corrupt");
     assert_eq!(command(dir, &["diff", "old", "new"], 0)["result"], "ok");
 }
+
+#[test]
+fn containment_cli_requires_open_windows_and_replays_expanded_edges() {
+    let tmp = tempfile::tempdir().expect("dir");
+    let dir = tmp.path();
+    let args = ["diff", "old", "new", "--containment", "--at", AT];
+    let old = BASE.replace("address = \"192.0.2.10\"", "network = \"192.0.2.8/30\"");
+    write_pass(dir, "old", &old);
+    write_pass(dir, "new", &BASE.replace("192.0.2.10", "192.0.2.11"));
+    let expanded = command(dir, &args, 2);
+    let evidence = &expanded["containment"]["example"];
+    assert_eq!(expanded["result"], "expanded");
+    assert_eq!(evidence["before"]["code"], "network-or-broadcast");
+    assert_eq!(evidence["after"]["label"], "web");
+    write_pass(
+        dir,
+        "old",
+        &BASE
+            .replace("address = \"192.0.2.10\"", "network = \"2001:db8::/124\"")
+            .replace("ports = 443", "ports = [443, 444]")
+            .replace("names = [\"app.example.com\"]", ""),
+    );
+    write_pass(
+        dir,
+        "new",
+        &BASE
+            .replace("192.0.2.10", "2001:db8::1")
+            .replace("label = \"web\"", "label = \"site\""),
+    );
+    assert_eq!(command(dir, &args, 0)["containment"]["result"], "contained");
+    write_pass(dir, "new", &BASE.replace("review-example", "other-id"));
+    assert_eq!(
+        command(dir, &args, 2)["containment"]["reason"],
+        "different-pass-id"
+    );
+    write_pass(dir, "new", &BASE.replace("2026-11-20", "2026-11-21"));
+    assert_eq!(
+        command(dir, &args, 2)["containment"]["reason"],
+        "both-windows-must-be-open"
+    );
+    assert!(!dir.join("state").exists());
+}
+
+#[test]
+fn every_small_containment_certificate_agrees_with_exhaustive_endpoint_decisions() {
+    use hallpass::review::endpoint_containment;
+    let now = OffsetDateTime::parse(AT, &Rfc3339).expect("time");
+    let mut policies = vec![];
+    for cidr in ["192.0.2.8/30", "192.0.2.10/31", "192.0.2.11/32"] {
+        for ports in ["443", "[443,444]"] {
+            for names in ["", "names = [\"app.example.com\"]"] {
+                let text = BASE
+                    .replace("address = \"192.0.2.10\"", &format!("network = \"{cidr}\""))
+                    .replace("ports = 443", &format!("ports = {ports}"))
+                    .replace("names = [\"app.example.com\"]", names);
+                for extra in [
+                    "",
+                    "\n[[destination]]\nlabel = \"other\"\naddress = \"192.0.2.11\"\nports = 444\nprotocol = \"udp\"\n",
+                ] {
+                    policies.push(Pass::parse(&format!("{text}{extra}")).expect("pass"));
+                }
+            }
+        }
+    }
+    let app = HostName::canonical("app.example.com").expect("app");
+    let other = HostName::canonical("other.example.com").expect("other");
+    let requests: Vec<_> = (7..=12)
+        .flat_map(|last| {
+            (442..=445).flat_map(move |port| {
+                ["tcp", "udp"].into_iter().map(move |proto| {
+                    format!("192.0.2.{last}:{port}/{proto}")
+                        .parse::<Target>()
+                        .expect("target")
+                })
+            })
+        })
+        .collect();
+    for old in &policies {
+        for new in &policies {
+            if endpoint_containment(old, new, now).result != "contained" {
+                continue;
+            }
+            for target in &requests {
+                for name in [None, Some(&app), Some(&other)] {
+                    if matches!(
+                        new.permits_named(target, name, now, Duration::ZERO),
+                        Decision::Allowed { .. }
+                    ) {
+                        assert!(matches!(
+                            old.permits_named(target, name, now, Duration::ZERO),
+                            Decision::Allowed { .. }
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pair_limit_and_union_proofs_remain_inconclusive() {
+    use hallpass::review::endpoint_containment;
+    let now = OffsetDateTime::parse(AT, &Rfc3339).expect("time");
+    let (head, _) = BASE.split_once("[[destination]]").expect("head");
+    let mut many = head.to_string();
+    for port in 1..=190 {
+        use std::fmt::Write as _;
+        writeln!(many, "[[destination]]\nlabel = \"r{port}\"\naddress = \"192.0.2.10\"\nports = {port}\nprotocol = \"tcp\"").expect("row");
+    }
+    let pass = Pass::parse(&many).expect("pass");
+    let capped = endpoint_containment(&pass, &pass, now);
+    assert_eq!(capped.result, "inconclusive");
+    assert_eq!(capped.reason, "pair-limit");
+    let split = format!(
+        "{BASE}\n[[destination]]\nlabel = \"other\"\naddress = \"192.0.2.10\"\nports = 444\nprotocol = \"tcp\"\nnames = [\"app.example.com\"]\n"
+    );
+    let proposed = BASE.replace("ports = 443", "ports = [443,444]");
+    let union = endpoint_containment(
+        &Pass::parse(&split).expect("pass"),
+        &Pass::parse(&proposed).expect("pass"),
+        now,
+    );
+    assert_eq!(union.result, "inconclusive");
+    assert_eq!(union.reason, "single-rule-coverage-unproved");
+}

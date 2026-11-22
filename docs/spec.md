@@ -640,3 +640,9 @@ Every projection stays in memory. A subsequent live debit reads current state.
 ### Projecting an amendment against live balances
 
 `hallpass diff CURRENT PROPOSED --budget-impact --json` reads one verified summary from CURRENT. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
+
+### Proving endpoint containment
+
+`hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID and open windows. Each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
+
+The result `contained` (exit 0) certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` (exit 2) by exhibiting a new allowance. Otherwise the result is `inconclusive` (exit 2), with a reason such as a work limit or coverage that would require combining old rules. Invalid input exits 1. Label attribution, other instants, costs and scope duration are outside this certificate. See the accompanying declared-field diff for those edits.
