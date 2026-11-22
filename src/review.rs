@@ -194,6 +194,13 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
     }
     change(
         &mut changes,
+        "require_target_v1",
+        a.require_target,
+        b.require_target,
+        true,
+    );
+    change(
+        &mut changes,
         "required_counters_v1",
         a.required_counters.join(","),
         b.required_counters.join(","),

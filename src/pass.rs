@@ -110,6 +110,8 @@ pub struct Pass {
     pub ceilings: BTreeMap<String, u64>,
     /// Counter names that every debit must charge, in sorted order.
     pub required_counters: Vec<String>,
+    /// Whether every debit must check at least one destination.
+    pub require_target: bool,
 }
 
 struct Walker {
@@ -330,6 +332,7 @@ impl Pass {
                 "destination",
                 "ceilings",
                 "required_counters_v1",
+                "require_target_v1",
             ],
         );
         match table.get("format") {
@@ -356,6 +359,17 @@ impl Pass {
         let destinations = parse_destinations(&mut w, &table);
         let ceilings = parse_ceilings(&mut w, &table);
         let required_counters = parse_required_counters(&mut w, &table, ceilings.as_ref());
+        let require_target = match table.get("require_target_v1") {
+            None => false,
+            Some(Value::Boolean(true)) => true,
+            Some(_) => {
+                w.problem(
+                    "require_target_v1",
+                    "must be true when present, or omit this key",
+                );
+                false
+            }
+        };
         if !w.problems.is_empty() {
             return Err(w.problems);
         }
@@ -368,6 +382,7 @@ impl Pass {
                     destinations,
                     ceilings,
                     required_counters,
+                    require_target,
                 })
             }
             _ => Err(vec![Problem {

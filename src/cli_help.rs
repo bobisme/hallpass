@@ -60,8 +60,9 @@ fn guide(name: &str) -> Guide {
             &[
                 "hallpass --format json spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --dry-run",
                 "hallpass --format json spend engagement.pass.toml --charge calls=1 --charge bytes=100 --to 192.0.2.10:5060/udp --duration 30 --digest \"$digest\"",
+                "hallpass --format json spend docs/required-counters.toml --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp@app.example.org --dry-run",
             ],
-            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Preview with --dry-run, then submit once with the reviewed digest and all required targets and charges. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. After a lost reply or recorded/uncertain error, use receipt with the original caller reference, or inspect ledger, and reconcile with your run record before retrying.",
+            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Read require_target from check or status. When true, supply --to for every debit. A targetless request returns refusal.code=target-required. Retain a checked target only with --record-target. Preview with --dry-run, then submit once with the reviewed digest and all required targets and charges. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. After a lost reply or recorded/uncertain error, use receipt with the original caller reference, or inspect ledger, and reconcile with your run record before retrying.",
         ),
         "digest" => (
             &["hallpass --format json digest engagement.pass.toml"],
@@ -99,7 +100,7 @@ fn guide(name: &str) -> Guide {
             &[
                 "hallpass --format json consumer-coverage engagement.pass.toml --can endpoints --can live-window --can charge:calls",
             ],
-            "Declare features your consumer implements. Supply --can names when it checks the application name and repeat --can charge:COUNTER for every budget it charges. Use --can none for an empty profile. Inspect findings on exit 2 (gaps). Exit 0 (covered) describes declared features. Live requests still need permits or spend.",
+            "Declare features your consumer implements. Supply --can names when it checks the application name. Supply --can target-on-every-debit when it sends a checked target on every debit and repeat --can charge:COUNTER for every budget it charges. Use --can none for an empty profile. Inspect findings on exit 2 (gaps). Exit 0 (covered) describes declared features. Live requests still need permits or spend.",
         ),
         "lint" => (
             &["hallpass --format json lint engagement.pass.toml"],
