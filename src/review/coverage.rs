@@ -4,6 +4,10 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 /// Features the integrator declares across all cooperating components.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "capabilities are independent declarations"
+)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Capabilities {
     pub endpoints: bool,

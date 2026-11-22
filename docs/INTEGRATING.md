@@ -273,6 +273,22 @@ immediately. Only a subsequent recorded spend permits the counted operation.
 Use `permits --digest DIGEST` for later uncounted destinations in the same
 unit so a pass edit requires fresh review.
 
+For identical units, query budget capacity at one decision instant. With
+10 requests and 100 bytes remaining, this unit fits four times. Bytes limit
+the count, leaving 4 bytes and 6 requests after the four units.
+
+```text
+hallpass --format json capacity engagement.pass.toml \
+  --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp
+```
+
+Use the same targets, duration and digest pin as the live spend. Read
+`units`, `limiting_counters` and each counter's `remaining_after`. A valid
+unit exits 0 even at zero capacity, when `unit_refusal.code` is
+`ceiling-reached`. A policy refusal exits 2 with `units: null`, and a usage
+or evidence error exits 1. Other debits, an approval revision or expiry can
+reduce what fits before execution. Submit a live spend for each real unit.
+
 To check several known destinations together, repeat `--to` up to 64 times.
 Attach a name to its endpoint as `--to 192.0.2.10:443/tcp@app.example.org`.
 The separate `--name` form takes exactly one target. One refused target

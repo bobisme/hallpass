@@ -37,6 +37,7 @@ use crate::request::{TargetRefusal, decide_targets};
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
 use crate::{MAX_TARGETS, NamedTarget};
 
+pub mod capacity;
 mod debit;
 pub mod evidence;
 pub mod scenario;
@@ -1159,21 +1160,7 @@ fn decide_ceiling(
     total: Option<u64>,
     spent: u64,
 ) -> Result<(), Refusal> {
-    let Some(total) = total else {
-        let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
-        return Err(refused_spend(
-            RefusalCode::UnknownCounter,
-            format!(
-                "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent: use one of those names, or ask the owner to add this ceiling to the pass in writing",
-                counter,
-                if known.is_empty() {
-                    "none".to_owned()
-                } else {
-                    known.join(", ")
-                }
-            ),
-        ));
-    };
+    let total = declared_ceiling(loaded, counter, total)?;
     if spent.checked_add(amount).is_none_or(|next| next > total) {
         return Err(refused_spend(
             RefusalCode::CeilingReached,
@@ -1186,6 +1173,28 @@ fn decide_ceiling(
         ));
     }
     Ok(())
+}
+
+fn declared_ceiling(
+    loaded: &LoadedPass,
+    counter: &str,
+    total: Option<u64>,
+) -> Result<u64, Refusal> {
+    total.ok_or_else(|| {
+        let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
+        refused_spend(
+            RefusalCode::UnknownCounter,
+            format!(
+                "`{}` is not a ceiling of this pass (it has: {}); only what the owner put a ceiling on can be spent: use one of those names, or ask the owner to add this ceiling to the pass in writing",
+                counter,
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            ),
+        )
+    })
 }
 
 fn refused_spend(code: RefusalCode, mut message: String) -> Refusal {

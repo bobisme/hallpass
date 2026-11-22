@@ -80,7 +80,7 @@ pub use ledger::{
     read_ledger, read_summary, spend, spend_charges, spend_charges_in, spend_charges_with_clock_in,
     spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
-pub use ledger::{evidence, scenario};
+pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};
 pub use pass::{
     Approval, Destination, FORMAT_VERSION, IPV4_CAP, IPV4_FLOOR, IPV6_CAP, IPV6_FLOOR, MAX_CEILING,

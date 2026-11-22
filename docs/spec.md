@@ -357,6 +357,7 @@ and `file`. Help and version requests return their own command name and
 | `check` | the pass validates | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
 | `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
+| `capacity` | budget count, including zero | invalid unit policy | usage, pass or accounting error |
 | `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `digest` | printed | never | invalid pass |
 | `diff` | field comparison completed, including any requested sample | never | invalid pass, instant or usage |
@@ -617,6 +618,19 @@ Charges remain monotone through restoration and adoption. Callers commit
 at first send and reconcile ambiguous append outcomes against the ledger.
 
 ### Rehearsing a budget
+
+Run `hallpass --format json capacity PASS` with the same unit syntax as spend,
+using a positional counter with optional `--n` or repeated `--charge`.
+`--to`, `--name`, `--duration` and `--digest` apply the same debit policy at
+one instant. Each counter's capacity is `floor(remaining / n)`. The minimum
+is the overall `units`, and `limiting_counters` lists every tied counter in
+request order. The `counters` rows include `counter`, `n`, `total`, `spent`,
+`remaining`, that counter's `units` and `remaining_after` the overall count.
+A valid unit yields `result=capacity` and exit 0, including at zero with
+`unit_refusal` describing the first exhausted budget. An invalid unit policy
+yields exit 2, `result=refused`, `units: null`, `refusal` and a one-based
+`refused_target` when applicable. A usage or evidence error exits 1. Capacity
+writes no ledger or witness and reserves no budget.
 
 Run `hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml`
 to project three ordered debits of 40 bytes against a 100-byte ceiling. The first
