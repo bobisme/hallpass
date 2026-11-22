@@ -186,6 +186,13 @@ enum Command {
         /// Private directory populated by archive.
         directory: PathBuf,
     },
+    /// Audit historical charges against archived pass revisions.
+    AuditCharges {
+        /// Pass identifying the ledger to verify.
+        file: PathBuf,
+        /// Private directory populated by archive.
+        directory: PathBuf,
+    },
     /// Compare explicit ledger backups against a single local witness.
     CompareBackups {
         /// Pass identifying the local witness. The live ledger may be missing.
@@ -303,6 +310,7 @@ impl Command {
             Self::Retrieve { .. } => "retrieve",
             Self::Receipt { .. } => "receipt",
             Self::AuditReceipts { .. } => "audit-receipts",
+            Self::AuditCharges { .. } => "audit-charges",
             Self::CompareBackups { .. } => "compare-backups",
             Self::Checkpoint { .. } => "checkpoint",
             Self::VerifyCheckpoint { .. } => "verify-checkpoint",
@@ -1757,6 +1765,7 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(cli: &Cli, format: Format) -> Output {
     let name = cli.command.name();
     let clock = match command_clock(&cli.command) {
@@ -1822,6 +1831,7 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Retrieve { directory, digest } => retrieve(directory, digest),
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
         Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
+        Command::AuditCharges { file, directory } => cli_evidence::audit_charges(file, directory),
         Command::CompareBackups {
             file,
             candidates,

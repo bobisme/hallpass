@@ -1,4 +1,6 @@
 //! Local, read-only reconciliation, receipt auditing and backup comparison.
+pub use super::evidence_charges::{ChargeAudit, ChargeMismatch, ChargeMismatches, audit_charges};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -144,7 +146,11 @@ pub struct ReceiptAudit {
     pub warnings: Vec<String>,
 }
 
-fn record_gap(gaps: &mut BTreeMap<&'static str, EvidenceGap>, reason: &'static str, seq: u64) {
+pub(super) fn record_gap(
+    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    reason: &'static str,
+    seq: u64,
+) {
     let group = gaps.entry(reason).or_default();
     group.count += 1;
     if group.sequences.len() < DETAIL_LIMIT {
@@ -156,7 +162,11 @@ fn record_gap(gaps: &mut BTreeMap<&'static str, EvidenceGap>, reason: &'static s
 
 // Cache only the last revision. Consecutive ledger entries usually share it.
 // Missing revisions are cached under the same key as successfully parsed ones.
-fn archive_revision(directory: &Path, digest: Digest, id: &str) -> Result<Option<Pass>, Error> {
+pub(super) fn archive_revision(
+    directory: &Path,
+    digest: Digest,
+    id: &str,
+) -> Result<Option<Pass>, Error> {
     let bytes = match retrieve_pass(directory, digest) {
         Ok(bytes) => bytes,
         Err(Error::Io { path, .. }) if !exists(&path)? => return Ok(None),
@@ -487,7 +497,7 @@ fn ancestry_links(
 ) -> BackupAncestry {
     let mut links = BTreeSet::new();
     let mut valid_groups = BTreeSet::new();
-    for a in candidates.iter() {
+    for a in candidates {
         if a.relation != "extended" {
             continue;
         }
