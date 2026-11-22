@@ -503,7 +503,7 @@ fn parse_ledger(
     collect: bool,
     requested: Option<u64>,
 ) -> Result<Parsed, Error> {
-    scan_ledger(path, reader, collect, requested, &mut |_| Ok(()))?.for_pass(path, pass_id)
+    scan_ledger(path, reader, collect, requested, None, &mut |_| Ok(()))?.for_pass(path, pass_id)
 }
 
 enum VerifiedEvent {
@@ -514,11 +514,24 @@ enum VerifiedEvent {
 
 type Visitor<'a> = dyn FnMut(&VerifiedEvent) -> Result<(), Error> + 'a;
 
+fn record_checkpoint(
+    checkpoints: &mut Option<(&std::collections::BTreeSet<u64>, &mut BTreeMap<u64, Digest>)>,
+    seq: u64,
+    hash: Digest,
+) {
+    if let Some((wanted, found)) = checkpoints.as_mut()
+        && wanted.contains(&seq)
+    {
+        found.insert(seq, hash);
+    }
+}
+
 fn scan_ledger(
     path: &Path,
     reader: impl BufRead,
     collect: bool,
     requested: Option<u64>,
+    mut checkpoints: Option<(&std::collections::BTreeSet<u64>, &mut BTreeMap<u64, Digest>)>,
     visit: &mut Visitor<'_>,
 ) -> Result<Parsed, Error> {
     let corrupt = |line: usize, detail: &str| Error::LedgerCorrupt {
@@ -560,6 +573,7 @@ fn scan_ledger(
         adoption_count: 0,
         seq: 0,
     };
+    record_checkpoint(&mut checkpoints, 0, parsed.tail);
     let mut number = 1;
     let mut line = Vec::new();
     loop {
@@ -610,6 +624,7 @@ fn scan_ledger(
         }
         parsed.seq = seq;
         parsed.tail = Digest::of(&line);
+        record_checkpoint(&mut checkpoints, seq, parsed.tail);
         if requested == Some(seq) {
             parsed.prefix = Some((seq, parsed.tail));
         }
@@ -928,7 +943,8 @@ fn visit_view(
     let parsed = file
         .as_ref()
         .map(|f| {
-            scan_ledger(&path, BufReader::new(f), collect, requested, visit)?.for_pass(&path, id)
+            scan_ledger(&path, BufReader::new(f), collect, requested, None, visit)?
+                .for_pass(&path, id)
         })
         .transpose()?;
     let (witness, moved) = match saved_witness {
@@ -1067,9 +1083,33 @@ fn inspect_candidate(path: &Path, requested: Option<u64>) -> Result<Parsed, Erro
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     check_private(path, &file)?;
     file.lock_shared().map_err(|e| Error::io(path, &e))?;
-    scan_ledger(path, BufReader::new(&file), false, requested, &mut |_| {
-        Ok(())
-    })
+    scan_ledger(
+        path,
+        BufReader::new(&file),
+        false,
+        requested,
+        None,
+        &mut |_| Ok(()),
+    )
+}
+
+fn inspect_candidate_checkpoints(
+    path: &Path,
+    wanted: &std::collections::BTreeSet<u64>,
+) -> Result<(Parsed, BTreeMap<u64, Digest>), Error> {
+    let file = open_no_follow(path, OpenOptions::new().read(true))?;
+    check_private(path, &file)?;
+    file.lock_shared().map_err(|e| Error::io(path, &e))?;
+    let mut found = BTreeMap::new();
+    let parsed = scan_ledger(
+        path,
+        BufReader::new(&file),
+        false,
+        None,
+        Some((wanted, &mut found)),
+        &mut |_| Ok(()),
+    )?;
+    Ok((parsed, found))
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

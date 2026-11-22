@@ -108,10 +108,10 @@ pub fn audit(file: &Path, directory: &Path) -> Output {
     )
 }
 
-pub fn backups(file: &Path, candidates: &[PathBuf]) -> Output {
-    let report = match hallpass::load(file)
-        .and_then(|p| evidence::compare_backups(&p, &StateDir::from_env(), candidates))
-    {
+pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
+    let report = match hallpass::load(file).and_then(|p| {
+        evidence::compare_backups_with_ancestry(&p, &StateDir::from_env(), candidates, ancestry)
+    }) {
         Ok(report) => report,
         Err(e) => return error_output("compare-backups", Some(file), &e),
     };
@@ -120,6 +120,9 @@ pub fn backups(file: &Path, candidates: &[PathBuf]) -> Output {
         report.assessment,
         json!(report.anchor)
     );
+    if let Some(ancestry) = &report.ancestry {
+        let _ = writeln!(text, "Ancestry {}", json!(ancestry));
+    }
     for row in &report.candidates {
         let _ = writeln!(text, "  {}", safe(&json!(row).to_string()));
     }

@@ -359,3 +359,83 @@ fn audit_rejects_wrong_pass_id_and_reports_uncorroborated_history_independently(
     let found = checked(&["receipt", file, "--caller-ref", REFERENCE], 1);
     assert_eq!(found["error"]["code"], "witness-unavailable");
 }
+
+#[test]
+fn backup_ancestry_proves_nested_tips_and_keeps_divergent_branches() {
+    let case = Case::new();
+    let p = case.pass("pass", &approval());
+    let file = s(&p);
+    let ledger = hallpass::ledger_path(&p);
+    debit(file, "anchor1");
+    debit(file, "anchor2");
+    let anchor = bytes(&ledger);
+    let anchor_witness = bytes(&witness(&case));
+    let mut paths = Vec::new();
+    for n in 3..=8 {
+        debit(file, &format!("step{n}"));
+        if n % 2 == 0 {
+            paths.push(case.pass(
+                &format!("tip{n}"),
+                &fs::read_to_string(&ledger).expect("ledger"),
+            ));
+        }
+    }
+    let copy = case.pass("copy", &fs::read_to_string(&paths[0]).expect("copy"));
+    fs::write(&ledger, &anchor).expect("restore");
+    fs::write(witness(&case), &anchor_witness).expect("restore witness");
+    debit(file, "divergent");
+    let other = case.pass("other", &fs::read_to_string(&ledger).expect("other"));
+    let broken = case.pass(
+        "broken",
+        &format!("{}bad\n", fs::read_to_string(&paths[2]).expect("tip")),
+    );
+    fs::write(witness(&case), &anchor_witness).expect("restore witness");
+    let report = checked(
+        &[
+            "compare-backups",
+            file,
+            "--ancestry",
+            s(&paths[0]),
+            s(&paths[1]),
+            s(&paths[2]),
+            s(&copy),
+        ],
+        0,
+    );
+    assert_eq!(report["ancestry"]["maximal_groups"], serde_json::json!([3]));
+    assert_eq!(
+        report["ancestry"]["prefix_links"],
+        serde_json::json!([[1, 2], [1, 3], [2, 3]])
+    );
+    assert_eq!(report["candidates"][3]["tip_group"], 1);
+    let divergent = checked(
+        &[
+            "compare-backups",
+            file,
+            "--ancestry",
+            s(&paths[2]),
+            s(&other),
+        ],
+        2,
+    );
+    assert_eq!(divergent["assessment"], "ambiguous");
+    assert_eq!(
+        divergent["ancestry"]["maximal_groups"],
+        serde_json::json!([1, 2])
+    );
+    let partial = checked(
+        &[
+            "compare-backups",
+            file,
+            "--ancestry",
+            s(&paths[0]),
+            s(&broken),
+        ],
+        1,
+    );
+    assert_eq!(partial["result"], "partial-error");
+    assert_eq!(
+        partial["ancestry"]["maximal_groups"],
+        serde_json::json!([1])
+    );
+}
