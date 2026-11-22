@@ -637,7 +637,13 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
             &Error::Usage("case suite is not UTF-8".to_owned()),
         );
     };
-    let results = match hallpass::review::cases(&loaded.pass, &text) {
+    let reviewed = if strength {
+        hallpass::review::cases_with_strength(&loaded.pass, &text)
+            .map(|(rows, report)| (rows, Some(report)))
+    } else {
+        hallpass::review::cases(&loaded.pass, &text).map(|rows| (rows, None))
+    };
+    let (results, strength_report) = match reviewed {
         Ok(v) => v,
         Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e)),
     };
@@ -664,35 +670,32 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
             text
         },
     };
-    if strength {
-        match hallpass::review::mutation_strength(&loaded.pass, &text) {
-            Ok(report) => {
-                let status = report["result"].as_str().unwrap_or("error");
-                let _ = writeln!(output.text, "Mutation-strength result: {status}.");
-                for mutation in report["mutations"].as_array().into_iter().flatten() {
-                    let _ = write!(
-                        output.text,
-                        "{}: {} -> {}",
-                        mutation["label"], mutation["changed_term"], mutation["status"]
-                    );
-                    if let Some(first) = mutation["first_distinguishing_case"].as_object() {
-                        let _ = write!(
-                            output.text,
-                            " (first distinguished by case {}: {} -> {})",
-                            first["id"], first["baseline"], first["mutated"]
-                        );
-                    }
-                    output.text.push('\n');
-                }
-                if report["truncated"] == true {
-                    output.text.push_str("Mutation analysis was truncated; it does not establish full suite strength.\n");
-                }
-                output.code = if status == "complete" { OK } else { REFUSED };
-                output.json["result"] = status.into();
-                output.json["mutation_strength"] = report;
+    if let Some(report) = strength_report {
+        let status = report["result"].as_str().unwrap_or("error");
+        let _ = writeln!(output.text, "Mutation-strength result: {status}.");
+        for mutation in report["mutations"].as_array().into_iter().flatten() {
+            let _ = write!(
+                output.text,
+                "{}: {} -> {}",
+                mutation["label"], mutation["changed_term"], mutation["status"]
+            );
+            if let Some(first) = mutation["first_distinguishing_case"].as_object() {
+                let _ = write!(
+                    output.text,
+                    " (first distinguished by case {}: {} -> {})",
+                    first["id"], first["baseline"], first["mutated"]
+                );
             }
-            Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e)),
+            output.text.push('\n');
         }
+        if report["truncated"] == true {
+            output.text.push_str(
+                "Mutation analysis was truncated; it does not establish full suite strength.\n",
+            );
+        }
+        output.code = if status == "complete" { OK } else { REFUSED };
+        output.json["result"] = status.into();
+        output.json["mutation_strength"] = report;
     }
     output
 }

@@ -606,8 +606,30 @@ pub fn cases(pass: &Pass, text: &str) -> Result<Vec<serde_json::Value>, String> 
 /// # Errors
 ///
 /// If the suite is malformed or contains invalid cases.
-#[allow(clippy::too_many_lines)]
 pub fn mutation_strength(pass: &Pass, text: &str) -> Result<serde_json::Value, String> {
+    cases_with_strength(pass, text).map(|(_, report)| report)
+}
+
+/// Return the ordinary case results and strength report from one suite evaluation.
+///
+/// # Errors
+/// Returns a diagnostic for invalid suite input.
+pub fn cases_with_strength(
+    pass: &Pass,
+    text: &str,
+) -> Result<(Vec<serde_json::Value>, serde_json::Value), String> {
+    let parsed = parse_cases(text)?;
+    let baseline = evaluate_cases(pass, &parsed);
+    let report = strength_report(pass, &parsed, &baseline)?;
+    Ok((baseline, report))
+}
+
+#[allow(clippy::too_many_lines)]
+fn strength_report(
+    pass: &Pass,
+    parsed: &[ReviewCase],
+    baseline: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
     const MAX_MUTATIONS: usize = 64;
     const MAX_EVALUATIONS: usize = 4_096;
 
@@ -642,8 +664,6 @@ pub fn mutation_strength(pass: &Pass, text: &str) -> Result<serde_json::Value, S
             false
         }
     }
-    let parsed = parse_cases(text)?;
-    let baseline = evaluate_cases(pass, &parsed);
     let baseline_failed = baseline.iter().any(|row| row["match"] != true);
     if baseline_failed {
         return Ok(serde_json::json!({
@@ -740,7 +760,7 @@ pub fn mutation_strength(pass: &Pass, text: &str) -> Result<serde_json::Value, S
                     .map_err(|error| format!("cannot apply adjacent port mutation: {error}"))?;
             }
         }
-        let changed = evaluate_cases(&mutated, &parsed);
+        let changed = evaluate_cases(&mutated, parsed);
         evaluations += changed.len();
         let first = baseline.iter().zip(&changed).find_map(|(before, after)| {
             (before["actual"] != after["actual"]).then(|| {
