@@ -110,6 +110,8 @@ fn exact_reference_across_revisions_ambiguous_lost_and_fresh_are_distinct() {
     assert_eq!(carried["adoption_count"], 1);
     assert!(carried["warnings"].to_string().contains("Carried"));
     let a = archive(&case);
+    let charge_audit = checked(&["audit-charges", file, s(&a)], 2);
+    assert_eq!(charge_audit["gaps"]["adoption-carry"]["sequences"][0], 3);
     let incomplete = checked(&["audit-receipts", file, s(&a)], 2);
     for (seq, reason) in [
         (1, "legacy-spend"),
@@ -437,5 +439,79 @@ fn backup_ancestry_proves_nested_tips_and_keeps_divergent_branches() {
     assert_eq!(
         partial["ancestry"]["maximal_groups"],
         serde_json::json!([1])
+    );
+}
+
+#[test]
+fn charge_audit_uses_each_revision_and_advances_across_missing_archive() {
+    let case = Case::new();
+    let a = archive(&case);
+    let old = approval().replace("requests=1000", "requests=10");
+    let p = case.pass("pass", &old);
+    let file = s(&p);
+    let first = checked(&["archive", file, s(&a)], 0);
+    assert_eq!(
+        checked(&["audit-charges", file, s(&a)], 2)["result"],
+        "empty"
+    );
+    checked(&["spend", file, "requests", "--n", "8"], 0);
+    let first_witness = bytes(&witness(&case));
+    fs::write(&p, old.replace("requests=10", "requests=5")).expect("lower");
+    checked(&["archive", file, s(&a)], 0);
+    fs::write(&p, old.replace("requests=10", "requests=12")).expect("raise");
+    checked(&["archive", file, s(&a)], 0);
+    checked(&["spend", file, "--charge", "requests=4"], 0);
+    let cmd = ["audit-charges", file, s(&a)];
+    let complete = checked(&cmd, 0);
+    assert_eq!(complete["checked_debits"], 2);
+    fs::remove_file(a.join(first["digest"].as_str().expect("digest"))).expect("missing archive");
+    let gap = checked(&cmd, 2);
+    assert_eq!(gap["result"], "incomplete");
+    assert_eq!(gap["gaps"]["archive-missing"]["sequences"][0], 1);
+    let ledger = hallpass::ledger_path(&p);
+    let text = fs::read_to_string(&ledger).expect("ledger");
+    fs::write(witness(&case), first_witness).expect("lag witness");
+    fs::write(&ledger, text.replace("\"n\":4", "\"n\":5")).expect("overcharge");
+    let mixed = checked(&cmd, 2);
+    assert_eq!(mixed["result"], "mismatch");
+    assert_eq!(mixed["mismatches"]["details"][0]["seq"], 2);
+    assert_eq!(mixed["mismatches"]["details"][0]["counter"], "requests");
+    assert_eq!(mixed["gaps"]["archive-missing"]["count"], 1);
+    fs::write(
+        &ledger,
+        format!("{}bad\n", fs::read_to_string(&ledger).expect("ledger")),
+    )
+    .expect("corrupt");
+    assert_eq!(checked(&cmd, 1)["error"]["code"], "ledger-corrupt");
+}
+
+#[test]
+fn charge_audit_detects_unknown_and_missing_required_counter() {
+    let case = Case::new();
+    let a = archive(&case);
+    let pass = format!(
+        "required_counters_v1 = [\"requests\", \"bytes\"]\n{}",
+        approval()
+    );
+    let p = case.pass("pass", &pass);
+    let file = s(&p);
+    checked(&["archive", file, s(&a)], 0);
+    debit(file, "anchor");
+    let old_witness = bytes(&witness(&case));
+    debit(file, "tip");
+    let ledger = hallpass::ledger_path(&p);
+    let text = fs::read_to_string(&ledger).expect("ledger");
+    let (prefix, tip) = text.trim_end().rsplit_once('\n').expect("tip");
+    let tip = tip.replace("\"counter\":\"bytes\"", "\"counter\":\"other\"");
+    fs::write(&ledger, format!("{prefix}\n{tip}\n")).expect("change tip");
+    fs::write(witness(&case), old_witness).expect("lag witness");
+    let audit = checked(&["audit-charges", file, s(&a)], 2);
+    let rows = audit["mismatches"]["details"].as_array().expect("details");
+    assert!(rows.iter().any(|r| r["seq"] == 2
+        && r["counter"] == "bytes"
+        && r["reason"] == "required-counter-missing"));
+    assert!(
+        rows.iter()
+            .any(|r| r["seq"] == 2 && r["counter"] == "other" && r["reason"] == "unknown-counter")
     );
 }

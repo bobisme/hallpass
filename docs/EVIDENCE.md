@@ -86,3 +86,18 @@ branch tips. Duplicate tips share a group. Every candidate is fully verified
 again before its hashes are trusted; changed or corrupt candidates produce a
 partial error. An absent witness remains inconclusive. This comparison does not
 restore a backup or prove any external work.
+
+### Audit historical charges
+
+```sh
+hallpass audit-charges engagement.toml approval-archive
+hallpass --json audit-charges engagement.toml approval-archive
+```
+
+Each scalar or atomic debit is checked against the exact archived revision and
+pre-debit totals. Missing revisions leave gaps while recorded arithmetic still
+advances. A report may contain both `archive-missing` gaps and confirmed
+`mismatches`; mismatches take precedence in the result. Adoption carry advances
+totals but is not a verified original debit. `empty` means no debit or carry was
+available; `incomplete` means evidence is missing. The witness is reported
+separately. This numerical audit does not establish endpoints or external work.

@@ -137,3 +137,34 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
     value["result"] = json!(result);
     output("compare-backups", file, code, value, text)
 }
+
+pub fn audit_charges(file: &Path, directory: &Path) -> Output {
+    let report = match hallpass::load(file)
+        .and_then(|p| evidence::audit_charges(&p, &StateDir::from_env(), directory))
+    {
+        Ok(report) => report,
+        Err(e) => return error_output("audit-charges", Some(file), &e),
+    };
+    let mut text = format!(
+        "Charge audit {}. Witness {}. Checked debits {}.\nMismatches {}\nGaps {}\n",
+        report.result,
+        report.witness,
+        report.checked_debits,
+        safe(&json!(report.mismatches).to_string()),
+        safe(&json!(report.gaps).to_string())
+    );
+    for warning in &report.warnings {
+        let _ = writeln!(text, "Warning: {}", safe(warning));
+    }
+    output(
+        "audit-charges",
+        file,
+        if report.result == "complete" {
+            OK
+        } else {
+            REFUSED
+        },
+        json!(report),
+        text,
+    )
+}

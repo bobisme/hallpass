@@ -133,6 +133,13 @@ fn history_guide(name: &str) -> Guide {
             &["hallpass --format json audit-receipts engagement.pass.toml approval-archive"],
             "Archive each reviewed revision before spending with --record-target. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps and the independent witness status. Complete exits 0. Incomplete or mismatch exits 2. A damaged input exits 1.",
         ),
+        "audit-charges" => (
+            &[
+                "hallpass audit-charges engagement.pass.toml approval-archive",
+                "hallpass --json audit-charges engagement.pass.toml approval-archive",
+            ],
+            "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. The witness is reported separately. This checks accounting, not external work or endpoints.",
+        ),
         "compare-backups" => (
             &[
                 "hallpass --format json compare-backups engagement.pass.toml backup-a.ledger backup-b.ledger",
