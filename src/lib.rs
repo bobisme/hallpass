@@ -74,11 +74,11 @@ pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load, load_with_bytes};
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
     CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry, LedgerView,
-    MAX_CALLER_REF, MAX_NOTE, RecordedTarget, SpendChargesOutcome, SpendChargesRequest,
-    SpendOutcome, SpendRequest, Tally, WitnessStatus, adopt, adopt_guarded, display_safe,
-    export_checkpoint, ledger_path, preview_adopt, preview_spend_in, preview_spend_with_clock_in,
-    read_ledger, read_summary, spend, spend_charges, spend_charges_in, spend_charges_with_clock_in,
-    spend_in, spend_with_clock_in, tally, verify_checkpoint,
+    MAX_CALLER_REF, MAX_NOTE, RecordedTarget, ReferenceEvidence, SpendChargesOutcome,
+    SpendChargesRequest, SpendOutcome, SpendRequest, Tally, WitnessStatus, adopt, adopt_guarded,
+    display_safe, export_checkpoint, ledger_path, preview_adopt, preview_spend_in,
+    preview_spend_with_clock_in, read_ledger, read_summary, spend, spend_charges, spend_charges_in,
+    spend_charges_with_clock_in, spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
 pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};

@@ -178,11 +178,15 @@ use std::path::Path;
 
 use super::{
     SpendRequest, append, check_clock, decide_ceiling, decide_spend_targets, lock_for_writing,
-    prepare_witness, preview_snapshot, rfc3339, validate_spend_policy, warn_clock_rollback,
+    prepare_witness,
+    reference::{ReferenceEvidence, ReferenceMatches},
+    rfc3339, validate_spend_policy, visit_preview_snapshot, warn_clock_rollback,
 };
 use crate::request::TargetRefusal;
 use crate::witness::PreparedWitness;
-use crate::{Error, LoadedPass, MAX_TARGETS, Refusal, StateDir, Tally, Witnessed, stamp};
+use crate::{
+    Error, LoadedPass, MAX_TARGETS, Refusal, StateDir, Tally, WitnessStatus, Witnessed, stamp,
+};
 
 /// An atomic debit and the policy inputs shared by all its charges.
 #[derive(Clone, Debug)]
@@ -194,6 +198,8 @@ pub struct SpendChargesRequest<'a> {
     pub policy: SpendRequest<'a>,
     /// Optional caller/run correlation reference retained on disk.
     pub caller_ref: Option<&'a str>,
+    /// Refuse a reference already in this pass's verified history or whose absence is inconclusive.
+    pub require_new_ref: bool,
     /// Retain the target, request name and matching label on disk.
     pub record_targets: bool,
     /// Evaluate current policy and balances without modifying ledger or witness.
@@ -212,6 +218,7 @@ impl<'a> SpendChargesRequest<'a> {
             charges,
             policy: SpendRequest::new(counter, amount),
             caller_ref: None,
+            require_new_ref: false,
             record_targets: false,
             dry_run: false,
         }
@@ -226,6 +233,11 @@ impl<'a> SpendChargesRequest<'a> {
         if self.policy.target.is_none() && self.record_targets {
             return Err(usage("recording a target requires a target"));
         }
+        if self.require_new_ref && self.caller_ref.is_none() {
+            return Err(usage(
+                "requiring a new reference also requires a caller reference",
+            ));
+        }
         if self
             .caller_ref
             .is_some_and(|text| !valid_text(text, MAX_CALLER_REF))
@@ -235,6 +247,10 @@ impl<'a> SpendChargesRequest<'a> {
             )));
         }
         Ok(())
+    }
+
+    fn reference_matches(&self) -> ReferenceMatches<'a> {
+        ReferenceMatches::new(self.caller_ref.filter(|_| self.require_new_ref))
     }
 }
 
@@ -289,6 +305,8 @@ pub struct SpendChargesOutcome {
     pub refused_target: Option<usize>,
     /// Provenance retained by a successful commit.
     pub receipt: Option<DebitReceipt>,
+    /// Historical evidence for a duplicate or inconclusive caller reference.
+    pub reference_evidence: Option<ReferenceEvidence>,
     /// Ledger or witness warnings.
     pub warnings: Vec<String>,
 }
@@ -312,6 +330,8 @@ pub fn spend_charges(
 /// commit, one ledger line is appended and synced before the witness records
 /// all resulting balances. Only success with a sequence authorizes the caller
 /// to proceed. A dry run observes current balances and reserves no funds.
+/// A guarded reference checks local history under both writer locks. Use
+/// the caller's own execution record to reconcile any observed duplicate.
 ///
 /// # Errors
 ///
@@ -355,10 +375,29 @@ fn spend_using(
     if request.dry_run {
         return preview(pass_path, request, state, clock);
     }
-    let mut locked = lock_for_writing(pass_path, state, false, None, request.policy.lock_timeout)?;
-    let (identity, warnings) = prepare_witness(pass_path, &locked, state)?;
+    let mut matches = request.reference_matches();
+    let mut locked = lock_for_writing(
+        pass_path,
+        state,
+        false,
+        None,
+        request.policy.lock_timeout,
+        &mut |event| {
+            matches.observe(event);
+            Ok(())
+        },
+    )?;
+    let (identity, warnings) =
+        prepare_witness(pass_path, &locked, state, !request.require_new_ref)?;
     let now = clock();
     check_clock(now)?;
+    let reference = matches.refusal(
+        &locked.loaded,
+        &request.policy,
+        now,
+        locked.parsed.adoption_count > 0,
+        locked.witness.is_none() && locked.parsed.seq > 0,
+    );
     let mut result = decide_debit(
         &locked.loaded,
         &locked.parsed.tally,
@@ -366,6 +405,7 @@ fn spend_using(
         now,
         warnings,
         locked.parsed.last_time,
+        reference,
     );
     if result.refusal.is_some() {
         return Ok(result);
@@ -442,6 +482,7 @@ pub(super) fn decide_debit(
     now: OffsetDateTime,
     mut warnings: Vec<String>,
     last_time: Option<OffsetDateTime>,
+    reference: Option<(Refusal, ReferenceEvidence)>,
 ) -> SpendChargesOutcome {
     warn_clock_rollback(now, last_time, &mut warnings);
     let mut charges: Vec<_> = request
@@ -460,8 +501,16 @@ pub(super) fn decide_debit(
             }
         })
         .collect();
-    let decision =
-        decide_debit_policy(loaded, &request.policy, request.charges, now).and_then(|labels| {
+    let (reference_refusal, reference_evidence) = reference.unzip();
+    let decision = reference_refusal
+        .map_or(Ok(()), |reason| {
+            Err(TargetRefusal {
+                reason,
+                index: None,
+            })
+        })
+        .and_then(|()| decide_debit_policy(loaded, &request.policy, request.charges, now))
+        .and_then(|labels| {
             for c in &charges {
                 decide_ceiling(loaded, &c.counter, c.amount, c.total, c.spent).map_err(
                     |reason| TargetRefusal {
@@ -492,6 +541,7 @@ pub(super) fn decide_debit(
         labels,
         refused_target,
         receipt: None,
+        reference_evidence,
         warnings,
     }
 }
@@ -526,9 +576,20 @@ fn preview(
     state: &StateDir,
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendChargesOutcome, Error> {
-    let (loaded, mut view) = preview_snapshot(pass_path, state)?;
+    let mut matches = request.reference_matches();
+    let (loaded, mut view) = visit_preview_snapshot(pass_path, state, &mut |event| {
+        matches.observe(event);
+        Ok(())
+    })?;
     let now = clock();
     check_clock(now)?;
+    let reference = matches.refusal(
+        &loaded,
+        &request.policy,
+        now,
+        view.adoption_count > 0,
+        view.witness == WitnessStatus::Missing && view.tally.entries > 0,
+    );
     let outcome = decide_debit(
         &loaded,
         &view.tally,
@@ -536,6 +597,7 @@ fn preview(
         now,
         std::mem::take(&mut view.warnings),
         view.last_time,
+        reference,
     );
     if outcome.refusal.is_none() {
         for charge in &outcome.charges {
@@ -784,6 +846,94 @@ mod tests {
                 .entries,
             1
         );
+    }
+
+    #[test]
+    fn guarded_retry_verifies_past_a_match_after_a_witness_failure() {
+        let (_dir, path, state) = setup();
+        let charges = costs(100);
+        let mut request = SpendChargesRequest::new(&charges);
+        request.require_new_ref = true;
+        assert!(matches!(
+            spend_charges_in(&path, &request, NOW, &state),
+            Err(Error::Usage(_))
+        ));
+        assert!(!crate::ledger_path(&path).exists());
+        request.caller_ref = Some("synced");
+        let failure = spend_using(
+            &path,
+            &request,
+            &state,
+            || NOW,
+            |_, _, _| Err(Error::Usage("simulated witness failure".to_owned())),
+        );
+        assert!(matches!(
+            failure,
+            Err(Error::WitnessNotUpdated { seq: 1, .. })
+        ));
+        let loaded = load(&path).expect("pass");
+        let ledger = crate::ledger_path(&path);
+        let durable = fs::read_to_string(&ledger).expect("synced ledger");
+        let summary = crate::read_summary(&loaded, &state).expect("verified extension");
+        assert_eq!(summary.witness, WitnessStatus::Extended { added: 1 });
+
+        fs::write(&ledger, format!("{durable}malformed suffix\n")).expect("damage fixture");
+        for preview in [false, true] {
+            request.dry_run = preview;
+            assert!(matches!(
+                spend_charges_in(&path, &request, NOW, &state),
+                Err(Error::LedgerCorrupt { line: 3, .. })
+            ));
+        }
+        fs::write(&ledger, &durable).expect("restore fixture");
+        for preview in [true, false] {
+            request.dry_run = preview;
+            let outcome = spend_charges_in(&path, &request, NOW, &state).expect("decision");
+            assert_eq!(outcome.seq, None);
+            assert_eq!(
+                outcome.refusal.expect("duplicate").code,
+                RefusalCode::DuplicateReference
+            );
+            assert_eq!(outcome.reference_evidence.expect("evidence").sequences, [1]);
+        }
+        assert_eq!(fs::read_to_string(ledger).expect("ledger"), durable);
+        let summary = crate::read_summary(&loaded, &state).expect("verified tip");
+        assert_eq!(summary.witness, WitnessStatus::Matches);
+        assert_eq!(summary.tally.entries, 1);
+    }
+
+    #[test]
+    fn guarded_matching_bounds_details_and_counts_every_unguarded_duplicate() {
+        let (_dir, path, state) = setup();
+        let count = super::super::evidence::DETAIL_LIMIT + 1;
+        let source =
+            crate::pass::tests::GOOD.replace("calls = 6", &format!("calls = {}", count + 1));
+        fs::write(&path, source).expect("pass");
+        let charges = [Charge {
+            counter: "calls",
+            amount: 1,
+        }];
+        let mut request = SpendChargesRequest::new(&charges);
+        request.caller_ref = Some("correlation-only");
+        for seq in 1..=count as u64 {
+            assert_eq!(
+                spend_charges_in(&path, &request, NOW, &state)
+                    .expect("committed")
+                    .seq,
+                Some(seq)
+            );
+        }
+        request.require_new_ref = true;
+        let reply = spend_charges_in(&path, &request, NOW, &state).expect("duplicate");
+        assert_eq!(reply.seq, None);
+        assert_eq!(
+            reply.refusal.expect("refused").code,
+            RefusalCode::DuplicateReference
+        );
+        let evidence = reply.reference_evidence.expect("evidence");
+        assert_eq!(evidence.match_count, count as u64);
+        assert_eq!(evidence.sequences, (1..count as u64).collect::<Vec<_>>());
+        assert!(evidence.truncated);
     }
 
     #[test]

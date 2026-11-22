@@ -54,6 +54,27 @@ pub fn decide_targets<'a>(
     now: OffsetDateTime,
     needed: Duration,
 ) -> Result<Vec<String>, TargetRefusal> {
+    check_revision_window(loaded, expected, now, needed)?;
+    targets
+        .enumerate()
+        .map(
+            |(i, (target, name))| match loaded.pass.permits_named(&target, name, now, needed) {
+                Decision::Allowed { label } => Ok(label),
+                Decision::Refused(reason) => Err(TargetRefusal {
+                    reason,
+                    index: Some(i + 1),
+                }),
+            },
+        )
+        .collect()
+}
+
+pub fn check_revision_window(
+    loaded: &LoadedPass,
+    expected: Option<Digest>,
+    now: OffsetDateTime,
+    needed: Duration,
+) -> Result<(), TargetRefusal> {
     if let Some(expected) = expected
         && expected != loaded.digest
     {
@@ -74,19 +95,7 @@ pub fn decide_targets<'a>(
         .map_err(|reason| TargetRefusal {
             reason,
             index: None,
-        })?;
-    targets
-        .enumerate()
-        .map(
-            |(i, (target, name))| match loaded.pass.permits_named(&target, name, now, needed) {
-                Decision::Allowed { label } => Ok(label),
-                Decision::Refused(reason) => Err(TargetRefusal {
-                    reason,
-                    index: Some(i + 1),
-                }),
-            },
-        )
-        .collect()
+        })
 }
 
 /// Read the current pass and ledger, then check every target against one revision.

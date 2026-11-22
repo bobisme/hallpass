@@ -617,6 +617,22 @@ sequence. An older incompatible reader fails closed on a versioned debit.
 Charges remain monotone through restoration and adoption. Callers commit
 at first send and reconcile ambiguous append outcomes against the ledger.
 
+With `spend --require-new-ref --caller-ref TEXT`, the verified writer scan
+checks that exact reference under both locks across all digests of the pass
+ID. Digest and window refusals take precedence. A duplicate exits 2 with
+`refusal.code=duplicate-reference`, `seq: null`, and `reference_evidence`
+containing `caller_ref`, `match_count`, the first 64 `sequences` in ledger
+order, and `truncated`. The scan verifies the rest of the chain after a
+match, including entries after the witness.
+
+An absent reference in an adopted history or a nonempty unanchored history
+exits 2 with `reference-inconclusive` and empty match details. A guarded
+refusal does not anchor an unanchored nonempty history. Missing or invalid
+caller references are usage errors. A dry run reports observed matches
+without a reservation. The guard coordinates cooperating guarded writers
+on the same local history. External execution requires a separate record.
+The Rust option is `SpendChargesRequest::require_new_ref`.
+
 ### Rehearsing a budget
 
 Run `hallpass --format json capacity PASS` with the same unit syntax as spend,

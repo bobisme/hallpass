@@ -183,7 +183,7 @@ impl ValidatedStep {
             request.policy.name = first.name.as_ref();
             request.policy.additional_targets = rest;
         }
-        decide_debit(pass, tally, &request, self.instant, Vec::new(), last)
+        decide_debit(pass, tally, &request, self.instant, Vec::new(), last, None)
     }
 }
 

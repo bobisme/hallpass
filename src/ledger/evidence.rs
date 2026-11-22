@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::{
-    Checkpoint, DebitCharge, RecordedTarget, VerifiedEvent, debit, exists, inspect_candidate,
-    rfc3339, visit_view,
+    Checkpoint, DebitCharge, DebitReceipt, LedgerDebit, RecordedTarget, VerifiedEvent, debit,
+    exists, inspect_candidate, rfc3339, visit_view,
 };
 use crate::{
     Decision, Digest, Error, HostName, LoadedPass, Pass, StateDir, Target, retrieve_pass,
@@ -40,6 +40,17 @@ pub struct ReceiptLookup {
     pub warnings: Vec<String>,
 }
 
+pub(super) fn match_reference<'a>(
+    event: &'a VerifiedEvent,
+    reference: &str,
+) -> Option<(&'a LedgerDebit, &'a DebitReceipt)> {
+    let VerifiedEvent::Debit(debit) = event else {
+        return None;
+    };
+    let receipt = debit.receipt.as_ref()?;
+    (receipt.caller_ref.as_deref() == Some(reference)).then_some((debit, receipt))
+}
+
 /// Look up exact caller references across revisions. A result describes only the available history.
 ///
 /// # Errors
@@ -58,10 +69,7 @@ pub fn lookup_receipt(
     let mut count = 0;
     let mut matches = Vec::new();
     let view = visit_view(loaded, state, false, &mut |event| {
-        if let VerifiedEvent::Debit(d) = event
-            && let Some(r) = &d.receipt
-            && r.caller_ref.as_deref() == Some(reference)
-        {
+        if let Some((d, r)) = match_reference(event, reference) {
             count += 1;
             if matches.len() < DETAIL_LIMIT {
                 matches.push(FoundReceipt {
