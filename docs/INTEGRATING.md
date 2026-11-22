@@ -25,6 +25,25 @@ An unverified signature exits 2. Input and missing-verifier errors exit 1.
 Historical verification can succeed after expiry. Supply the returned digest
 to `permits --digest` or `spend --digest` for the live decision.
 
+To retain exactly the bytes that passed verification, create a private archive
+once and request publication in the same invocation:
+
+```text
+mkdir -m 700 approval-archive
+hallpass --format json verify-approval engagement.pass.toml \
+  --signature engagement.pass.toml.sig \
+  --allowed-signers /etc/hallpass/trusted_signers \
+  --principal owner@example.org --archive approval-archive
+```
+
+The successful JSON response includes `digest` and the requested `archive`
+destination. Pin that digest for the live check. If someone edits the working
+pass later, retrieve the originally verified bytes with
+`hallpass --format text retrieve approval-archive "$digest"`. The archive
+stores pass bytes only. Keep the detached signature, the trusted allowed
+signers file and the expected principal separately; those are needed to
+verify the archived bytes again. A failed signature check publishes nothing.
+
 Run `hallpass diff OLD NEW` to inspect the changed terms and both byte
 digests. Run `hallpass lint NEW` to see where a second destination relaxes a
 name restriction.
@@ -45,6 +64,25 @@ Each case supplies an offset timestamp, target, and an expected outcome of
 1,024 cases and 256 KiB. Exit 0 means every expectation matched, 2 means a
 mismatch, and 1 means invalid input. The report includes the pass digest
 and preserves input order. The command reads no accounting state.
+
+Opt in to a bounded suite-strength check with `--strength`:
+
+```text
+hallpass --format json test-pass docs/review-approval.toml \
+  docs/review-suite-weak.toml --strength
+hallpass --format json test-pass docs/review-approval.toml \
+  docs/review-suite-strong.toml --strength
+```
+
+The weak fixture checks only an allowed name. Its report shows that removing
+the destination's names survives. The strong fixture adds a wrong-name
+refusal and an adjacent-port refusal; the report names the first case that
+distinguishes each edit. Each mutation changes one destination term in an
+in-memory copy and uses the ordinary evaluator. Overlapping rules can make an
+edit semantically redundant, so survivors are review prompts and never
+instructions to alter the approval. The check caps itself at 64 mutations and
+4,096 case evaluations. Inspect `truncated`; partial analysis cannot be
+reported as full coverage. A failing baseline stops mutation analysis.
 
 ## Mapping written approvals and practice runs
 

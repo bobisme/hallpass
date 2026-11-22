@@ -67,7 +67,7 @@ pub use address::{
     AddressError, Ipv6Transition, Network, Protocol, Target, embedded_ipv4, ipv6_transition,
     parse_address, parse_network,
 };
-pub use archive::{archive_pass, retrieve_pass};
+pub use archive::{archive_pass, archive_pass_bytes, retrieve_pass};
 pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
 pub use error::{Error, MissingLedger};
 pub use files::{Digest, LoadedPass, MAX_PASS_BYTES, load, load_with_bytes};

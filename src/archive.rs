@@ -47,14 +47,40 @@ fn destination(dir: &Path, digest: Digest) -> PathBuf {
 /// # Errors
 /// If the pass or directory is unusable, or a conflicting file exists.
 pub fn archive_pass(pass: &Path, dir: &Path) -> Result<Digest, Error> {
-    let directory_file = directory(dir)?;
     let bytes = read_pass_bytes(pass)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| Error::Usage("pass is not UTF-8".into()))?;
     Pass::parse(text).map_err(|problems| Error::Invalid {
         path: pass.to_path_buf(),
         problems,
     })?;
-    let digest = Digest::of(&bytes);
+    publish_bytes(&bytes, dir)
+}
+
+/// Archive an already loaded pass snapshot in an existing private directory.
+/// The bytes are validated again so callers cannot retain malformed pass data.
+///
+/// # Errors
+///
+/// If the bytes do not parse as a pass, the directory is insecure or
+/// unavailable, or an existing content-addressed entry conflicts.
+pub fn archive_pass_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
+    if bytes.len() as u64 > MAX_PASS_BYTES {
+        return Err(Error::TooLarge {
+            path: "<bytes>".into(),
+            limit: MAX_PASS_BYTES,
+        });
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Usage("pass is not UTF-8".into()))?;
+    Pass::parse(text).map_err(|problems| Error::Invalid {
+        path: "<bytes>".into(),
+        problems,
+    })?;
+    publish_bytes(bytes, dir)
+}
+
+fn publish_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
+    let directory_file = directory(dir)?;
+    let digest = Digest::of(bytes);
     let target = destination(dir, digest);
     let temp = dir.join(format!(
         ".hallpass-{}-{}",
@@ -68,7 +94,7 @@ pub fn archive_pass(pass: &Path, dir: &Path) -> Result<Digest, Error> {
         .open(&temp)
         .map_err(|e| Error::io(&temp, &e))?;
     let result = (|| {
-        file.write_all(&bytes).map_err(|e| Error::io(&temp, &e))?;
+        file.write_all(bytes).map_err(|e| Error::io(&temp, &e))?;
         file.sync_all().map_err(|e| Error::io(&temp, &e))?;
         match fs::hard_link(&temp, &target) {
             Ok(()) => Ok(()),

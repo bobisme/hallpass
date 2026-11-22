@@ -39,6 +39,13 @@ digest-pinning workflow in the [integration guide](INTEGRATING.md).
 `hallpass test-pass PASS SUITE` checks up to 1,024 ordered cases offline.
 Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
 invalid input or an error. See the [example suite](review-suite.toml).
+The opt-in `--strength` mode first checks the baseline, then evaluates up to 64
+in-memory mutations that remove destination name restrictions or extend a
+port range by one adjacent valid port. It reports the first case that
+distinguishes each edit or marks the edit as surviving. Work is capped at
+4,096 total case evaluations; incomplete analysis exits 2 and is explicitly
+truncated. Survivors are review prompts, never instructions to change the
+approval.
 
 `check` and `status` report exact declared address-space unions separately for
 IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`

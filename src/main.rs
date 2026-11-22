@@ -238,6 +238,9 @@ enum Command {
         /// Expected signer identity selected by the verifier.
         #[arg(long)]
         principal: String,
+        /// Retain the exact verified pass bytes in this private archive.
+        #[arg(long, value_name = "DIR")]
+        archive: Option<PathBuf>,
     },
     /// Compare two pass revisions without authorizing either one.
     Diff(DiffArgs),
@@ -261,6 +264,9 @@ enum Command {
         file: PathBuf,
         /// TOML suite with version = 1 and dated `[[case]]` examples.
         cases: PathBuf,
+        /// Replay the suite against bounded in-memory loosened-rule mutations.
+        #[arg(long)]
+        strength: bool,
     },
     /// Derive a stable ID from an owner's written approval identity.
     ApprovalId {
@@ -600,7 +606,7 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
     }
 }
 
-fn review_cases(file: &Path, cases_file: &Path) -> Output {
+fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
     let loaded = match hallpass::load(file) {
         Ok(v) => v,
         Err(e) => return error_output("test-pass", Some(file), &e),
@@ -636,7 +642,7 @@ fn review_cases(file: &Path, cases_file: &Path) -> Output {
         Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e)),
     };
     let mismatches = results.iter().filter(|v| v["match"] == false).count();
-    Output {
+    let mut output = Output {
         code: if mismatches == 0 { OK } else { REFUSED },
         json: json!({"command":"test-pass","result":if mismatches==0{"ok"}else{"mismatch"},"file":file.display().to_string(),"cases":cases_file.display().to_string(),"digest":loaded.digest.to_string(),"results":results,"mismatches":mismatches,"warnings":[]}),
         text: {
@@ -657,7 +663,38 @@ fn review_cases(file: &Path, cases_file: &Path) -> Output {
             }
             text
         },
+    };
+    if strength {
+        match hallpass::review::mutation_strength(&loaded.pass, &text) {
+            Ok(report) => {
+                let status = report["result"].as_str().unwrap_or("error");
+                let _ = writeln!(output.text, "Mutation-strength result: {status}.");
+                for mutation in report["mutations"].as_array().into_iter().flatten() {
+                    let _ = write!(
+                        output.text,
+                        "{}: {} -> {}",
+                        mutation["label"], mutation["changed_term"], mutation["status"]
+                    );
+                    if let Some(first) = mutation["first_distinguishing_case"].as_object() {
+                        let _ = write!(
+                            output.text,
+                            " (first distinguished by case {}: {} -> {})",
+                            first["id"], first["baseline"], first["mutated"]
+                        );
+                    }
+                    output.text.push('\n');
+                }
+                if report["truncated"] == true {
+                    output.text.push_str("Mutation analysis was truncated; it does not establish full suite strength.\n");
+                }
+                output.code = if status == "complete" { OK } else { REFUSED };
+                output.json["result"] = status.into();
+                output.json["mutation_strength"] = report;
+            }
+            Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e)),
+        }
     }
+    output
 }
 
 fn approval_id(owner: &str, reference: &str) -> Output {
@@ -1646,7 +1683,7 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // One exhaustive dispatch keeps the command mapping reviewable.
 fn run(cli: &Cli, format: Format) -> Output {
     let name = cli.command.name();
     let clock = match command_clock(&cli.command) {
@@ -1730,11 +1767,22 @@ fn run(cli: &Cli, format: Format) -> Output {
             signature,
             allowed_signers,
             principal,
-        } => cli_verify::verify_approval(file, signature, allowed_signers, principal),
+            archive,
+        } => cli_verify::verify_approval(
+            file,
+            signature,
+            allowed_signers,
+            principal,
+            archive.as_deref(),
+        ),
         Command::Diff(args) => cli_diff::review_diff(args),
         Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),
         Command::Lint { file } => review_lint(file, &clock),
-        Command::Cases { file, cases } => review_cases(file, cases),
+        Command::Cases {
+            file,
+            cases,
+            strength,
+        } => review_cases(file, cases, *strength),
         Command::ApprovalId { owner, reference } => approval_id(owner, reference),
     }
 }

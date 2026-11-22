@@ -74,29 +74,49 @@ fn verified(bytes: &[u8], signature: &Path, trust: &Path, principal: &str) -> Re
     Ok(status.success())
 }
 
-pub fn verify_approval(path: &Path, signature: &Path, trust: &Path, principal: &str) -> Output {
+pub fn verify_approval(
+    path: &Path,
+    signature: &Path,
+    trust: &Path,
+    principal: &str,
+    archive: Option<&Path>,
+) -> Output {
     let (loaded, bytes) = match hallpass::load_with_bytes(path) {
         Ok(value) => value,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
     match verified(&bytes, signature, trust, principal) {
-        Ok(true) => Output {
-            code: OK,
-            text: format!(
-                "Verified signature from {} over pass {} ({}). Supply this digest for the live policy check.\n",
-                safe(principal),
-                loaded.pass.id,
+        Ok(true) => {
+            let digest = if let Some(directory) = archive {
+                match hallpass::archive_pass_bytes(&bytes, directory) {
+                    Ok(digest) => digest,
+                    Err(e) => return error_output("verify-approval", Some(path), &e),
+                }
+            } else {
                 loaded.digest
-            ),
-            json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":loaded.digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string()}),
-        },
+            };
+            Output {
+                code: OK,
+                text: format!(
+                    "Verified signature from {} over pass {} ({}).{} Supply this digest for the live policy check.\n",
+                    safe(principal),
+                    loaded.pass.id,
+                    digest,
+                    archive.map_or(String::new(), |dir| format!(
+                        " Retained exact bytes in {}.",
+                        safe(&dir.display().to_string())
+                    ))
+                ),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string())}),
+            }
+        }
         Ok(false) => Output {
             code: REFUSED,
             text: format!(
                 "Unverified signature for {}. Check the signed bytes, signature namespace, expected principal and trusted signers.\n",
                 safe(principal)
             ),
-            json: json!({"command":"verify-approval","result":"unverified","expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string()}),
+            json: json!({"command":"verify-approval","result":"unverified","expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string())}),
         },
         Err(e) => error_output("verify-approval", Some(path), &e),
     }
