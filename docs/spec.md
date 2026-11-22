@@ -192,8 +192,9 @@ trailing dot); the pass must spell them that way, a query need not.
 
 ### `spend(pass, counter, n, note, expected digest, needed, target, name, now)`
 
-`target` and `name` are optional. With a target, one spend answers "may I
-send this much to this destination now, and count it".
+With a target, one spend answers "may I send this much to this destination
+now, and count it". On a pass with `require_target_v1 = true`, every debit
+must supply at least one target. The request name follows the destination rules.
 
 1. Request checks, before any file is touched: `n` from 1 to 10^12, note one
    line of at most 500 characters with no control character (newline, tab,
@@ -223,6 +224,7 @@ send this much to this destination now, and count it".
    every refusal of `permits` for it, with the name and `needed`
    (`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`,
    `port-not-listed`, `name-required`, `name-not-listed`),
+   `target-required` (an owner-required destination was omitted),
    `required-counter-missing` (the debit omitted an owner-required charge),
    `unknown-counter` (not in `[ceilings]`), `ceiling-reached` (spent + n >
    total). The destination is decided against the pass as read under the
@@ -398,12 +400,12 @@ be empty. Commands that report a pass path use `file`.
   1-based ledger line for `ledger-corrupt`, else null), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
-- **check**: `digest`, `pass_id`, `problems` (empty).
+- **check**: `digest`, `pass_id`, `require_target`, `problems` (empty).
 - **status**: `digest`, `now`, `test_clock`, `pass` `{id, name, owner,
   reference, operator}`, `window`, `destinations` (list of `{label, kind`
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
   end}`)`, ports_text, hostname, names, whole_network_approved}`), `counters` (list
-  of `{name, total, spent, remaining}`), `unlisted_spends` (list of `{name,
+  of `{name, total, spent, remaining}`), `require_target`, `unlisted_spends` (list of `{name,
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
   `not-checked`; `moved_from` the path the witness last saw, or null),

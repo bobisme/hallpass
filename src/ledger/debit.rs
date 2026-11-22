@@ -177,10 +177,10 @@ pub(super) fn parse_debit(
 use std::path::Path;
 
 use super::{
-    SpendRequest, append, check_clock, decide_ceiling, lock_for_writing, prepare_witness,
-    preview_snapshot, rfc3339, validate_spend_policy, warn_clock_rollback,
+    SpendRequest, append, check_clock, decide_ceiling, decide_spend_targets, lock_for_writing,
+    prepare_witness, preview_snapshot, rfc3339, validate_spend_policy, warn_clock_rollback,
 };
-use crate::request::{TargetRefusal, decide_targets};
+use crate::request::TargetRefusal;
 use crate::witness::PreparedWitness;
 use crate::{Error, LoadedPass, MAX_TARGETS, Refusal, StateDir, Tally, Witnessed, stamp};
 
@@ -439,18 +439,7 @@ pub(super) fn decide_debit(
             }
         })
         .collect();
-    let decision = decide_targets(
-        loaded,
-        request.policy.targets(),
-        request.policy.expect_digest,
-        now,
-        request.policy.needed,
-    )
-    .map_err(|mut refusal| {
-        refusal.reason.message.push_str(". Nothing was recorded");
-        refusal
-    })
-    .and_then(|labels| {
+    let decision = decide_spend_targets(loaded, &request.policy, now).and_then(|labels| {
         super::check_required_charges(&loaded.pass, |name| {
             request.charges.iter().any(|c| c.counter == name)
         })

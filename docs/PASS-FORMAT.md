@@ -69,6 +69,7 @@ requests = 500
 | `id` | yes | 1-64 characters from letters, digits, `.`, `_`, `-`, starting with a letter or digit. The ledger belongs to this id (see "Ledger") |
 | `name` | yes | text, at most 80 characters |
 | `required_counters_v1` | no | list of 1 to 64 distinct counter names from `[ceilings]` that every debit must charge |
+| `require_target_v1` | no | literal `true` to require a destination check on every debit |
 | `[approval]` | yes | see below |
 | `[[destination]]` | yes, at least one | see below; at most 1024 |
 | `[ceilings]` | no | see below; a pass without it has no counters |
@@ -80,6 +81,23 @@ lets a caller charge any subset of declared counters. Older format-1 readers
 reject the new key through their unknown-key check. Each debit uses the rule
 in its current pass revision. Historical ledger records retain their original
 charges. `permits` checks window and destination only.
+
+Place `require_target_v1 = true` before any table header to require a literal
+destination on every debit. For example, the top level of a metered pass
+can start with
+
+```toml
+format = 1
+id = "example-2026-11"
+name = "Metered endpoint checks"
+required_counters_v1 = ["requests", "bytes"]
+require_target_v1 = true
+```
+
+Omit the key to allow targetless accounting. Strict older readers reject this
+new key. Checking a destination does not store it in the ledger. The caller
+opts into retention with `spend --record-target` or `record_targets` in Rust.
+A targetless debit returns `target-required` after digest and window checks.
 
 ## `[approval]`
 

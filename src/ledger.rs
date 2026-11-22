@@ -33,7 +33,7 @@ use crate::error::{Error, MissingLedger};
 use crate::files::{Digest, LoadedPass, WriterWait, load, open_no_follow};
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
-use crate::request::decide_targets;
+use crate::request::{TargetRefusal, decide_targets};
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
 use crate::{MAX_TARGETS, NamedTarget};
 
@@ -115,8 +115,7 @@ pub struct SpendRequest<'a> {
     /// What is about to be touched. When set, the spend is also refused,
     /// and nothing is recorded, unless the pass permits this target now
     /// (as [`crate::Pass::permits_named`] decides, with `name` and
-    /// `needed`). `None` checks only the window and the ceiling: the caller
-    /// must then have asked about every destination itself.
+    /// `needed`). A pass can require at least one target on every debit.
     pub target: Option<Target>,
     /// The host name the request will carry (see
     /// [`crate::Pass::permits_named`]). Only with `target`; a name without
@@ -1118,6 +1117,34 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn decide_spend_targets(
+    loaded: &LoadedPass,
+    request: &SpendRequest<'_>,
+    now: OffsetDateTime,
+) -> Result<Vec<String>, TargetRefusal> {
+    let labels = decide_targets(
+        loaded,
+        request.targets(),
+        request.expect_digest,
+        now,
+        request.needed,
+    )
+    .map_err(|mut refusal| {
+        refusal.reason.message.push_str(". Nothing was recorded");
+        refusal
+    })?;
+    if loaded.pass.require_target && labels.is_empty() {
+        return Err(TargetRefusal {
+            reason: refused_spend(
+                RefusalCode::TargetRequired,
+                "every debit must check at least one destination; supply a literal target".into(),
+            ),
+            index: None,
+        });
+    }
+    Ok(labels)
+}
+
 /// Apply the same mandatory-charge policy after scope checks for every debit shape.
 fn check_required_charges(
     pass: &crate::Pass,
@@ -1507,13 +1534,7 @@ fn evaluate_spend(
         label: None,
         warnings,
     };
-    match decide_targets(
-        loaded,
-        request.targets(),
-        request.expect_digest,
-        now,
-        request.needed,
-    ) {
+    match decide_spend_targets(loaded, request, now) {
         Ok(labels) => match check_required_charges(&loaded.pass, |name| name == request.counter)
             .and_then(|()| decide_ceiling(loaded, request.counter, request.amount, total, spent))
         {
@@ -1523,8 +1544,7 @@ fn evaluate_spend(
             }
             Err(reason) => outcome.refusal = Some(reason),
         },
-        Err(mut r) => {
-            r.reason.message.push_str(". Nothing was recorded");
+        Err(r) => {
             outcome.refused_target = r.index;
             outcome.refusal = Some(r.reason);
         }

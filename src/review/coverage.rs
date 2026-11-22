@@ -9,6 +9,7 @@ pub struct Capabilities {
     pub endpoints: bool,
     pub names: bool,
     pub live_window: bool,
+    pub target_on_every_debit: bool,
     pub counters: BTreeSet<String>,
 }
 
@@ -23,10 +24,10 @@ impl Capabilities {
         if tokens.len() == 1 && tokens[0] == "none" {
             return Ok(caps);
         }
-        if tokens.is_empty() || tokens.len() > MAX_COUNTERS + 3 {
+        if tokens.is_empty() || tokens.len() > MAX_COUNTERS + 4 {
             return Err(format!(
                 "supply 1 to {} capability tokens",
-                MAX_COUNTERS + 3
+                MAX_COUNTERS + 4
             ));
         }
         for token in tokens {
@@ -34,13 +35,16 @@ impl Capabilities {
                 "endpoints" => !std::mem::replace(&mut caps.endpoints, true),
                 "names" => !std::mem::replace(&mut caps.names, true),
                 "live-window" => !std::mem::replace(&mut caps.live_window, true),
+                "target-on-every-debit" => {
+                    !std::mem::replace(&mut caps.target_on_every_debit, true)
+                }
                 "none" => return Err("use none as the sole capability".into()),
                 t => {
                     let name = t
                         .strip_prefix("charge:")
                         .filter(|s| is_counter_name(s))
                         .ok_or_else(|| {
-                            "use endpoints, names, live-window, charge:COUNTER or none".to_owned()
+                            "use endpoints, names, live-window, target-on-every-debit, charge:COUNTER or none".to_owned()
                         })?;
                     if caps.counters.len() >= MAX_COUNTERS {
                         return Err(format!("declare at most {MAX_COUNTERS} counters"));
@@ -63,6 +67,7 @@ pub enum CoverageFinding {
     MissingEndpoints { label: String },
     MissingNames { label: String },
     MissingLiveWindow,
+    MissingTargetOnEveryDebit,
     MissingCounter { counter: String },
 }
 
@@ -80,6 +85,9 @@ impl std::fmt::Display for CoverageFinding {
             Self::MissingLiveWindow => {
                 f.write_str("Check the live approval window and revocation.")
             }
+            Self::MissingTargetOnEveryDebit => {
+                f.write_str("Supply a literal target for scope checking on every debit.")
+            }
             Self::MissingCounter { counter } => write!(
                 f,
                 "Charge the {counter} counter for each applicable operation."
@@ -93,6 +101,7 @@ impl std::fmt::Display for CoverageFinding {
 pub struct CoverageReport {
     pub pass_id: String,
     pub digest: String,
+    pub require_target: bool,
     pub findings: Vec<CoverageFinding>,
 }
 
@@ -102,6 +111,9 @@ pub fn consumer_coverage(loaded: &LoadedPass, caps: &Capabilities) -> CoverageRe
     let mut findings = Vec::new();
     if !caps.live_window {
         findings.push(CoverageFinding::MissingLiveWindow);
+    }
+    if loaded.pass.require_target && !caps.target_on_every_debit {
+        findings.push(CoverageFinding::MissingTargetOnEveryDebit);
     }
     for rule in &loaded.pass.destinations {
         if !caps.endpoints {
@@ -125,6 +137,7 @@ pub fn consumer_coverage(loaded: &LoadedPass, caps: &Capabilities) -> CoverageRe
     CoverageReport {
         digest: loaded.digest.to_string(),
         pass_id: loaded.pass.id.clone(),
+        require_target: loaded.pass.require_target,
         findings,
     }
 }

@@ -91,9 +91,10 @@ below exercises this contract with a callback.
 
 `spend --to` decides the destination, the window, revocation and the
 ceiling together, under one lock, against one reading of the pass file. If
-any of them refuses, nothing is recorded. Without `--to`, `spend` checks only
-the window and the ceiling; the caller must then have asked `permits` for
-every destination itself.
+any of them refuses, nothing is recorded. When `check` or `status` returns
+`require_target: true`, omit `--to` and the debit is refused. On a pass
+that permits targetless accounting, the caller must have asked `permits`
+for every destination itself before a targetless debit.
 
 | Exit | `result` | Meaning | What the caller does |
 |---|---|---|---|
@@ -162,7 +163,8 @@ exit 2
 
 Declare the combined components with another `--can charge:calls` once that
 accounting is in place. Exit 0 with `covered` describes the operator-supplied
-declaration. This comparison reads no ledger, spends no budget and grants
+declaration. Use `--can target-on-every-debit` when the consumer supplies a
+target for scope checking with each debit. This comparison reads no ledger, spends no budget and grants
 no live permission. Invalid declarations give a usage error and exit 1.
 
 Before the first packet of the first call. The call may last two minutes, so

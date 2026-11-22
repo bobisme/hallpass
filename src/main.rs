@@ -128,7 +128,7 @@ enum Command {
         /// Assess what would fit without recording anything or reserving budget.
         #[arg(long)]
         dry_run: bool,
-        /// What the spend pays for: `ADDRESS:PORT/PROTOCOL`. Refuse, and record nothing, unless the pass permits it now. Without it only the window and the ceiling are checked.
+        /// Literal endpoint to check with the debit. Supply at least one when the owner requires a target.
         #[arg(long, value_name = "ADDR:PORT/PROTO[@NAME]")]
         to: Vec<String>,
         /// The host name the request will carry, as for `permits --name`. Only with --to.
@@ -243,7 +243,7 @@ enum Command {
     ConsumerCoverage {
         /// Pass whose enforced terms should be covered.
         file: PathBuf,
-        /// Repeat for endpoints, names, live-window and charge:COUNTER, or use none alone.
+        /// Repeat for endpoints, names, live-window, target-on-every-debit and charge:COUNTER, or use none alone.
         #[arg(long, required = true, value_name = "CAPABILITY")]
         can: Vec<String>,
     },
@@ -486,6 +486,11 @@ fn check(file: &Path) -> Output {
     match hallpass::load(file) {
         Ok(loaded) => {
             let breadth = hallpass::review::breadth(&loaded.pass);
+            let target_term = if loaded.pass.require_target {
+                "Every debit requires a checked destination.\n"
+            } else {
+                ""
+            };
             Output {
                 code: OK,
                 json: json!({
@@ -494,12 +499,13 @@ fn check(file: &Path) -> Output {
                     "file": file.display().to_string(),
                     "digest": loaded.digest.to_string(),
                     "pass_id": loaded.pass.id,
+                    "require_target": loaded.pass.require_target,
                     "problems": [],
                     "breadth": breadth,
                     "warnings": hallpass::review::breadth_warnings(&breadth),
                 }),
                 text: format!(
-                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n",
+                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}",
                     file.display(),
                     loaded.pass.id,
                     loaded.pass.destinations.len(),
@@ -544,7 +550,7 @@ fn consumer_coverage(file: &Path, tokens: &[String]) -> Output {
     Output {
         code,
         text,
-        json: json!({"command":"consumer-coverage","result":result,"pass_id":report.pass_id,"digest":report.digest,"declared":caps,"findings":report.findings,"file":file.display().to_string()}),
+        json: json!({"command":"consumer-coverage","result":result,"pass_id":report.pass_id,"digest":report.digest,"declared":caps,"require_target":report.require_target,"findings":report.findings,"file":file.display().to_string()}),
     }
 }
 
@@ -715,6 +721,9 @@ fn status_text(
             pass.required_counters.join(", ")
         );
     }
+    if pass.require_target {
+        text.push_str("Every debit requires a checked destination.\n");
+    }
     text.push_str("Ceilings:\n");
     if pass.ceilings.is_empty() {
         text.push_str("  none\n");
@@ -871,6 +880,7 @@ fn status_with_clock(
             "breadth": breadth,
             "counters": counters,
             "required_counters": pass.required_counters,
+            "require_target": pass.require_target,
             "unlisted_spends": unlisted,
             "ledger": ledger_json(&view),
             "warnings": warnings,
