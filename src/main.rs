@@ -193,6 +193,9 @@ enum Command {
         /// One to 32 ledger files, in the order to report.
         #[arg(required = true, num_args = 1.., value_name = "CANDIDATE")]
         candidates: Vec<PathBuf>,
+        /// Verify prefix relationships between witnessed extensions.
+        #[arg(long)]
+        ancestry: bool,
     },
     /// Export a checkpoint to retain separately from the ledger.
     Checkpoint {
@@ -1819,7 +1822,11 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Retrieve { directory, digest } => retrieve(directory, digest),
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
         Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
-        Command::CompareBackups { file, candidates } => cli_evidence::backups(file, candidates),
+        Command::CompareBackups {
+            file,
+            candidates,
+            ancestry,
+        } => cli_evidence::backups(file, candidates, *ancestry),
         Command::Checkpoint { file } => checkpoint(file),
         Command::VerifyCheckpoint { ledger, checkpoint } => verify_checkpoint(ledger, checkpoint),
         Command::Adopt {

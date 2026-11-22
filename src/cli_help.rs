@@ -133,8 +133,9 @@ fn history_guide(name: &str) -> Guide {
         "compare-backups" => (
             &[
                 "hallpass --format json compare-backups engagement.pass.toml backup-a.ledger backup-b.ledger",
+                "hallpass --format json compare-backups engagement.pass.toml --ancestry backup-a.ledger backup-b.ledger",
             ],
-            "Supply up to 32 candidate ledger files and the pass identifying the witness. Inspect each verified tip, relation and tip_group, then review the assessment. Distinct extensions can conflict. Recheck the chosen file after restoration. Per-file input failures exit 1, preserving other rows.",
+            "Supply up to 32 candidate ledger files and the pass identifying the witness. Inspect each verified tip, relation and tip_group, then review the assessment. By default distinct extensions are ambiguous. With --ancestry, verified prefix links and maximal groups distinguish successive backups from competing branches. Recheck the chosen file after restoration. Per-file input failures exit 1, preserving other rows.",
         ),
         "checkpoint" => (
             &["hallpass --format json checkpoint engagement.pass.toml > checkpoint.json"],

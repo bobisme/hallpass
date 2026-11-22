@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::{
     Checkpoint, DebitCharge, RecordedTarget, VerifiedEvent, debit, exists, inspect_candidate,
-    rfc3339, visit_view,
+    inspect_candidate_checkpoints, rfc3339, visit_view,
 };
 use crate::{
     Decision, Digest, Error, HostName, LoadedPass, Pass, StateDir, Target, retrieve_pass,
@@ -289,6 +289,15 @@ pub struct BackupReport {
     pub candidates: Vec<BackupCandidate>,
     pub errors: usize,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<BackupAncestry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupAncestry {
+    /// Pairs of one-based tip group indices, from prefix to extension.
+    pub prefix_links: Vec<(usize, usize)>,
+    pub maximal_groups: Vec<usize>,
 }
 
 /// Compare individually verified backup tips with one captured witness, including when the live ledger is absent.
@@ -299,6 +308,19 @@ pub fn compare_backups(
     loaded: &LoadedPass,
     state: &StateDir,
     paths: &[PathBuf],
+) -> Result<BackupReport, Error> {
+    compare_backups_with_ancestry(loaded, state, paths, false)
+}
+
+/// Compare backup tips, optionally verifying ancestry among witnessed extensions.
+///
+/// # Errors
+/// Requires between one and `MAX_BACKUPS` explicit paths.
+pub fn compare_backups_with_ancestry(
+    loaded: &LoadedPass,
+    state: &StateDir,
+    paths: &[PathBuf],
+    ancestry: bool,
 ) -> Result<BackupReport, Error> {
     if !(1..=MAX_BACKUPS).contains(&paths.len()) {
         return Err(Error::Usage(format!(
@@ -375,11 +397,15 @@ pub fn compare_backups(
         }
         candidates.push(row);
     }
+    let ancestry_result = ancestry.then(|| analyze_ancestry(paths, &mut candidates, &mut errors));
+    let extension_count = ancestry_result
+        .as_ref()
+        .map_or(extensions.len(), |a| a.maximal_groups.len());
     let assessment = if anchor.is_none() {
         "inconclusive"
-    } else if extensions.len() > 1 {
+    } else if extension_count > 1 {
         "ambiguous"
-    } else if exact || !extensions.is_empty() {
+    } else if exact || extension_count > 0 {
         "preserved"
     } else {
         "no-match"
@@ -391,5 +417,90 @@ pub fn compare_backups(
         candidates,
         errors,
         warnings,
+        ancestry: ancestry_result,
     })
+}
+
+fn analyze_ancestry(
+    paths: &[PathBuf],
+    candidates: &mut [BackupCandidate],
+    errors: &mut usize,
+) -> BackupAncestry {
+    let wanted: BTreeSet<u64> = candidates
+        .iter()
+        .filter(|c| c.relation == "extended")
+        .filter_map(|c| c.tip.as_ref().map(|t| t.seq))
+        .collect();
+    let mut scans = BTreeMap::new();
+    for (i, row) in candidates.iter_mut().enumerate() {
+        if row.relation != "extended" {
+            continue;
+        }
+        match inspect_candidate_checkpoints(&paths[i], &wanted) {
+            Ok((parsed, hashes))
+                if row.tip.as_ref().is_some_and(|tip| {
+                    tip.pass_id == parsed.pass_id
+                        && tip.seq == parsed.seq
+                        && tip.hash == parsed.tail.to_string()
+                }) =>
+            {
+                scans.insert(i + 1, hashes);
+            }
+            result => {
+                *errors += 1;
+                row.relation = "changed";
+                row.error = Some(match result {
+                    Err(e) => BackupError {
+                        code: e.code(),
+                        message: e.to_string(),
+                    },
+                    Ok(_) => BackupError {
+                        code: "candidate-changed",
+                        message: "Candidate changed between verification scans.".into(),
+                    },
+                });
+            }
+        }
+    }
+    let mut links = BTreeSet::new();
+    let mut valid_groups = BTreeSet::new();
+    for a in candidates.iter() {
+        if a.relation != "extended" {
+            continue;
+        }
+        let Some(atip) = &a.tip else {
+            continue;
+        };
+        let Some(agroup) = a.tip_group else {
+            continue;
+        };
+        valid_groups.insert(agroup);
+        for (j, b) in candidates.iter().enumerate() {
+            if b.relation != "extended" {
+                continue;
+            }
+            let Some(btip) = &b.tip else {
+                continue;
+            };
+            let Some(bgroup) = b.tip_group else {
+                continue;
+            };
+            if atip.seq < btip.seq
+                && scans
+                    .get(&(j + 1))
+                    .and_then(|h| h.get(&atip.seq))
+                    .is_some_and(|hash| hash.to_string() == atip.hash)
+            {
+                links.insert((agroup, bgroup));
+            }
+        }
+    }
+    let maximal_groups = valid_groups
+        .into_iter()
+        .filter(|g| !links.iter().any(|(a, _)| a == g))
+        .collect();
+    BackupAncestry {
+        prefix_links: links.into_iter().collect(),
+        maximal_groups,
+    }
 }

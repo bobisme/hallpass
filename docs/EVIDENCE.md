@@ -69,3 +69,20 @@ hallpass --json ledger engagement.toml
 ```
 
 The comparison performs no file discovery, restoration, adoption or witness update.
+
+### Comparing successive backups
+
+By default distinct witnessed extensions are ambiguous, even when one extends
+another. Opt in to full-file ancestry verification:
+
+```sh
+hallpass compare-backups engagement.toml --ancestry copies/friday.ledger copies/saturday.ledger
+hallpass --json compare-backups engagement.toml --ancestry copies/friday.ledger copies/saturday.ledger
+```
+
+`ancestry.prefix_links` lists pairs of one-based tip groups where the first is
+a verified prefix of the second; `maximal_groups` identifies the remaining
+branch tips. Duplicate tips share a group. Every candidate is fully verified
+again before its hashes are trusted; changed or corrupt candidates produce a
+partial error. An absent witness remains inconclusive. This comparison does not
+restore a backup or prove any external work.
