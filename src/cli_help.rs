@@ -45,6 +45,12 @@ fn guide(name: &str) -> Guide {
             &["hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml"],
             "Read a version 1 TOML scenario. Each [[step]] needs a unique id, a quoted RFC 3339 at, and charges = [{counter = 'bytes', n = 40}]. Optional duration is in seconds and targets use ADDR:PORT/PROTO[@NAME]. Inspect starting_spent, steps[].balances and stopped_at. Exit 2 marks the first simulated refusal. A simulation reserves nothing. Submit live spend for each actual unit.",
         ),
+        "capacity" => (
+            &[
+                "hallpass --format json capacity docs/required-counters.toml --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp@app.example.org",
+            ],
+            "Supply the same costs, ordered targets, duration and digest as one spend. On exit 0 read units, limiting_counters and counters[].remaining_after. A valid unit can have units=0 with a budget unit_refusal. Exit 2 reports invalid policy with no usable count. The result is a budget snapshot. Each live unit still needs a successful spend.",
+        ),
         "status" => (
             &["hallpass --format json status engagement.pass.toml"],
             "Review the owner, literal destinations, window, ceilings and warnings. Capture digest for the next permits or spend request. A valid window alone grants no target or debit.",

@@ -4,6 +4,7 @@
 //! Every command accepts `--format json` and then prints one JSON object on
 //! standard output.
 
+mod cli_debit;
 mod cli_evidence;
 mod cli_help;
 
@@ -74,6 +75,11 @@ enum Command {
         /// Local version 1 TOML scenario with ordered steps, explicit instants and charge lists.
         scenario: PathBuf,
     },
+    /// Count identical debit units that fit the current budgets.
+    #[command(
+        override_usage = "hallpass capacity [OPTIONS] <FILE> <COUNTER> [--n N]\n       hallpass capacity [OPTIONS] <FILE> --charge COUNTER=N [--charge COUNTER=N ...]"
+    )]
+    Capacity(cli_debit::DebitUnit),
     /// Show who approved, the window, destinations and ceilings.
     Status {
         /// The pass file.
@@ -105,17 +111,8 @@ enum Command {
         override_usage = "hallpass spend [OPTIONS] <FILE> <COUNTER> [--n N]\n       hallpass spend [OPTIONS] <FILE> --charge COUNTER=N [--charge COUNTER=N ...]"
     )]
     Spend {
-        /// Validated TOML pass supplying the window, scope and ceilings.
-        file: PathBuf,
-        /// The counter name, one of the pass's ceilings.
-        #[arg(required_unless_present = "charges", conflicts_with = "charges")]
-        counter: Option<String>,
-        /// The amount to spend (default 1 with a positional counter).
-        #[arg(long = "n", value_name = "N", requires = "counter")]
-        amount: Option<u64>,
-        /// One named cost of this unit. Repeat for each counter.
-        #[arg(long = "charge", value_name = "COUNTER=N", conflicts_with_all = ["counter", "amount"])]
-        charges: Vec<String>,
+        #[command(flatten)]
+        unit: cli_debit::DebitUnit,
         /// Maximum milliseconds to acquire both writer locks. Zero tries each once.
         #[arg(long, value_name = "MILLISECONDS", conflicts_with = "dry_run")]
         lock_timeout_ms: Option<u64>,
@@ -128,21 +125,9 @@ enum Command {
         /// Assess what would fit without recording anything or reserving budget.
         #[arg(long)]
         dry_run: bool,
-        /// Literal endpoint to check with the debit. Supply at least one when the owner requires a target.
-        #[arg(long, value_name = "ADDR:PORT/PROTO[@NAME]")]
-        to: Vec<String>,
-        /// The host name the request will carry, as for `permits --name`. Only with --to.
-        #[arg(long, value_name = "HOSTNAME", requires = "to")]
-        name: Option<String>,
         /// A note recorded with the entry.
         #[arg(long)]
         note: Option<String>,
-        /// Refuse unless the pass still has this digest (from `hallpass digest`).
-        #[arg(long, value_name = "DIGEST")]
-        digest: Option<String>,
-        /// Refuse unless the window stays open this many seconds more.
-        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
-        duration: u32,
     },
     /// Print the digest of the pass (SHA-256 of its bytes).
     Digest {
@@ -316,6 +301,7 @@ impl Command {
             Self::Init { .. } => "init",
             Self::Check { .. } => "check",
             Self::Rehearse { .. } => "rehearse",
+            Self::Capacity(_) => "capacity",
             Self::Status { .. } => "status",
             Self::Permits { .. } => "permits",
             Self::Spend { .. } => "spend",
@@ -1004,51 +990,28 @@ fn permits(
 }
 
 struct SpendArgs<'a> {
-    file: &'a Path,
-    counter: Option<&'a str>,
-    amount: u64,
-    charges: &'a [String],
+    unit: &'a cli_debit::DebitUnit,
     lock_timeout_ms: Option<u64>,
     caller_ref: Option<&'a str>,
     record_target: bool,
-    to: &'a [String],
     dry_run: bool,
-    name: Option<&'a str>,
     note: Option<&'a str>,
-    digest: Option<&'a str>,
-    duration: u32,
 }
 
 fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
-    let file = args.file;
-    let expect_digest = match args.digest.map(str::parse::<Digest>).transpose() {
-        Ok(d) => d,
-        Err(message) => {
-            return error_output(
-                "spend",
-                Some(file),
-                &Error::Usage(format!("--digest: {message}")),
-            );
-        }
-    };
-    let targets = match parse_targets(args.to, args.name) {
-        Ok(ts) => ts,
+    let file = &args.unit.file;
+    let (expect_digest, targets) = match args.unit.policy_inputs() {
+        Ok(inputs) => inputs,
         Err(e) => return error_output("spend", Some(file), &e),
     };
-    let first = targets.first();
-    let target = first.map(|t| t.target);
-    let name = first.and_then(|t| t.name.as_ref());
-    let mut request = SpendRequest::new(args.counter.unwrap_or_default(), args.amount);
+    let mut request = args.unit.policy(expect_digest, &targets);
     request.lock_timeout = args.lock_timeout_ms.map(std::time::Duration::from_millis);
     request.note = args.note;
-    request.expect_digest = expect_digest;
-    request.needed = Duration::seconds(i64::from(args.duration));
-    request.target = target;
-    request.name = name;
-    request.additional_targets = targets.get(1..).unwrap_or_default();
-    if args.counter.is_none() || args.caller_ref.is_some() || args.record_target {
+    if args.unit.counter.is_none() || args.caller_ref.is_some() || args.record_target {
         return debit_spend(args, request, &targets, clock);
     }
+    let target = request.target;
+    let name = request.name;
     let state = StateDir::from_env();
     let answer = if args.dry_run {
         hallpass::preview_spend_with_clock_in(file, &request, &state, || clock.sample())
@@ -1123,30 +1086,10 @@ fn debit_spend(
     targets: &[NamedTarget],
     clock: &Clock,
 ) -> Output {
-    let file = args.file;
-    let parsed = args.charges.iter().map(|charge| {
-        let (counter, n) = charge.split_once('=').ok_or_else(|| {
-            Error::Usage(format!("--charge expects COUNTER=N (got {})", safe(charge)))
-        })?;
-        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(Error::Usage(
-                "--charge expects a positive whole number".to_owned(),
-            ));
-        }
-        let amount = n.parse::<u64>().map_err(|_| {
-            Error::Usage("--charge amount exceeds the maximum whole number".to_owned())
-        })?;
-        Ok(hallpass::Charge { counter, amount })
-    });
-    let charges: Vec<_> = match args.counter {
-        Some(counter) => vec![hallpass::Charge {
-            counter,
-            amount: args.amount,
-        }],
-        None => match parsed.collect() {
-            Ok(charges) => charges,
-            Err(e) => return error_output("spend", Some(file), &e),
-        },
+    let file = &args.unit.file;
+    let charges = match args.unit.charges() {
+        Ok(charges) => charges,
+        Err(e) => return error_output("spend", Some(file), &e),
     };
     let mut request = hallpass::SpendChargesRequest::new(&charges);
     request.policy = policy;
@@ -1206,7 +1149,7 @@ fn debit_spend(
         "refusal": outcome.refusal.as_ref().map(refusal_json),
         "warnings": outcome.warnings,
     });
-    if args.counter.is_some()
+    if args.unit.counter.is_some()
         && let Some(charge) = outcome.charges.first()
     {
         json["counter"] = json!(charge.counter);
@@ -1689,6 +1632,7 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
         Command::Status { .. }
             | Command::Permits { .. }
             | Command::Spend { .. }
+            | Command::Capacity(_)
             | Command::Adopt { .. }
             | Command::Lint { .. }
     );
@@ -1715,6 +1659,7 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Init { file } => init(file),
         Command::Check { file } => check(file),
         Command::Rehearse { file, scenario } => rehearse(file, scenario),
+        Command::Capacity(unit) => cli_debit::run_capacity(unit, &clock),
         Command::Status { file } => status(file, &clock),
         Command::Permits {
             file,
@@ -1731,34 +1676,20 @@ fn run(cli: &Cli, format: Format) -> Output {
             &clock,
         ),
         Command::Spend {
-            file,
-            counter,
-            amount,
-            charges,
+            unit,
             lock_timeout_ms,
             caller_ref,
             record_target,
             dry_run,
-            to,
-            name,
             note,
-            digest,
-            duration,
         } => spend(
             &SpendArgs {
-                file,
-                counter: counter.as_deref(),
-                amount: amount.unwrap_or(1),
-                charges,
+                unit,
                 lock_timeout_ms: *lock_timeout_ms,
                 caller_ref: caller_ref.as_deref(),
                 record_target: *record_target,
                 dry_run: *dry_run,
-                to,
-                name: name.as_deref(),
                 note: note.as_deref(),
-                digest: digest.as_deref(),
-                duration: *duration,
             },
             &clock,
         ),

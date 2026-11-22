@@ -219,12 +219,7 @@ impl<'a> SpendChargesRequest<'a> {
 
     fn validate(&self) -> Result<(), Error> {
         let usage = |message| Error::Usage(format!("{message}; nothing was recorded"));
-        check_charges(
-            self.charges.len(),
-            self.charges.iter().map(|c| (c.counter, c.amount)),
-        )
-        .map_err(usage)?;
-        validate_spend_policy(&self.policy)?;
+        validate_unit(self.charges, &self.policy)?;
         if self.dry_run && self.policy.lock_timeout.is_some() {
             return Err(usage("a lock timeout applies only to a committing spend"));
         }
@@ -241,6 +236,15 @@ impl<'a> SpendChargesRequest<'a> {
         }
         Ok(())
     }
+}
+
+pub(super) fn validate_unit(
+    charges: &[Charge<'_>],
+    policy: &SpendRequest<'_>,
+) -> Result<(), Error> {
+    check_charges(charges.len(), charges.iter().map(|c| (c.counter, c.amount)))
+        .map_err(|message| Error::Usage(format!("{message}; nothing was recorded")))?;
+    validate_spend_policy(policy)
 }
 
 /// The balance and requested amount for one counter in a debit decision.
@@ -414,6 +418,23 @@ fn spend_using(
     Ok(result)
 }
 
+pub(super) fn decide_debit_policy(
+    loaded: &LoadedPass,
+    policy: &SpendRequest<'_>,
+    charges: &[Charge<'_>],
+    now: OffsetDateTime,
+) -> Result<Vec<String>, TargetRefusal> {
+    let labels = decide_spend_targets(loaded, policy, now)?;
+    super::check_required_charges(&loaded.pass, |name| {
+        charges.iter().any(|c| c.counter == name)
+    })
+    .map_err(|reason| TargetRefusal {
+        reason,
+        index: None,
+    })?;
+    Ok(labels)
+}
+
 pub(super) fn decide_debit(
     loaded: &LoadedPass,
     tally: &Tally,
@@ -439,24 +460,18 @@ pub(super) fn decide_debit(
             }
         })
         .collect();
-    let decision = decide_spend_targets(loaded, &request.policy, now).and_then(|labels| {
-        super::check_required_charges(&loaded.pass, |name| {
-            request.charges.iter().any(|c| c.counter == name)
-        })
-        .map_err(|reason| TargetRefusal {
-            reason,
-            index: None,
-        })?;
-        for c in &charges {
-            decide_ceiling(loaded, &c.counter, c.amount, c.total, c.spent).map_err(|reason| {
-                TargetRefusal {
-                    reason,
-                    index: None,
-                }
-            })?;
-        }
-        Ok(labels)
-    });
+    let decision =
+        decide_debit_policy(loaded, &request.policy, request.charges, now).and_then(|labels| {
+            for c in &charges {
+                decide_ceiling(loaded, &c.counter, c.amount, c.total, c.spent).map_err(
+                    |reason| TargetRefusal {
+                        reason,
+                        index: None,
+                    },
+                )?;
+            }
+            Ok(labels)
+        });
     let (refusal, refused_target, labels) = match decision {
         Ok(labels) => (None, None, labels),
         Err(refusal) => (Some(refusal.reason), refusal.index, Vec::new()),
