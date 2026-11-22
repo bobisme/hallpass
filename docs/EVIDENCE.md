@@ -101,3 +101,40 @@ advances. A report may contain both `archive-missing` gaps and confirmed
 totals but is not a verified original debit. `empty` means no debit or carry was
 available; `incomplete` means evidence is missing. The witness is reported
 separately. This numerical audit does not establish endpoints or external work.
+
+### Reconcile a run manifest
+
+Create a JSON manifest with the pass ID and the reviewed digest returned by
+`hallpass digest engagement.toml`. For example, save the following as
+`manifest.json`, replacing the digest with the actual full digest:
+
+```json
+{
+  "version": 1,
+  "pass_id": "review-example",
+  "units": [{
+    "caller_ref": "run-42",
+    "digest": "sha256:3ed8bc0c2b5ad53b4f397e4848a5a0beb05cb5557383d8c12883a5d678ed9542",
+    "charges": [{"counter": "requests", "n": 1}],
+    "targets": [{"target": "192.0.2.10:443/tcp", "name": "app.example.com"}]
+  }]
+}
+```
+
+```sh
+hallpass spend engagement.toml --charge requests=1 --to 192.0.2.10:443/tcp@app.example.com --record-target --caller-ref run-42
+hallpass reconcile engagement.toml manifest.json
+hallpass --json reconcile engagement.toml manifest.json
+```
+
+Rows preserve manifest order. References must be distinct, charges positive and
+unique by counter, and optional targets canonical and ordered. Omit `targets`
+to avoid requiring endpoint evidence; supply it to require recorded targets.
+The manifest is limited to 1,048,576 bytes and 1,024 rows. Candidate sequence
+samples are capped at 64 while counts remain complete. `absent` means absent
+from available history, and adoption can preserve totals without receipts.
+A different digest, charge or target is a mismatch; missing retained targets
+are incomplete and duplicate references are ambiguous. The result only
+reconciles recorded accounting; it does not establish external actions, retries
+or refunds. Verification failures and malformed manifests exit 1, discrepancies
+exit 2, and a complete match exits 0.

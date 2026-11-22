@@ -109,6 +109,12 @@ fn exact_reference_across_revisions_ambiguous_lost_and_fresh_are_distinct() {
     let carried = checked(&find, 2);
     assert_eq!(carried["adoption_count"], 1);
     assert!(carried["warnings"].to_string().contains("Carried"));
+    let manifest = serde_json::json!({"version":1,"pass_id":"review-example","units":[{"caller_ref":REFERENCE,"digest":spent["digest"],"charges":[{"counter":"requests","n":1}]}]});
+    let manifest_path = case.pass("lost-receipt.json", &manifest.to_string());
+    let reconciled = checked(&["reconcile", file, s(&manifest_path)], 2);
+    assert_eq!(reconciled["rows"][0]["result"], "absent");
+    assert_eq!(reconciled["adoption_count"], 1);
+    assert!(reconciled["warnings"].to_string().contains("Carried"));
     let a = archive(&case);
     let charge_audit = checked(&["audit-charges", file, s(&a)], 2);
     assert_eq!(charge_audit["gaps"]["adoption-carry"]["sequences"][0], 3);
@@ -514,4 +520,156 @@ fn charge_audit_detects_unknown_and_missing_required_counter() {
         rows.iter()
             .any(|r| r["seq"] == 2 && r["counter"] == "other" && r["reason"] == "unknown-counter")
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reconcile_reports_ordered_discrepancies_and_rejects_bad_input() {
+    let case = Case::new();
+    let p = case.pass(
+        "pass",
+        &approval().replace("ports = 443", "ports = [443, 444]"),
+    );
+    let file = s(&p);
+    let exact = debit(file, "exact");
+    debit(file, "duplicate");
+    debit(file, "duplicate");
+    debit(file, "different");
+    checked(
+        &[
+            "spend",
+            file,
+            "--charge",
+            "requests=1",
+            "--to",
+            ENDPOINT,
+            "--to",
+            "192.0.2.10:444/tcp@app.example.com",
+            "--record-target",
+            "--caller-ref",
+            "swapped",
+        ],
+        0,
+    );
+    checked(
+        &[
+            "spend",
+            file,
+            "--charge",
+            "requests=1",
+            "--caller-ref",
+            "unrecorded",
+        ],
+        0,
+    );
+    checked(&["spend", file, "--charge", "requests=1"], 0);
+    let digest = exact["digest"].as_str().expect("digest");
+    let unit = |reference: &str, charges: Value, targets: Option<Value>| {
+        let mut v = serde_json::json!({"caller_ref":reference, "digest":digest, "charges":charges});
+        if let Some(targets) = targets {
+            v["targets"] = targets;
+        }
+        v
+    };
+    let charges = serde_json::json!([{"counter":"bytes","n":4},{"counter":"requests","n":1}]);
+    let target = serde_json::json!([{"target":"192.0.2.10:443/tcp","name":"app.example.com"}]);
+    let manifest = serde_json::json!({"version":1,"pass_id":"review-example","units":[
+        unit("exact", charges.clone(), Some(target.clone())),
+        unit("missing", charges.clone(), None),
+        unit("duplicate", charges, None),
+        unit("different", serde_json::json!([{"counter":"requests","n":3}]), None),
+        unit("swapped", serde_json::json!([{"counter":"requests","n":1}]), Some(serde_json::json!([{"target":"192.0.2.10:444/tcp","name":"app.example.com"},{"target":"192.0.2.10:443/tcp","name":"app.example.com"}]))),
+        unit("unrecorded", serde_json::json!([{"counter":"requests","n":1}]), Some(target)),
+    ]});
+    let path = case.pass("manifest.json", &manifest.to_string());
+    let result = checked(&["reconcile", file, s(&path)], 2);
+    assert_eq!(
+        result["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| r["result"].as_str().expect("result"))
+            .collect::<Vec<_>>(),
+        [
+            "match",
+            "absent",
+            "ambiguous",
+            "mismatch",
+            "mismatch",
+            "incomplete"
+        ]
+    );
+    assert_eq!(result["rows"][2]["candidate_count"], 2);
+    assert_eq!(result["rows"][2]["sequences"], serde_json::json!([2, 3]));
+    let mut only = manifest.clone();
+    only["units"] = serde_json::json!([manifest["units"][0].clone()]);
+    fs::write(&path, only.to_string()).expect("one row");
+    assert_eq!(
+        checked(&["reconcile", file, s(&path)], 0)["result"],
+        "match"
+    );
+    only["units"] = serde_json::json!([manifest["units"][0].clone(), manifest["units"][0].clone()]);
+    fs::write(&path, only.to_string()).expect("duplicate");
+    checked(&["reconcile", file, s(&path)], 1);
+    fs::write(
+        &path,
+        vec![b' '; usize::try_from(hallpass::evidence::MAX_MANIFEST_BYTES).expect("limit") + 1],
+    )
+    .expect("large");
+    checked(&["reconcile", file, s(&path)], 1);
+    fs::write(&path, manifest.to_string()).expect("manifest");
+    let ledger = hallpass::ledger_path(&p);
+    fs::write(
+        &ledger,
+        format!("{}bad\n", fs::read_to_string(&ledger).expect("ledger")),
+    )
+    .expect("corrupt");
+    assert_eq!(
+        checked(&["reconcile", file, s(&path)], 1)["error"]["code"],
+        "ledger-corrupt"
+    );
+}
+
+#[test]
+fn reconcile_manifest_limits_and_revision_are_enforced() {
+    let case = Case::new();
+    let p = case.pass("pass", &approval());
+    let file = s(&p);
+    let record = debit(file, "one");
+    let digest = record["digest"].as_str().expect("digest");
+    let row = |i| serde_json::json!({"caller_ref":format!("ref-{i}"), "digest":digest, "charges":[{"counter":"requests","n":1}]});
+    let mut manifest = serde_json::json!({"version":1,"pass_id":"review-example","units":[{"caller_ref":"one","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","charges":[{"counter":"requests","n":1},{"counter":"bytes","n":4}]}]});
+    let path = case.pass("manifest", &manifest.to_string());
+    assert_eq!(
+        checked(&["reconcile", file, s(&path)], 2)["rows"][0]["result"],
+        "mismatch"
+    );
+    manifest["units"] = serde_json::json!(
+        (0..hallpass::evidence::MAX_MANIFEST_ROWS)
+            .map(row)
+            .collect::<Vec<_>>()
+    );
+    fs::write(&path, manifest.to_string()).expect("row boundary");
+    let report = checked(&["reconcile", file, s(&path)], 2);
+    assert_eq!(
+        report["rows"].as_array().expect("rows").len(),
+        hallpass::evidence::MAX_MANIFEST_ROWS
+    );
+    manifest["units"]
+        .as_array_mut()
+        .expect("rows")
+        .push(row(hallpass::evidence::MAX_MANIFEST_ROWS));
+    fs::write(&path, manifest.to_string()).expect("too many");
+    checked(&["reconcile", file, s(&path)], 1);
+    manifest["units"] = serde_json::json!([row(0)]);
+    let mut bytes = manifest.to_string().into_bytes();
+    bytes.resize(
+        usize::try_from(hallpass::evidence::MAX_MANIFEST_BYTES).expect("limit"),
+        b' ',
+    );
+    fs::write(&path, &bytes).expect("byte boundary");
+    checked(&["reconcile", file, s(&path)], 2);
+    bytes.push(b' ');
+    fs::write(&path, bytes).expect("too large");
+    checked(&["reconcile", file, s(&path)], 1);
 }
