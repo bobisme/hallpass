@@ -145,7 +145,7 @@ pub fn audit_charges(file: &Path, directory: &Path) -> Output {
         Ok(report) => report,
         Err(e) => return error_output("audit-charges", Some(file), &e),
     };
-    let text = format!(
+    let mut text = format!(
         "Charge audit {}. Witness {}. Checked debits {}.\nMismatches {}\nGaps {}\n",
         report.result,
         report.witness,
@@ -153,6 +153,9 @@ pub fn audit_charges(file: &Path, directory: &Path) -> Output {
         safe(&json!(report.mismatches).to_string()),
         safe(&json!(report.gaps).to_string())
     );
+    for warning in &report.warnings {
+        let _ = writeln!(text, "Warning: {}", safe(warning));
+    }
     output(
         "audit-charges",
         file,
