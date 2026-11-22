@@ -42,11 +42,14 @@ JSON callers should check the returned `command`, `result` and exit code.
 
 | If you need to… | Start with |
 |---|---|
-| Review an owner's signed approval or proposed scope edits | `verify-approval`, `diff --examples --at TIMESTAMP` |
+| Retain the precise approval an owner signed | `verify-approval --archive DIR` |
+| Check whether proposed endpoint scope only narrows, or see remaining budget after an edit | `diff --containment --at TIMESTAMP`, `diff --budget-impact` |
+| Find restrictions an owner's regression suite fails to protect | `test-pass --strength` |
 | Compare a consumer's declared capabilities with the pass requirements | `consumer-coverage` |
-| See where a sequence of debits would first exceed a budget | `rehearse` |
-| Reconcile a lost spend reply or replay a receipt against its approval | `receipt`, `audit-receipts` |
-| Find backups containing the last witnessed ledger entry | `compare-backups` |
+| Estimate how many identical units fit, or where a varied sequence first exceeds budget | `capacity`, `rehearse` |
+| Reconcile a lost spend reply or a full run of expected debits | `receipt`, `reconcile` |
+| Audit recorded charges and destination receipts against archived approvals | `audit-charges`, `audit-receipts` |
+| Identify the newest verified copy on each backup branch | `compare-backups --ancestry` |
 
 ## Two-minute example
 
@@ -119,7 +122,8 @@ Current pass digest: sha256:…
 
 `spend --to` checks the destination, the approval window, revocation and the
 requested charges under the writer locks. A policy refusal adds no debit.
-Omitting `--to` skips the destination check. An owner can use
+With `require_target_v1 = true`, omitting `--to` refuses the debit.
+Other passes allow a targetless debit. An owner can use
 `required_counters_v1` to require several counters on every debit. Supply
 their costs together, for example `--charge requests=1 --charge bytes=100`.
 The sixth `spend` of `calls` succeeds and the seventh is refused (exit 2),
@@ -147,7 +151,9 @@ Every command accepts `--json` and writes one JSON object to stdout.
 mismatch, a coverage gap or inconclusive evidence. **1** reports a usage,
 file or accounting error. For a live debit, require exit 0 and a matching
 `spend` reply with `result = "allowed"`, `test_clock = false` and a positive
-`seq`. After a lost reply or an error marked `recorded` or `uncertain`,
+`seq`. A caller can submit a durable unit reference with `--caller-ref REF --require-new-ref`
+to guard against a second debit for that reference. After a lost reply or an
+error marked `recorded` or `uncertain`,
 reconcile the debit with the caller's run record before retrying.
 [Caller response contract](docs/INTEGRATING.md#rules-for-a-command-line-caller)
 
