@@ -1,5 +1,5 @@
 //! Sufficient proof of zero-duration endpoint containment between two open approvals.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use crate::{Destination, Pass};
@@ -41,6 +41,25 @@ fn blocked_edges(pass: &Pass) -> BTreeSet<u32> {
     }
     edges.retain(|addr| !hosts.contains(addr));
     edges
+}
+
+fn old_edges_stay_excluded(old: &Pass, new: &Pass) -> bool {
+    let old_edges = blocked_edges(old);
+    let new_edges = blocked_edges(new);
+    let freed: BTreeSet<_> = old_edges.difference(&new_edges).copied().collect();
+    new.destinations
+        .iter()
+        .all(|rule| match rule.network.addr() {
+            IpAddr::V6(_) => true,
+            IpAddr::V4(ip) => {
+                let first = u32::from(ip);
+                let last = first
+                    | u32::MAX
+                        .checked_shr(u32::from(rule.network.prefix()))
+                        .unwrap_or(0);
+                freed.range(first..=last).next().is_none()
+            }
+        })
 }
 
 struct Rule<'a> {
@@ -93,11 +112,22 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
         report.reason = "both-windows-must-be-open";
         return report;
     }
-    let original: Vec<_> = old.destinations.iter().map(Rule::from).collect();
+    let original: BTreeMap<_, _> = old
+        .destinations
+        .iter()
+        .map(|d| (d.label.as_str(), Rule::from(d)))
+        .collect();
     let mut reason = None;
     'rules: for dest in &new.destinations {
         let proposed = Rule::from(dest);
-        for prior in &original {
+        let label = dest.label.as_str();
+        let candidates = original.get(label).into_iter().chain(
+            original
+                .iter()
+                .filter(|(name, _)| **name != label)
+                .map(|(_, rule)| rule),
+        );
+        for prior in candidates {
             if report.compared_pairs == MAX_PAIRS {
                 reason = Some("pair-limit");
                 break 'rules;
@@ -110,7 +140,7 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
         reason = Some("single-rule-coverage-unproved");
         break;
     }
-    if reason.is_none() && !blocked_edges(old).is_subset(&blocked_edges(new)) {
+    if reason.is_none() && !old_edges_stay_excluded(old, new) {
         reason = Some("ipv4-edge-coverage-unproved");
     }
     if let Some(reason) = reason {

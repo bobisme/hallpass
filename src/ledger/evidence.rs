@@ -487,7 +487,7 @@ fn ancestry_links(
 ) -> BackupAncestry {
     let mut links = BTreeSet::new();
     let mut valid_groups = BTreeSet::new();
-    for a in candidates.iter() {
+    for a in candidates {
         if a.relation != "extended" {
             continue;
         }
@@ -533,30 +533,52 @@ mod ancestry_tests {
     use super::*;
     #[test]
     fn changed_first_duplicate_is_not_a_group_representative() {
-        let tip = Checkpoint {
-            version: 1,
-            pass_id: "p".into(),
-            seq: 4,
-            hash: Digest::of(b"tip").to_string(),
-        };
-        let mut candidates = vec![
-            BackupCandidate {
-                path: "changed".into(),
-                relation: "changed",
-                tip: None,
-                tip_group: None,
-                error: None,
-            },
-            BackupCandidate {
-                path: "survivor".into(),
-                relation: "extended",
-                tip: Some(tip),
-                tip_group: Some(1),
-                error: None,
-            },
-        ];
-        regroup_verified(&mut candidates);
-        let ancestry = ancestry_links(&candidates, &BTreeMap::new());
+        use crate::{SpendRequest, ledger_path, spend_in};
+        use std::fs;
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let pass = temp.path().join("approval");
+        fs::write(
+            &pass,
+            format!(
+                "{}\n[ceilings]\ncalls = 3\n",
+                include_str!("../../docs/review-approval.toml")
+            ),
+        )
+        .expect("pass");
+        let state = StateDir::new(temp.path().join("state"));
+        let now = time::macros::datetime!(2026-11-20 12:00 UTC);
+        spend_in(&pass, &SpendRequest::new("calls", 1), now, &state).expect("debit");
+        let ledger = ledger_path(&pass);
+        let copy = temp.path().join("copy");
+        fs::copy(&ledger, &copy).expect("duplicate");
+        let paths = [ledger, copy];
+        // Both paths were observed at the same tip during the first scan.
+        let mut candidates: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let scan = inspect_candidate(path, None).expect("initial scan");
+                let tip = Checkpoint {
+                    version: 1,
+                    pass_id: scan.pass_id,
+                    seq: scan.seq,
+                    hash: scan.tail.to_string(),
+                };
+                BackupCandidate {
+                    path: path.display().to_string(),
+                    relation: "extended",
+                    tip: Some(tip),
+                    tip_group: Some(1),
+                    error: None,
+                }
+            })
+            .collect();
+        spend_in(&pass, &SpendRequest::new("calls", 1), now, &state).expect("advance first copy");
+        let mut errors = 0;
+        let ancestry = analyze_ancestry(&paths, &mut candidates, &mut errors);
+        assert_eq!(errors, 1);
+        assert_eq!(candidates[0].relation, "changed");
+        assert!(candidates[0].tip.is_none());
+        assert_eq!(candidates[0].tip_group, None);
         assert_eq!(candidates[1].tip_group, Some(2));
         assert_eq!(ancestry.maximal_groups, vec![2]);
     }

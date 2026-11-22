@@ -326,6 +326,8 @@ fn containment_cli_requires_open_windows_and_replays_expanded_edges() {
     let args = ["diff", "old", "new", "--containment", "--at", AT];
     let old = BASE.replace("address = \"192.0.2.10\"", "network = \"192.0.2.8/30\"");
     write_pass(dir, "old", &old);
+    write_pass(dir, "new", BASE);
+    assert_eq!(command(dir, &args, 0)["containment"]["result"], "contained");
     write_pass(dir, "new", &BASE.replace("192.0.2.10", "192.0.2.11"));
     let expanded = command(dir, &args, 2);
     let evidence = &expanded["containment"]["example"];
@@ -428,7 +430,9 @@ fn pair_limit_and_union_proofs_remain_inconclusive() {
         writeln!(many, "[[destination]]\nlabel = \"r{port}\"\naddress = \"192.0.2.10\"\nports = {port}\nprotocol = \"tcp\"").expect("row");
     }
     let pass = Pass::parse(&many).expect("pass");
-    let capped = endpoint_containment(&pass, &pass, now);
+    assert_eq!(endpoint_containment(&pass, &pass, now).compared_pairs, 190);
+    let renamed = Pass::parse(&many.replace("label = \"r", "label = \"s")).expect("renamed");
+    let capped = endpoint_containment(&pass, &renamed, now);
     assert_eq!(capped.result, "inconclusive");
     assert_eq!(capped.reason, "pair-limit");
     let split = format!(
