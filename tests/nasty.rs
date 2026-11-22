@@ -460,7 +460,7 @@ proptest! {
     #[test]
     fn allowed_only_for_what_is_listed(
         ip in prop_oneof![near_ipv4(), near_ipv6()],
-        port in prop_oneof![Just(443u16), Just(5060u16), Just(8080u16), 9990u16..10110, any::<u16>()],
+        port in prop_oneof![Just(0u16), Just(443u16), Just(5060u16), Just(8080u16), 9990u16..10110, any::<u16>()],
         udp: bool,
         name in prop_oneof![
             Just(None),
@@ -493,7 +493,12 @@ proptest! {
                 prop_assert_ne!(refusal.message, "");
             }
         }
-        // A question round-trips through its text form unchanged.
-        prop_assert_eq!(target.to_string().parse::<Target>(), Ok(target));
+        // Rust callers can construct port 0 directly. Text queries accept ports 1..=65535.
+        let parsed = target.to_string().parse::<Target>();
+        if port == 0 {
+            prop_assert!(parsed.is_err());
+        } else {
+            prop_assert_eq!(parsed, Ok(target));
+        }
     }
 }
