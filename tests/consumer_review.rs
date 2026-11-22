@@ -246,3 +246,75 @@ fn coverage_compares_each_enforced_requirement_and_rejects_bad_declarations() {
     assert!(!dir.join("state").exists());
     assert!(!dir.join("pass.ledger").exists());
 }
+
+#[test]
+fn amendment_projects_only_current_history_including_adoption() {
+    use hallpass::{SpendRequest, StateDir, adopt, spend_in};
+    let tmp = tempfile::tempdir().expect("dir");
+    let dir = tmp.path();
+    let old = format!("{BASE}\n[ceilings]\ncalls = 10\n");
+    let args = ["diff", "old", "new", "--budget-impact"];
+    write_pass(dir, "old", &old);
+    write_pass(
+        dir,
+        "new",
+        &old.replace("calls = 10", "calls = 6\nbytes = 100"),
+    );
+    write_pass(dir, "new.ledger", "corrupt decoy");
+    let fresh = command(dir, &args, 0);
+    assert!(fresh["budget_impact"]["tip"].is_null());
+    assert!(!dir.join("state").exists());
+    let now = OffsetDateTime::parse(AT, &Rfc3339).expect("instant");
+    let state = StateDir::new(dir.join("state/hallpass"));
+    let path = dir.join("old");
+    let ledger = dir.join("old.ledger");
+    spend_in(&path, &SpendRequest::new("calls", 8), now, &state).expect("spend");
+    fs::remove_file(&ledger).expect("simulate loss");
+    assert_eq!(command(dir, &args, 1)["error"]["code"], "ledger-missing");
+    adopt(&path, "restore balances", now, &state).expect("carry");
+    let saved = fs::read(&ledger).expect("snapshot");
+    let witness = state.witness_path("review-example").expect("path");
+    let witness_before = fs::read(&witness).expect("witness");
+    for (limit, remaining, over) in [(6, 0, 2), (8, 0, 0), (12, 4, 0)] {
+        write_pass(
+            dir,
+            "new",
+            &old.replace("calls = 10", &format!("calls = {limit}\nbytes = 100")),
+        );
+        let projection = &command(dir, &args, 0)["budget_impact"];
+        assert_eq!(projection["witness"], "matches");
+        assert_eq!(projection["tip"]["seq"], 1);
+        assert_eq!(projection["counters"][0]["spent"], 0);
+        let row = &projection["counters"][1];
+        assert_eq!(row["spent"], 8);
+        assert_eq!(row["old_remaining"], 2);
+        assert_eq!(row["proposed_remaining"], remaining);
+        assert_eq!(row["over_proposed"], over);
+    }
+    write_pass(dir, "new", BASE);
+    assert!(command(dir, &args, 0)["budget_impact"]["counters"][0]["proposed_ceiling"].is_null());
+    write_pass(dir, "old", BASE);
+    write_pass(
+        dir,
+        "new",
+        &old.replace(
+            "[approval]",
+            "required_counters_v1 = [\"calls\"]\n[approval]",
+        ),
+    );
+    let row = &command(dir, &args, 0)["budget_impact"]["counters"][0];
+    assert!(row["old_ceiling"].is_null());
+    assert_eq!(row["proposed_remaining"], 2);
+    assert_eq!(row["proposed_required"], true);
+    assert_eq!(fs::read(&ledger).expect("snapshot"), saved);
+    assert_eq!(fs::read(witness).expect("witness"), witness_before);
+    write_pass(dir, "new", &old.replace("review-example", "other-id"));
+    assert_eq!(
+        command(dir, &args, 2)["budget_impact"]["reason"],
+        "different-pass-id"
+    );
+    write_pass(dir, "new", &old);
+    write_pass(dir, "old.ledger", "broken");
+    assert_eq!(command(dir, &args, 1)["error"]["code"], "ledger-corrupt");
+    assert_eq!(command(dir, &["diff", "old", "new"], 0)["result"], "ok");
+}

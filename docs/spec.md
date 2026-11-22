@@ -636,3 +636,7 @@ including historical charges and adoption carry. Each evaluated step reports
 the before and after totals for its requested counters, remaining budget,
 matched labels or refusal evidence. Following steps report `unevaluated`.
 Every projection stays in memory. A subsequent live debit reads current state.
+
+### Projecting an amendment against live balances
+
+`hallpass diff CURRENT PROPOSED --budget-impact --json` reads one verified summary from CURRENT. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.

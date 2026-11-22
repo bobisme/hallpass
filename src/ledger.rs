@@ -399,6 +399,8 @@ pub struct LedgerView {
     pub path: PathBuf,
     /// False when there is no ledger yet (nothing was spent).
     pub exists: bool,
+    /// Tip of the verified scan, or None for a missing ledger.
+    pub tip: Option<Checkpoint>,
     /// Every legacy single-counter spend, in order.
     pub entries: Vec<LedgerEntry>,
     /// Every versioned debit, in order. Shares the sequence with entries and adoptions.
@@ -956,6 +958,12 @@ fn visit_view(
     Ok(LedgerView {
         path,
         exists,
+        tip: exists.then(|| Checkpoint {
+            version: 1,
+            pass_id: parsed.pass_id,
+            seq: parsed.seq,
+            hash: parsed.tail.to_string(),
+        }),
         entries: parsed.entries,
         debits: parsed.debits,
         adoptions: parsed.adoptions,

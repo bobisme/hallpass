@@ -243,6 +243,9 @@ enum Command {
         old: PathBuf,
         /// Proposed replacement pass.
         new: PathBuf,
+        /// Project balances under both revisions using the current pass's verified ledger.
+        #[arg(long)]
+        budget_impact: bool,
         /// Sample changed destination decisions at the supplied review instant.
         #[arg(long, requires = "at")]
         examples: bool,
@@ -505,9 +508,10 @@ fn check(file: &Path) -> Output {
     }
 }
 
+mod cli_diff;
 mod cli_verify;
 
-fn review_diff(old: &Path, new: &Path, at: Option<&str>) -> Output {
+fn review_diff(old: &Path, new: &Path, at: Option<&str>, budget_impact: bool) -> Output {
     let review_at = match at
         .map(|s| OffsetDateTime::parse(s, &hallpass::time::format_description::well_known::Rfc3339))
         .transpose()
@@ -567,6 +571,9 @@ fn review_diff(old: &Path, new: &Path, at: Option<&str>) -> Output {
         json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":[]}),
         text,
     };
+    if budget_impact && let Err(error) = cli_diff::budget(&a, &b, &mut output) {
+        return error_output("diff", Some(old), &error);
+    }
     if let Some(instant) = review_at {
         let sample = hallpass::review::decision_examples(&a.pass, &b.pass, instant);
         let _ = writeln!(
@@ -590,7 +597,7 @@ fn review_diff(old: &Path, new: &Path, at: Option<&str>) -> Output {
                 .push_str("Sampling limit reached. Additional candidates were omitted.\n");
         }
         output.json["examples"] = json!(sample);
-    } else {
+    } else if !budget_impact {
         output
             .text
             .push_str("This is a declared-field diff only; it never authorizes a spend.\n");
@@ -1845,7 +1852,13 @@ fn run(cli: &Cli, format: Format) -> Output {
             allowed_signers,
             principal,
         } => cli_verify::verify_approval(file, signature, allowed_signers, principal),
-        Command::Diff { old, new, at, .. } => review_diff(old, new, at.as_deref()),
+        Command::Diff {
+            old,
+            new,
+            at,
+            budget_impact,
+            ..
+        } => review_diff(old, new, at.as_deref(), *budget_impact),
         Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),
         Command::Lint { file } => review_lint(file, &clock),
         Command::Cases { file, cases } => review_cases(file, cases),

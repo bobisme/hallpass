@@ -91,9 +91,10 @@ fn guide(name: &str) -> Guide {
         "diff" => (
             &[
                 "hallpass --format json diff reviewed.pass.toml proposed.pass.toml",
+                "hallpass --json diff current.toml proposed.toml --budget-impact",
                 "hallpass --format json diff reviewed.pass.toml proposed.pass.toml --examples --at 2026-11-20T09:00:00Z",
             ],
-            "Inspect review_required, changes and destination order. For replayable decision changes supply --examples with an explicit offset timestamp. Inspect examples.rows and truncated. An empty sample cannot establish policy equivalence. Exit 0 means the comparison completed.",
+            "Inspect review_required, changes and destination order. For replayable decision changes supply --examples with an explicit offset timestamp. Inspect examples.rows and truncated. An empty sample cannot establish policy equivalence. Use --budget-impact to compare both ceilings against the current ledger. Inspect over_proposed even on exit 0. A different approval ID makes the projection inapplicable (exit 2).",
         ),
         "consumer-coverage" => (
             &[
