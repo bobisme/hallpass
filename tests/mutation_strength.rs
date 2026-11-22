@@ -126,6 +126,27 @@ fn shadowed_rule_name_edit_survives_and_port_endpoints_never_wrap() {
 }
 
 #[test]
+fn shared_missing_port_between_ranges_is_mutated_once_with_compact_terms() {
+    let pass = PASS.replace("ports = 443", "ports = [443, 445]");
+    let pass = hallpass::Pass::parse(&pass).expect("pass with a one-port gap");
+    let report = hallpass::review::mutation_strength(&pass, WEAK).expect("analysis");
+    let added_444 = report["mutations"]
+        .as_array()
+        .expect("mutations")
+        .iter()
+        .filter(|mutation| {
+            mutation["changed_term"]
+                .as_str()
+                .is_some_and(|term| term.contains("add adjacent port 444"))
+        })
+        .count();
+    assert_eq!(added_444, 1);
+    for mutation in report["mutations"].as_array().expect("mutations") {
+        assert!(mutation["changed_term"].as_str().expect("term").len() < 128);
+    }
+}
+
+#[test]
 fn baseline_failure_and_both_work_limits_are_explicit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = pass_file(dir.path(), PASS);

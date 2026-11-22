@@ -643,19 +643,6 @@ fn strength_report(
         changed_term: String,
         edit: Edit,
     }
-    fn ranges_text(ranges: &[(u16, u16)]) -> String {
-        ranges
-            .iter()
-            .map(|(start, end)| {
-                if start == end {
-                    start.to_string()
-                } else {
-                    format!("{start}-{end}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    }
     fn push_candidate(candidates: &mut Vec<Candidate>, candidate: Candidate, limit: usize) -> bool {
         if candidates.len() == limit {
             true
@@ -706,26 +693,23 @@ fn strength_report(
             }
         }
         let ranges = destination.ports.normalized_ranges();
+        let mut adjacent_ports = BTreeSet::new();
         for &(start, end) in &ranges {
             for (port, side) in [
                 (start.checked_sub(1).filter(|port| *port > 0), "lower"),
                 (end.checked_add(1), "upper"),
             ] {
                 let Some(port) = port else { continue };
-                let mut after = ranges.clone();
-                after.push((port, port));
-                let Ok(after) = crate::PortSet::from_ranges(after) else {
+                if !adjacent_ports.insert(port) {
                     continue;
-                };
-                let after = after.normalized_ranges();
-                let term = format!("ports: {} -> {}", ranges_text(&ranges), ranges_text(&after));
+                }
                 candidate_overflow = push_candidate(
                     &mut candidates,
                     Candidate {
                         label: destination.label.clone(),
                         changed_term: format!(
-                            "destination[{}].{} endpoint: {}",
-                            destination.label, side, term
+                            "destination[{}].ports: add adjacent port {port} ({side} endpoint)",
+                            destination.label
                         ),
                         edit: Edit::AddPort { index, port },
                     },
