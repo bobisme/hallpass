@@ -449,6 +449,8 @@ fn analyze_ancestry(
             result => {
                 *errors += 1;
                 row.relation = "changed";
+                row.tip = None;
+                row.tip_group = None;
                 row.error = Some(match result {
                     Err(e) => BackupError {
                         code: e.code(),
@@ -462,6 +464,27 @@ fn analyze_ancestry(
             }
         }
     }
+    regroup_verified(candidates);
+    ancestry_links(candidates, &scans)
+}
+
+fn regroup_verified(candidates: &mut [BackupCandidate]) {
+    let mut groups = BTreeMap::new();
+    for (i, row) in candidates.iter_mut().enumerate() {
+        if let Some(tip) = &row.tip {
+            row.tip_group = Some(
+                *groups
+                    .entry((tip.pass_id.clone(), tip.seq, tip.hash.clone()))
+                    .or_insert(i + 1),
+            );
+        }
+    }
+}
+
+fn ancestry_links(
+    candidates: &[BackupCandidate],
+    scans: &BTreeMap<usize, BTreeMap<u64, Digest>>,
+) -> BackupAncestry {
     let mut links = BTreeSet::new();
     let mut valid_groups = BTreeSet::new();
     for a in candidates.iter() {
@@ -502,5 +525,39 @@ fn analyze_ancestry(
     BackupAncestry {
         prefix_links: links.into_iter().collect(),
         maximal_groups,
+    }
+}
+
+#[cfg(test)]
+mod ancestry_tests {
+    use super::*;
+    #[test]
+    fn changed_first_duplicate_is_not_a_group_representative() {
+        let tip = Checkpoint {
+            version: 1,
+            pass_id: "p".into(),
+            seq: 4,
+            hash: Digest::of(b"tip").to_string(),
+        };
+        let mut candidates = vec![
+            BackupCandidate {
+                path: "changed".into(),
+                relation: "changed",
+                tip: None,
+                tip_group: None,
+                error: None,
+            },
+            BackupCandidate {
+                path: "survivor".into(),
+                relation: "extended",
+                tip: Some(tip),
+                tip_group: Some(1),
+                error: None,
+            },
+        ];
+        regroup_verified(&mut candidates);
+        let ancestry = ancestry_links(&candidates, &BTreeMap::new());
+        assert_eq!(candidates[1].tip_group, Some(2));
+        assert_eq!(ancestry.maximal_groups, vec![2]);
     }
 }
