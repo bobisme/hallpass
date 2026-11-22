@@ -193,6 +193,13 @@ enum Command {
         /// Private directory populated by archive.
         directory: PathBuf,
     },
+    /// Reconcile expected debits from a local JSON manifest.
+    Reconcile {
+        /// Pass identifying the ledger.
+        file: PathBuf,
+        /// Versioned JSON manifest.
+        manifest: PathBuf,
+    },
     /// Compare explicit ledger backups against a single local witness.
     CompareBackups {
         /// Pass identifying the local witness. The live ledger may be missing.
@@ -320,6 +327,7 @@ impl Command {
             Self::Receipt { .. } => "receipt",
             Self::AuditReceipts { .. } => "audit-receipts",
             Self::AuditCharges { .. } => "audit-charges",
+            Self::Reconcile { .. } => "reconcile",
             Self::CompareBackups { .. } => "compare-backups",
             Self::Checkpoint { .. } => "checkpoint",
             Self::VerifyCheckpoint { .. } => "verify-checkpoint",
@@ -1761,6 +1769,7 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
         Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
         Command::AuditCharges { file, directory } => cli_evidence::audit_charges(file, directory),
+        Command::Reconcile { file, manifest } => cli_evidence::reconcile(file, manifest),
         Command::CompareBackups {
             file,
             candidates,

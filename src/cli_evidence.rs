@@ -168,3 +168,33 @@ pub fn audit_charges(file: &Path, directory: &Path) -> Output {
         text,
     )
 }
+
+pub fn reconcile(file: &Path, manifest: &Path) -> Output {
+    let report = match hallpass::load(file)
+        .and_then(|p| evidence::reconcile(&p, &StateDir::from_env(), manifest))
+    {
+        Ok(report) => report,
+        Err(e) => return error_output("reconcile", Some(file), &e),
+    };
+    let mut text = format!(
+        "Reconciliation {}. Witness {}.\n",
+        report.result, report.witness
+    );
+    for row in &report.rows {
+        let _ = writeln!(text, "  {}", safe(&json!(row).to_string()));
+    }
+    for warning in &report.warnings {
+        let _ = writeln!(text, "Warning: {}", safe(warning));
+    }
+    output(
+        "reconcile",
+        file,
+        if report.result == "match" {
+            OK
+        } else {
+            REFUSED
+        },
+        json!(report),
+        text,
+    )
+}

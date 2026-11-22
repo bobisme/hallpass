@@ -40,6 +40,7 @@ use crate::{MAX_TARGETS, NamedTarget};
 mod debit;
 pub mod evidence;
 mod evidence_charges;
+mod evidence_manifest;
 pub mod scenario;
 pub use debit::*;
 use debit::{DebitLine, parse_debit};

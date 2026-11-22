@@ -140,6 +140,13 @@ fn history_guide(name: &str) -> Guide {
             ],
             "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. The witness is reported separately. This checks accounting, not external work or endpoints.",
         ),
+        "reconcile" => (
+            &[
+                "hallpass reconcile engagement.pass.toml manifest.json",
+                "hallpass --json reconcile engagement.pass.toml manifest.json",
+            ],
+            "Compare a version 1 local manifest with the available verified ledger in one pass. See docs/EVIDENCE.md for the JSON schema. Missing or duplicate references and mismatched or unrecorded details exit 2; invalid input or history exits 1. This is accounting evidence, not proof of external work.",
+        ),
         "compare-backups" => (
             &[
                 "hallpass --format json compare-backups engagement.pass.toml backup-a.ledger backup-b.ledger",
