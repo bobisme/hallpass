@@ -1,7 +1,7 @@
 //! Replay numerical and mandatory charge terms against archived revisions.
 use super::evidence::{DETAIL_LIMIT, EvidenceGap, archive_revision, record_gap};
 use super::{VerifiedEvent, add, check_required_charges, decide_ceiling, visit_view};
-use crate::{Digest, Error, LoadedPass, StateDir};
+use crate::{Digest, Error, LoadedPass, Pass, StateDir};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,7 +50,7 @@ pub fn audit_charges(
     directory: &Path,
 ) -> Result<ChargeAudit, Error> {
     let mut totals = BTreeMap::new();
-    let mut cache: Option<(Digest, Option<LoadedPass>)> = None;
+    let mut cache: Option<(Digest, Option<Pass>)> = None;
     let mut mismatches = ChargeMismatches::default();
     let mut gaps = BTreeMap::new();
     let mut checked = 0;
@@ -80,15 +80,10 @@ pub fn audit_charges(
         if cache.as_ref().is_none_or(|(key, _)| *key != digest) {
             cache = Some((
                 digest,
-                archive_revision(directory, digest, &loaded.pass.id)?.map(|pass| {
-                    let mut revision = loaded.clone();
-                    revision.pass = pass;
-                    revision
-                }),
+                archive_revision(directory, digest, &loaded.pass.id)?,
             ));
         }
-        if let Some(revision) = cache.as_ref().and_then(|(_, p)| p.as_ref()) {
-            let pass = &revision.pass;
+        if let Some(pass) = cache.as_ref().and_then(|(_, p)| p.as_ref()) {
             checked += 1;
             if check_required_charges(pass, |name| charges.iter().any(|(c, _)| *c == name)).is_err()
             {
@@ -99,9 +94,8 @@ pub fn audit_charges(
                 }
             }
             for (counter, amount) in &charges {
-                let ceiling = pass.ceilings.get(*counter).copied();
                 let spent = totals.get(*counter).copied().unwrap_or(0);
-                if let Err(reason) = decide_ceiling(revision, counter, *amount, ceiling, spent) {
+                if let Err(reason) = decide_ceiling(pass, counter, *amount, spent) {
                     mismatch(&mut mismatches, seq, counter, reason.code.as_str());
                 }
             }

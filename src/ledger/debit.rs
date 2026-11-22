@@ -463,12 +463,12 @@ pub(super) fn decide_debit(
     let decision =
         decide_debit_policy(loaded, &request.policy, request.charges, now).and_then(|labels| {
             for c in &charges {
-                decide_ceiling(loaded, &c.counter, c.amount, c.total, c.spent).map_err(
-                    |reason| TargetRefusal {
+                decide_ceiling(&loaded.pass, &c.counter, c.amount, c.spent).map_err(|reason| {
+                    TargetRefusal {
                         reason,
                         index: None,
-                    },
-                )?;
+                    }
+                })?;
             }
             Ok(labels)
         });

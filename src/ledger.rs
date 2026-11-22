@@ -1204,13 +1204,12 @@ fn check_required_charges(
 
 /// Check one counter against the pass and the locked ledger totals.
 fn decide_ceiling(
-    loaded: &LoadedPass,
+    pass: &crate::Pass,
     counter: &str,
     amount: u64,
-    total: Option<u64>,
     spent: u64,
 ) -> Result<(), Refusal> {
-    let total = declared_ceiling(loaded, counter, total)?;
+    let total = declared_ceiling(pass, counter)?;
     if spent.checked_add(amount).is_none_or(|next| next > total) {
         return Err(refused_spend(
             RefusalCode::CeilingReached,
@@ -1225,13 +1224,9 @@ fn decide_ceiling(
     Ok(())
 }
 
-fn declared_ceiling(
-    loaded: &LoadedPass,
-    counter: &str,
-    total: Option<u64>,
-) -> Result<u64, Refusal> {
-    total.ok_or_else(|| {
-        let known: Vec<&str> = loaded.pass.ceilings.keys().map(String::as_str).collect();
+fn declared_ceiling(pass: &crate::Pass, counter: &str) -> Result<u64, Refusal> {
+    pass.ceilings.get(counter).copied().ok_or_else(|| {
+        let known: Vec<&str> = pass.ceilings.keys().map(String::as_str).collect();
         refused_spend(
             RefusalCode::UnknownCounter,
             format!(
@@ -1587,7 +1582,7 @@ fn evaluate_spend(
     };
     match decide_spend_targets(loaded, request, now) {
         Ok(labels) => match check_required_charges(&loaded.pass, |name| name == request.counter)
-            .and_then(|()| decide_ceiling(loaded, request.counter, request.amount, total, spent))
+            .and_then(|()| decide_ceiling(&loaded.pass, request.counter, request.amount, spent))
         {
             Ok(()) => {
                 outcome.label = labels.first().cloned();

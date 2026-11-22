@@ -98,15 +98,11 @@ pub fn capacity_with_clock_in(
     let decision = decide_debit_policy(&loaded, policy, charges, now).and_then(|labels| {
         let mut counters = Vec::with_capacity(charges.len());
         for charge in charges {
-            let total = declared_ceiling(
-                &loaded,
-                charge.counter,
-                loaded.pass.ceilings.get(charge.counter).copied(),
-            )
-            .map_err(|reason| TargetRefusal {
-                reason,
-                index: None,
-            })?;
+            let total =
+                declared_ceiling(&loaded.pass, charge.counter).map_err(|reason| TargetRefusal {
+                    reason,
+                    index: None,
+                })?;
             let spent = view.tally.spent(charge.counter);
             let remaining = total.saturating_sub(spent);
             counters.push(CounterCapacity {
@@ -121,9 +117,10 @@ pub fn capacity_with_clock_in(
         }
 
         let units = counters.iter().map(|c| c.units).min().unwrap_or_default();
-        let unit_refusal = counters.iter().find(|c| c.units == 0).and_then(|c| {
-            decide_ceiling(&loaded, &c.counter, c.cost, Some(c.total), c.spent).err()
-        });
+        let unit_refusal = counters
+            .iter()
+            .find(|c| c.units == 0)
+            .and_then(|c| decide_ceiling(&loaded.pass, &c.counter, c.cost, c.spent).err());
         let mut limiting_counters = Vec::new();
         for counter in &mut counters {
             if counter.units == units {
