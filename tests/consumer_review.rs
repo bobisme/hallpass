@@ -260,7 +260,6 @@ fn amendment_projects_only_current_history_including_adoption() {
         "new",
         &old.replace("calls = 10", "calls = 6\nbytes = 100"),
     );
-    write_pass(dir, "new.ledger", "corrupt decoy");
     let fresh = command(dir, &args, 0);
     assert!(fresh["budget_impact"]["tip"].is_null());
     assert!(!dir.join("state").exists());

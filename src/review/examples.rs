@@ -42,6 +42,22 @@ pub struct DecisionExample {
     pub at: String,
     pub before: ExampleDecision,
     pub after: ExampleDecision,
+    /// `newly-allowed`, `changed` or `refusal-code-only`.
+    pub change: &'static str,
+    #[serde(skip)]
+    pub(crate) port: u16,
+}
+
+const NEWLY_ALLOWED: &str = "newly-allowed";
+const CHANGED: &str = "changed";
+const REFUSAL_CODE_ONLY: &str = "refusal-code-only";
+
+const fn classify(before: &ExampleDecision, after: &ExampleDecision) -> &'static str {
+    match (before, after) {
+        (ExampleDecision::Refused { .. }, ExampleDecision::Allowed { .. }) => NEWLY_ALLOWED,
+        (ExampleDecision::Refused { .. }, ExampleDecision::Refused { .. }) => REFUSAL_CODE_ONLY,
+        _ => CHANGED,
+    }
 }
 
 /// Candidate count includes duplicate requests encountered during sampling.
@@ -52,6 +68,11 @@ pub struct ExampleReport {
     pub candidates: usize,
     pub evaluated: usize,
     pub truncated: bool,
+    /// Refused-to-refused changes where only the refusal code differs.
+    pub refusal_code_changes: usize,
+    /// Whether those changes are listed in `rows` (after every other row).
+    pub refusal_code_changes_listed: bool,
+    /// Newly allowed rows first, then other changes, then refusal-code-only rows.
     pub rows: Vec<DecisionExample>,
 }
 
@@ -116,12 +137,26 @@ fn candidates(rule: &Destination) -> impl Iterator<Item = (Target, Option<&HostN
 /// Both the number of visited candidates and the number of reported changes are bounded.
 #[must_use]
 pub fn decision_examples(old: &Pass, new: &Pass, now: OffsetDateTime) -> ExampleReport {
+    decision_examples_with(old, new, now, false)
+}
+
+/// Like [`decision_examples`]. Refused-to-refused changes in which only the
+/// code differs are counted, and listed (last) only when `list_refusal_codes`.
+#[must_use]
+pub fn decision_examples_with(
+    old: &Pass,
+    new: &Pass,
+    now: OffsetDateTime,
+    list_refusal_codes: bool,
+) -> ExampleReport {
     let mut report = ExampleReport {
         sampled: true,
         at: super::exact_stamp(now),
         candidates: 0,
         evaluated: 0,
         truncated: false,
+        refusal_code_changes: 0,
+        refusal_code_changes_listed: list_refusal_codes,
         rows: Vec::new(),
     };
     let mut by_label = BTreeMap::<_, [Option<&Destination>; 2]>::new();
@@ -161,7 +196,7 @@ pub fn decision_examples(old: &Pass, new: &Pass, now: OffsetDateTime) -> Example
                 };
                 if report.candidates == MAX_CANDIDATES || report.rows.len() == MAX_ROWS {
                     report.truncated = true;
-                    return report;
+                    return finish(report);
                 }
                 advanced = true;
                 report.candidates += 1;
@@ -175,12 +210,21 @@ pub fn decision_examples(old: &Pass, new: &Pass, now: OffsetDateTime) -> Example
                 let before = decide(old);
                 let after = decide(new);
                 if before != after {
+                    let change = classify(&before, &after);
+                    if change == REFUSAL_CODE_ONLY {
+                        report.refusal_code_changes += 1;
+                        if !list_refusal_codes {
+                            continue;
+                        }
+                    }
                     report.rows.push(DecisionExample {
                         target: target.to_string(),
                         name: name.map(ToString::to_string),
                         at: report.at.clone(),
                         before,
                         after,
+                        change,
+                        port: target.port,
                     });
                 }
             }
@@ -189,5 +233,16 @@ pub fn decision_examples(old: &Pass, new: &Pass, now: OffsetDateTime) -> Example
             }
         }
     }
+    finish(report)
+}
+
+/// Newly allowed rows first; the sort is stable, so discovery order holds within a kind.
+fn finish(mut report: ExampleReport) -> ExampleReport {
+    let rank = |row: &DecisionExample| match row.change {
+        NEWLY_ALLOWED => 0,
+        CHANGED => 1,
+        _ => 2,
+    };
+    report.rows.sort_by_key(rank);
     report
 }

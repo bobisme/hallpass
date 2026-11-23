@@ -9,6 +9,8 @@ use time::OffsetDateTime;
 use super::{DecisionExample, ExampleDecision, decision_examples, exact_stamp};
 
 const MAX_PAIRS: usize = 16_384;
+/// The most counterexamples reported: one per widened destination or port range.
+const MAX_COUNTEREXAMPLES: usize = 8;
 
 /// Evidence about the endpoint admission relation at a single instant.
 #[derive(Debug, Serialize)]
@@ -17,7 +19,12 @@ pub struct Containment {
     pub at: String,
     pub reason: &'static str,
     pub compared_pairs: usize,
+    /// The first counterexample, kept for older readers.
     pub example: Option<DecisionExample>,
+    /// Up to eight new allowances, at most one per destination rule and port range.
+    pub counterexamples: Vec<DecisionExample>,
+    /// More new allowances may exist than `counterexamples` lists.
+    pub more_counterexamples: bool,
 }
 
 // The policy first rejects both IPv4 edges globally, unless any destination
@@ -94,6 +101,25 @@ impl Rule<'_> {
     }
 }
 
+/// The new rule and port range that admit a counterexample.
+fn widened_range(new: &Pass, row: &DecisionExample) -> (String, u16, u16) {
+    let ExampleDecision::Allowed { label } = &row.after else {
+        return (String::new(), 0, 0);
+    };
+    let (lo, hi) = new
+        .destinations
+        .iter()
+        .find(|d| d.label == *label)
+        .and_then(|d| {
+            d.ports
+                .normalized_ranges()
+                .into_iter()
+                .find(|&(lo, hi)| (lo..=hi).contains(&row.port))
+        })
+        .unwrap_or((row.port, row.port));
+    (label.clone(), lo, hi)
+}
+
 /// Prove coverage of every proposed rule, or supply the reason a proof is unavailable.
 /// An expansion requires a witness from the normal decision procedure.
 #[must_use]
@@ -104,6 +130,8 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
         reason: "different-pass-id",
         compared_pairs: 0,
         example: None,
+        counterexamples: Vec::new(),
+        more_counterexamples: false,
     };
     if old.id != new.id {
         return report;
@@ -145,13 +173,23 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
     }
     if let Some(reason) = reason {
         report.reason = reason;
-        report.example = decision_examples(old, new, at)
-            .rows
-            .into_iter()
-            .find(|row| {
-                matches!(row.before, ExampleDecision::Refused { .. })
-                    && matches!(row.after, ExampleDecision::Allowed { .. })
-            });
+        let sample = decision_examples(old, new, at);
+        let mut seen = BTreeSet::new();
+        for row in sample.rows.into_iter().filter(|row| {
+            matches!(row.before, ExampleDecision::Refused { .. })
+                && matches!(row.after, ExampleDecision::Allowed { .. })
+        }) {
+            if !seen.insert(widened_range(new, &row)) {
+                continue;
+            }
+            if report.counterexamples.len() == MAX_COUNTEREXAMPLES {
+                report.more_counterexamples = true;
+                break;
+            }
+            report.counterexamples.push(row);
+        }
+        report.more_counterexamples |= sample.truncated && !report.counterexamples.is_empty();
+        report.example = report.counterexamples.first().cloned();
         if report.example.is_some() {
             report.result = "expanded";
             report.reason = "replayed-new-allowance";

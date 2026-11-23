@@ -175,6 +175,40 @@ pub enum Error {
 }
 
 impl Error {
+    /// The message for a command that cannot write. It never advises
+    /// `hallpass adopt`: a read-only command that sends the reader to adopt a
+    /// copy can fork the ledger of a live pass.
+    #[must_use]
+    pub fn read_only_message(&self) -> String {
+        let text = self.to_string();
+        match self {
+            Self::LedgerMissing(_) => {
+                let from = text.find("; if it is really lost").unwrap_or(text.len());
+                let tail = text[from..]
+                    .find(". If this pass")
+                    .map_or("", |i| &text[from + i..]);
+                format!(
+                    "{}. This command only reads and changed nothing; run `hallpass status` on the pass to see how to recover{tail}",
+                    &text[..from]
+                )
+            }
+            Self::LedgerChanged { .. } => {
+                let from = text
+                    .find("; if this ledger is the one to keep")
+                    .unwrap_or(text.len());
+                format!(
+                    "{}. This command only reads and changed nothing; run `hallpass status` on the pass to see how to recover",
+                    &text[..from]
+                )
+            }
+            Self::WitnessUnavailable { .. } => text.replace(
+                "; move it aside and run `hallpass adopt` to record a new one",
+                "; this command only reads and changed nothing",
+            ),
+            _ => text,
+        }
+    }
+
     /// A stable code for JSON output.
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -250,5 +284,29 @@ impl std::fmt::Display for MissingLedger {
             self.updated,
             self.pass.display()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_messages_never_advise_adopt() {
+        let changed = Error::LedgerChanged {
+            path: "p.ledger".into(),
+            pass: "p.toml".into(),
+            witness: "w".into(),
+            detail: "x".into(),
+        };
+        assert!(changed.to_string().contains("hallpass adopt"));
+        assert!(!changed.read_only_message().contains("adopt"));
+        let damaged = Error::WitnessUnavailable {
+            pass_id: "a".into(),
+            dir: None,
+            detail: "w is damaged; move it aside and run `hallpass adopt` to record a new one"
+                .into(),
+        };
+        assert!(!damaged.read_only_message().contains("adopt"));
     }
 }

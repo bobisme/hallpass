@@ -16,7 +16,18 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
         return Ok(());
     }
     let state = StateDir::from_env();
-    let view = read_summary(old, &state)?;
+    // NEW is the live pass in the documented retrieve-then-diff flow, and OLD
+    // an archived copy with no ledger. Read the ledger beside NEW; fall back
+    // to the one beside OLD only when NEW has none.
+    let (source, ledger_of) = if hallpass::ledger_path(&proposed.path).exists() {
+        ("new", proposed)
+    } else if hallpass::ledger_path(&old.path).exists() {
+        ("old", old)
+    } else {
+        ("none", proposed)
+    };
+    let ledger = hallpass::ledger_path(&ledger_of.path);
+    let view = read_summary(ledger_of, &state)?;
     if let WitnessStatus::NotChecked { reason } = view.witness {
         return Err(Error::WitnessUnavailable {
             pass_id: old.pass.id.clone(),
@@ -57,6 +68,16 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
     }
     let _ = writeln!(
         out.text,
+        "Ledger used: {} ({}).",
+        safe(&ledger.display().to_string()),
+        match source {
+            "new" => "beside NEW",
+            "old" => "beside OLD; NEW has none",
+            _ => "neither OLD nor NEW has one yet",
+        }
+    );
+    let _ = writeln!(
+        out.text,
         "Current ledger witness: {}.",
         view.witness.as_str()
     );
@@ -70,7 +91,7 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
     for warning in &view.warnings {
         let _ = writeln!(out.text, "WARNING: {}", super::safe(warning));
     }
-    out.json["budget_impact"] = json!({"result":"projected", "tip":view.tip, "witness":view.witness.as_str(),
+    out.json["budget_impact"] = json!({"result":"projected", "ledger":ledger.display().to_string(), "ledger_source":source, "tip":view.tip, "witness":view.witness.as_str(),
         "warnings":view.warnings, "counters":rows});
     Ok(())
 }
@@ -91,7 +112,7 @@ fn render_containment(
         "Endpoint scope at {}: {} ({}). Compared {} rule pairs.",
         report.at, report.result, report.reason, report.compared_pairs
     );
-    if let Some(row) = &report.example {
+    for row in &report.counterexamples {
         let _ = writeln!(
             out.text,
             "{} ({}): {} -> {}",
@@ -100,6 +121,10 @@ fn render_containment(
             row.before,
             row.after
         );
+    }
+    if report.more_counterexamples {
+        out.text
+            .push_str("More new allowances may exist than the counterexamples listed above.\n");
     }
     if report.result != "contained" {
         out.code = REFUSED;
@@ -116,6 +141,7 @@ pub fn review_diff(args: &DiffArgs) -> Output {
         examples,
         budget_impact,
         containment,
+        refusal_changes,
     } = args;
     if at.is_some() && !*examples && !*containment {
         return error_output(
@@ -170,34 +196,61 @@ pub fn review_diff(args: &DiffArgs) -> Output {
     if let Some(instant) = review_at
         && *examples
     {
-        let sample = hallpass::review::decision_examples(&a.pass, &b.pass, instant);
-        let _ = writeln!(
-            output.text,
-            "Sampled {} distinct requests at {}. The sample cannot establish policy equivalence.",
-            sample.evaluated, sample.at
-        );
-        for row in &sample.rows {
-            let _ = writeln!(
-                output.text,
-                "{} ({}): {} -> {}",
-                row.target,
-                row.name.as_deref().unwrap_or("unnamed"),
-                row.before,
-                row.after
-            );
-        }
-        if sample.truncated {
-            output
-                .text
-                .push_str("Sampling limit reached. Additional candidates were omitted.\n");
-        }
-        output.json["examples"] = json!(sample);
+        render_examples(&a, &b, instant, *refusal_changes, &mut output);
     } else if !*budget_impact && !*containment {
         output
             .text
             .push_str("This is a declared-field diff only; it never authorizes a spend.\n");
     }
     output
+}
+
+fn render_examples(
+    old: &LoadedPass,
+    new: &LoadedPass,
+    instant: OffsetDateTime,
+    list_refusal_codes: bool,
+    out: &mut Output,
+) {
+    let sample =
+        hallpass::review::decision_examples_with(&old.pass, &new.pass, instant, list_refusal_codes);
+    let _ = writeln!(
+        out.text,
+        "Sampled {} distinct requests at {}. The sample cannot establish policy equivalence.",
+        sample.evaluated, sample.at
+    );
+    let mut heading = "";
+    for row in &sample.rows {
+        let title = match row.change {
+            "newly-allowed" => "Newly allowed:",
+            "changed" => "Other changes:",
+            _ => "Refusal code changed only:",
+        };
+        if title != heading {
+            heading = title;
+            let _ = writeln!(out.text, "{title}");
+        }
+        let _ = writeln!(
+            out.text,
+            "{} ({}): {} -> {}",
+            row.target,
+            row.name.as_deref().unwrap_or("unnamed"),
+            row.before,
+            row.after
+        );
+    }
+    if sample.refusal_code_changes > 0 && !sample.refusal_code_changes_listed {
+        let _ = writeln!(
+            out.text,
+            "{} refused-to-refused change(s) where only the refusal code changed are not listed; add --refusal-changes to list them.",
+            sample.refusal_code_changes
+        );
+    }
+    if sample.truncated {
+        out.text
+            .push_str("Sampling limit reached. Additional candidates were omitted.\n");
+    }
+    out.json["examples"] = json!(sample);
 }
 
 /// A changed value as plain text: null and empty read `none`.

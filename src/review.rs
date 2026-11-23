@@ -14,7 +14,9 @@ use toml::Value;
 mod containment;
 pub use containment::{Containment, endpoint_containment};
 mod examples;
-pub use examples::{DecisionExample, ExampleDecision, ExampleReport, decision_examples};
+pub use examples::{
+    DecisionExample, ExampleDecision, ExampleReport, decision_examples, decision_examples_with,
+};
 mod coverage;
 pub use coverage::{Capabilities, CoverageFinding, CoverageReport, consumer_coverage};
 

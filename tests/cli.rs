@@ -1140,7 +1140,12 @@ fn deleting_the_ledger_does_not_reset_the_count() {
         );
         let message = out["error"]["message"].as_str().expect("message");
         assert!(message.contains("spent: calls 4"), "{message}");
-        assert!(message.contains("hallpass adopt"), "{message}");
+        // Only commands that write advise adoption; reads never do.
+        assert_eq!(
+            message.contains("hallpass adopt"),
+            matches!(args[0], "spend" | "status"),
+            "{message}"
+        );
     }
     let text = run(&["status", s(&file)], Some(NOW));
     assert_eq!(code(&text), 1);

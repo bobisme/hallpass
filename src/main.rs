@@ -285,18 +285,23 @@ enum Command {
     },
 }
 
+// Each flag selects one independent review report.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(clap::Args)]
 struct DiffArgs {
     /// Previously reviewed pass.
     old: PathBuf,
     /// Proposed replacement pass.
     new: PathBuf,
-    /// Project balances under both revisions using the current pass's verified ledger.
+    /// Project balances under both revisions using the live ledger: the one beside NEW, else the one beside OLD.
     #[arg(long)]
     budget_impact: bool,
     /// Sample changed destination decisions at the supplied review instant.
     #[arg(long, requires = "at")]
     examples: bool,
+    /// List refused-to-refused changes in --examples where only the refusal code changed.
+    #[arg(long, requires = "examples")]
+    refusal_changes: bool,
     /// Prove that every proposed endpoint allowance was already in scope.
     #[arg(long, requires = "at")]
     containment: bool,
@@ -406,10 +411,13 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         Error::Invalid { problems, .. } => problems,
         _ => &[],
     };
-    let mut text = format!(
-        "hallpass {command}: error: {}\n",
-        safe_message(&error.to_string())
-    );
+    // Only the commands that write may advise a recovery that writes.
+    let message = if matches!(command, "spend" | "adopt" | "status") {
+        error.to_string()
+    } else {
+        error.read_only_message()
+    };
+    let mut text = format!("hallpass {command}: error: {}\n", safe_message(&message));
     for p in problems {
         let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
     }
@@ -441,7 +449,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
                 "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), Error::LockTimeout{..}=>Some("not-recorded"), Error::WitnessUnavailable{detail,..} if !detail.contains("was recorded in the ledger") => Some("not-recorded"), _=>None },
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
                 "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
-                "message": error.to_string(),
+                "message": message,
                 "line": match error {
                     Error::LedgerCorrupt { line, .. } => Some(*line),
                     _ => None,

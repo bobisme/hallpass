@@ -470,18 +470,28 @@ timestamp. The report retains the field diff and review flags. Each
 `examples.rows` entry includes the target, optional name, instant and
 before/after label or refusal code. `examples.candidates` counts visits,
 `evaluated` counts distinct requests, and `truncated` signals omitted work.
-Sampling ends after 512 visits or 64 changed rows. `--at` takes an RFC 3339
+Sampling ends after 512 visits or 64 listed rows. Each row has `change`:
+`newly-allowed` (refused to allowed), `changed` (any other change) or
+`refusal-code-only` (refused before and after, only the code differs). Rows
+are ordered newly allowed first, then changed, then refusal-code-only; text
+prints a heading per kind. Refusal-code-only changes are noise for a
+reviewer looking for new permissions, so they are counted in
+`examples.refusal_code_changes` and not listed unless `--refusal-changes` is
+given (`examples.refusal_code_changes_listed` says which). `--at` takes an RFC 3339
 timestamp with an offset; `now` is refused.
 
 ### Projecting an amendment against live balances
 
-`hallpass diff CURRENT PROPOSED --budget-impact --json` reads one verified summary from CURRENT. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
+`hallpass diff OLD NEW --budget-impact --json` reads one verified summary from the live ledger. In the documented flow OLD is an archived copy with no ledger and NEW is the live pass, so the ledger beside NEW is used; the ledger beside OLD is used only when NEW has none. `budget_impact.ledger` is the path read and `budget_impact.ledger_source` is `new`, `old` or `none` (neither exists; the projection then starts from zero spend, or fails when the witness records spends). Text prints the same as `Ledger used:`. A read-only command never advises `hallpass adopt`; its ledger and witness errors say only that nothing was changed, and recovery advice appears from `status`, `spend` and `adopt`. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
 
 ### Proving endpoint containment
 
 `hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID and open windows. Each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
 
-The result `contained` (exit 0) certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` (exit 2) by exhibiting a new allowance. Otherwise the result is `inconclusive` (exit 2), with a reason such as a work limit or coverage that would require combining old rules. Invalid input exits 1. Label attribution, other instants, costs and scope duration are outside this certificate. See the accompanying declared-field diff for those edits.
+The result `contained` (exit 0) certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` (exit 2) by exhibiting a new allowance. `containment.counterexamples` lists up to eight such allowances, at most one per
+distinct widened destination rule and port range, and `more_counterexamples`
+is true when more may exist (the cap or the sampling bound was reached).
+`containment.example` keeps the first of them. Otherwise the result is `inconclusive` (exit 2), with a reason such as a work limit or coverage that would require combining old rules. Invalid input exits 1. Label attribution, other instants, costs and scope duration are outside this certificate. See the accompanying declared-field diff for those edits.
 
 ### Name overlaps and declared breadth
 
