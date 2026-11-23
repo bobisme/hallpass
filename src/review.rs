@@ -30,6 +30,64 @@ pub struct FieldChange {
     pub review_required: bool,
 }
 
+/// A change outside the endpoint rules that gives the pass more authority.
+#[derive(Clone, Debug, Serialize)]
+pub struct Loosening {
+    /// The field, named as in `changes`.
+    pub field: String,
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+}
+
+/// A ceiling change loosens when the limit is raised, or when a new counter
+/// becomes spendable without NEW requiring every debit to charge it. A counter
+/// with no ceiling cannot be spent at all (`unknown-counter`), so removing a
+/// ceiling narrows. Any other field here is the approver or operator:
+/// authority passes to someone else.
+fn ceiling_loosens(a: &Pass, b: &Pass, field: &str) -> bool {
+    let Some(name) = field.strip_prefix("ceilings.") else {
+        return true;
+    };
+    match (a.ceilings.get(name), b.ceilings.get(name)) {
+        (None, Some(_)) => !b.required_counters.iter().any(|c| c == name),
+        (Some(x), Some(y)) => y > x,
+        _ => false,
+    }
+}
+
+/// The non-endpoint changes that loosen the pass.
+///
+/// Each is a change diff marks `[review required]`, other than the destination
+/// rules (which the endpoint proof judges): a longer
+/// window, a higher or new ceiling, a dropped requirement, an un-revoke, or a
+/// different approver or operator. A change that only narrows is not listed.
+#[must_use]
+pub fn non_endpoint_loosenings(old: &LoadedPass, new: &LoadedPass) -> Vec<Loosening> {
+    let (a, b) = (&old.pass, &new.pass);
+    diff(old, new)
+        .changes
+        .into_iter()
+        .filter(|c| c.review_required && !c.field.starts_with("destination["))
+        .filter(|c| match c.field.as_str() {
+            "approval.valid_from" => b.approval.valid_from < a.approval.valid_from,
+            "approval.valid_until" => b.approval.valid_until > a.approval.valid_until,
+            "approval.revoked" => a.approval.revoked && !b.approval.revoked,
+            "approval.revoked_reason" => false,
+            "require_target_v1" => a.require_target && !b.require_target,
+            "required_counters_v1" => a
+                .required_counters
+                .iter()
+                .any(|name| !b.required_counters.contains(name)),
+            field => ceiling_loosens(a, b, field),
+        })
+        .map(|c| Loosening {
+            field: c.field,
+            before: c.before,
+            after: c.after,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DiffReport {
     pub old_pass_id: String,

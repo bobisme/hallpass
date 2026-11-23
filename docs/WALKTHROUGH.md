@@ -258,6 +258,7 @@ NEW pass web-2026-11 digest: sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d47
 approval.valid_until: 2026-11-20T17:00:00Z -> 2026-11-20T12:00:00Z [review required]
 ceilings.bytes: 100 -> 60 [review required]
 Endpoint scope at 2026-11-20T09:00:00Z: contained (rules-and-ipv4-edges-covered). Compared 1 rule pairs.
+Overall verdict: contained. Contained means the endpoints and every other term only narrow.
 Pass web-2026-11 "Web edge" (engagement.pass.toml)
 Approved by: Pat Owner (reference: email of 2026-11-19)
 Operator: Sam Tester
@@ -274,8 +275,9 @@ Declared breadth: IPv4 1, IPv6 0.
 Ledger: 1 line(s) after the header, chain verified, the witness matches
 ```
 
-The diff shows the two narrowed terms. The endpoint scope is contained, so
-the revision only narrows. The status shows the new window and what is left.
+The diff shows the two narrowed terms. The overall verdict covers the
+endpoints, the window, the ceilings and the requirements, and it is
+contained, so the revision only narrows. The status shows the new window and what is left.
 For more review tools, see
 [Review and case suites](INTEGRATING.md#review-and-case-suites).
 

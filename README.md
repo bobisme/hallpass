@@ -46,7 +46,7 @@ JSON callers should check the returned `command`, `result` and exit code.
 | If you need to… | Start with |
 |---|---|
 | Retain the precise approval an owner signed | `verify-approval --archive DIR` |
-| Check whether proposed endpoint scope only narrows, or see remaining budget after an edit | `diff --containment --at TIMESTAMP`, `diff --budget-impact` |
+| Check whether a proposed revision only narrows (endpoints, window, ceilings, requirements), or see remaining budget after an edit | `diff --containment --at TIMESTAMP`, `diff --budget-impact` |
 | Find restrictions an owner's regression suite fails to protect | `test-pass --strength` |
 | Compare a consumer's declared capabilities with the pass requirements | `consumer-coverage` |
 | Estimate how many identical units fit, or where a varied sequence first exceeds budget | `capacity`, `rehearse` |

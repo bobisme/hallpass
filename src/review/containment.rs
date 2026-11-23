@@ -15,7 +15,13 @@ const MAX_COUNTEREXAMPLES: usize = 8;
 /// Evidence about the endpoint admission relation at a single instant.
 #[derive(Debug, Serialize)]
 pub struct Containment {
+    /// The overall verdict: `contained` only when the endpoints are contained
+    /// and nothing else loosens; `widened` when only non-endpoint terms loosen.
     pub result: &'static str,
+    /// The endpoint-only verdict (`contained`, `expanded` or `inconclusive`).
+    pub endpoint_result: &'static str,
+    /// Non-endpoint loosenings: window, ceilings, requirements, revocation, approver.
+    pub loosenings: Vec<super::Loosening>,
     pub at: String,
     pub reason: &'static str,
     pub compared_pairs: usize,
@@ -83,6 +89,18 @@ impl<'a> From<&'a Destination> for Rule<'a> {
     }
 }
 
+impl Containment {
+    /// Fold the non-endpoint loosenings into the overall verdict.
+    #[must_use]
+    pub fn with_loosenings(mut self, loosenings: Vec<super::Loosening>) -> Self {
+        if !loosenings.is_empty() && self.result != "expanded" {
+            self.result = "widened";
+        }
+        self.loosenings = loosenings;
+        self
+    }
+}
+
 impl Rule<'_> {
     fn covers(&self, proposed: &Self) -> bool {
         let a = self.dest;
@@ -126,6 +144,8 @@ fn widened_range(new: &Pass, row: &DecisionExample) -> (String, u16, u16) {
 pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Containment {
     let mut report = Containment {
         result: "inconclusive",
+        endpoint_result: "inconclusive",
+        loosenings: Vec::new(),
         at: exact_stamp(at),
         reason: "different-pass-id",
         compared_pairs: 0,
@@ -198,5 +218,6 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
         report.result = "contained";
         report.reason = "rules-and-ipv4-edges-covered";
     }
+    report.endpoint_result = report.result;
     report
 }

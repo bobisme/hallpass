@@ -106,11 +106,12 @@ fn render_containment(
     at: hallpass::time::OffsetDateTime,
     out: &mut Output,
 ) {
-    let report = hallpass::review::endpoint_containment(&old.pass, &new.pass, at);
+    let report = hallpass::review::endpoint_containment(&old.pass, &new.pass, at)
+        .with_loosenings(hallpass::review::non_endpoint_loosenings(old, new));
     let _ = writeln!(
         out.text,
         "Endpoint scope at {}: {} ({}). Compared {} rule pairs.",
-        report.at, report.result, report.reason, report.compared_pairs
+        report.at, report.endpoint_result, report.reason, report.compared_pairs
     );
     for row in &report.counterexamples {
         let _ = writeln!(
@@ -126,6 +127,20 @@ fn render_containment(
         out.text
             .push_str("More new allowances may exist than the counterexamples listed above.\n");
     }
+    for l in &report.loosenings {
+        let _ = writeln!(
+            out.text,
+            "Loosened: {}: {} -> {}",
+            l.field,
+            plain(&l.before),
+            plain(&l.after)
+        );
+    }
+    let _ = writeln!(
+        out.text,
+        "Overall verdict: {}. Contained means the endpoints and every other term only narrow.",
+        report.result
+    );
     if report.result != "contained" {
         out.code = REFUSED;
     }
