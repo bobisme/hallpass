@@ -17,6 +17,15 @@ fn write_pass(path: &Path, ceilings: &[(&str, u64)]) {
     }
     fs::write(path, pass).expect("write temp pass");
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private pass");
+    // A pass modified in the last quarter second is read again once it has
+    // gone that long unchanged. This one is complete as written, so date it
+    // back and keep the property test fast.
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(earlier))
+        .expect("date the pass back");
 }
 
 fn totals(values: &[(&str, u64)]) -> BTreeMap<String, u64> {

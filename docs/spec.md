@@ -112,7 +112,12 @@ Validation rules, all reported together with field paths
 - ports 1-65535, ranges `"start-end"`; protocols `tcp`, `udp`;
 - ceiling names `[a-z][a-z0-9_-]{0,31}`, totals 0 to 10^12, at most 64;
 - the file: UTF-8, at most 1 MiB, regular file, not a symbolic link, not
-  writable by group or others.
+  writable by group or others, ending with a newline (new after 0.2.0);
+- a file whose modification time is less than 0.25 s old (2.25 s when the
+  time has no fraction of a second) is read again 0.25 s (2.25 s) after that
+  time, or after that long if the time is in the future, and is
+  `invalid-pass` unless its bytes, size and modification time are
+  unchanged (new after 0.2.0).
 
 ## Decision rules
 
@@ -562,8 +567,10 @@ and says that a newer hallpass may have written it.
   A new id also has its own witness.
 - The digest changes with any byte; a caller that passed `--digest` gets
   `pass-changed`.
-- Edit the pass file in place. A revision saved as a second file with the
-  same id has no ledger beside it, and is refused as `ledger-elsewhere`
+- Replace the pass file at its path: write the new version to a file in the
+  same directory, `chmod 600` it, and `mv` it over the old one, so that no
+  command reads a save in progress. A revision kept as a second file with
+  the same id has no ledger beside it, and is refused as `ledger-elsewhere`
   while the first file's ledger is intact (see "The witness").
 
 ### Fail-closed cases
@@ -578,7 +585,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the pass is larger than 1 MiB | `too-large` |
 | the pass is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
 | the pass belongs to a user other than the effective user or root | `untrusted-owner` |
-| the pass does not validate (every problem listed) | `invalid-pass` |
+| the pass does not validate (every problem listed), changed while it was read, or does not end with a newline | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
 | the ledger is missing but its witness recorded lines | `ledger-missing` |

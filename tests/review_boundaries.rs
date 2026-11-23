@@ -102,7 +102,7 @@ fn diff_preserves_identity_and_detects_common_order_even_with_a_new_label() {
     };
     let old = snapshot(&format!("{HEADER}{a}{b}"));
     let equiv = snapshot(
-        &format!("{HEADER}{a}{b}# comment")
+        &format!("{HEADER}{a}{b}# comment\n")
             .replace("443,65535", "65535,443")
             .replace("'a.example','b.example'", "'b.example','a.example'"),
     );

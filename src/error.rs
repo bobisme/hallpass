@@ -72,7 +72,7 @@ pub enum Error {
         effective: u32,
     },
     /// The pass does not validate.
-    #[error("{} is not a valid pass ({} problem(s)); fix each one, then run `hallpass check`", path.display(), problems.len())]
+    #[error("{} is not a valid pass ({} problem(s)); {}", path.display(), problems.len(), invalid_advice(problems))]
     Invalid {
         /// The pass file.
         path: PathBuf,
@@ -183,6 +183,19 @@ pub enum Error {
     /// The request itself is malformed (for example `--n 0`).
     #[error("{0}")]
     Usage(String),
+}
+
+/// The next step for an invalid pass. A read that caught a save in progress
+/// has nothing to fix: the step is to run the command again.
+fn invalid_advice(problems: &[Problem]) -> &'static str {
+    if problems
+        .iter()
+        .any(|p| p.message == crate::files::CHANGED_WHILE_READ)
+    {
+        "it changed while it was read, so run the command again once the save has finished"
+    } else {
+        "fix each one, then run `hallpass check`"
+    }
 }
 
 impl Error {

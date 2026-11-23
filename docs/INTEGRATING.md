@@ -103,6 +103,18 @@ At start, validate the pass and keep its digest. Passing the digest to every
 later call makes hallpass refuse if the file changed since the operator
 confirmed it.
 
+Pin the digest whenever the owner may change the pass while your tool
+spends. An editor that saves over the pass writes it in pieces, and the
+first pieces alone can be a valid pass that grants more than the whole.
+hallpass reads a pass modified in the last quarter second again once that
+quarter second has passed, and refuses it as `invalid-pass` if it changed; a
+save that pauses longer than that can still be read part-way. A pinned
+spend never uses a pass that is not byte for byte the pinned one. To change
+the pass, write the new version to a file in the same directory,
+`chmod 600` it, and `mv` it over the old file: every command then reads
+either the old pass or the new one. See [Changing a
+pass](PASS-FORMAT.md#changing-a-pass).
+
 ```console
 $ hallpass --format json check -- engagement.pass.toml
 exit 0
@@ -576,7 +588,9 @@ the file again.
 ## What an "allowed" guarantees
 
 - The pass file validated in full at the moment of the decision: format
-  version, every field, no unknown key, private file mode, not a link.
+  version, every field, no unknown key, private file mode, not a link, a
+  final newline. Its modification time showed no write in the quarter second
+  before hallpass used its bytes.
 - The window was open at `now` and stays open for `--duration`; the pass
   was not marked revoked; `valid_until` is exclusive.
 - The target is one literal address inside a listed destination, with a
@@ -602,6 +616,9 @@ the file again.
 - **That the approval is real.** A pass is a file the operator wrote.
   hallpass checks that it is complete and unambiguous, not that the owner
   agreed.
+- **A whole pass from a slow save.** A save over the pass that pauses for
+  more than a quarter second part-way can be read part-way. Replace the pass
+  with `mv`, and pin the digest.
 - **A correct clock.** The window is checked against the caller's clock. A
   spend warns if the decision instant precedes the most recent entry. An incorrect clock can still make the window appear open.
 - **Protection from the operator's own account.** The ledger and the

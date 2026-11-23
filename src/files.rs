@@ -310,19 +310,76 @@ fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> 
     Ok(())
 }
 
-/// Read a pass file: not a link, a regular file, not writable by others,
-/// at most [`MAX_PASS_BYTES`].
-pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
-    let file = open_no_follow(path, OpenOptions::new().read(true))?;
-    let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
-    check_pass_owner_mode(
-        path,
-        meta.uid(),
-        rustix::process::geteuid().as_raw(),
-        meta.mode(),
-    )?;
+/// How long a pass file must have gone unchanged before hallpass uses what
+/// it read. A save that truncates the file and then writes it in pieces
+/// leaves a prefix on disk between two writes, and a prefix that ends at a
+/// line boundary can be a valid pass that grants more than the whole file
+/// (its last `names` line missing, say). Editors and tools save a file in
+/// one burst: the pauses between their writes are normally microseconds,
+/// and the longest pause Linux imposes on a writer for dirty-page
+/// throttling is 200 ms. A file modified less than this long ago is read
+/// again once this long has passed, and refused unless nothing changed.
+#[cfg(not(test))]
+const PASS_SETTLE: Duration = Duration::from_millis(250);
+
+/// The library's own unit tests rewrite passes hundreds of times and read
+/// each one at once, so they use a shorter period. The binary, the library
+/// as other crates build it, and every test under `tests/` use 250 ms.
+#[cfg(test)]
+const PASS_SETTLE: Duration = Duration::from_millis(20);
+
+/// Added to a modification time with no fraction of a second: such a
+/// filesystem may keep whole seconds (one second, or two on FAT), so the
+/// write may have been up to this much later than the time it shows.
+const COARSE_TIMESTAMP: Duration = Duration::from_secs(2);
+
+/// What `fstat` says about a pass file: any write changes the size or the
+/// modification time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    size: u64,
+    modified: (i64, i64),
+}
+
+impl Stamp {
+    fn of(file: &File, path: &Path) -> Result<Self, Error> {
+        let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
+        Ok(Self {
+            size: meta.size(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+        })
+    }
+
+    /// How much longer to wait, at `now`, before the file has gone
+    /// [`PASS_SETTLE`] without a change. A modification time in the future
+    /// (a clock set differently) waits the whole period.
+    fn unsettled_for(&self, now: std::time::SystemTime) -> Duration {
+        let (seconds, nanos) = self.modified;
+        let period = if nanos == 0 {
+            PASS_SETTLE + COARSE_TIMESTAMP
+        } else {
+            PASS_SETTLE
+        };
+        let period = period.as_nanos().cast_signed();
+        let last = i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+        let now = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos().cast_signed());
+        let left = (last + period - now).clamp(0, period);
+        Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
+    }
+}
+
+/// The whole file from its start, at most [`MAX_PASS_BYTES`].
+fn read_from_start(file: &File, path: &Path) -> Result<Vec<u8>, Error> {
+    use std::io::{Seek, SeekFrom};
+    let mut reader = file;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| Error::io(path, &e))?;
     let mut bytes = Vec::new();
-    file.take(MAX_PASS_BYTES + 1)
+    reader
+        .take(MAX_PASS_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| Error::io(path, &e))?;
     if bytes.len() as u64 > MAX_PASS_BYTES {
@@ -334,13 +391,81 @@ pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
+fn file_problem(path: &Path, message: &str) -> Error {
+    Error::Invalid {
+        path: path.to_path_buf(),
+        problems: vec![crate::pass::Problem {
+            field: "(file)".to_owned(),
+            message: message.to_owned(),
+        }],
+    }
+}
+
+/// The problem reported when a pass file changed while it was read.
+pub const CHANGED_WHILE_READ: &str = "the file changed while hallpass was reading it, so what was read may be part of a save still in progress. Run the command again once the save has finished. To replace a pass, write the new version to a file in the same directory, `chmod 600` it, and `mv` it over this one";
+
+/// The problem reported when a pass file does not end with a newline.
+const NO_FINAL_NEWLINE: &str = "the file does not end with a newline, so its last line may have been cut short by a save in progress. If the last line is complete, end it with a newline";
+
+/// The bytes of an open pass file, once they are known not to be part of a
+/// save in progress: read, then `fstat`; if the file was modified within
+/// [`PASS_SETTLE`], `pause` until that long after the modification, read
+/// and `fstat` again, and require the same bytes, size and modification
+/// time. A read that does not hold still is refused, and so is a file whose
+/// last line has no newline. Both reads use the open file, so a pass
+/// replaced by `mv` meanwhile is read as it was when it was opened.
+fn settled_bytes(
+    file: &File,
+    path: &Path,
+    now: impl FnOnce() -> std::time::SystemTime,
+    pause: impl FnOnce(Duration),
+) -> Result<Vec<u8>, Error> {
+    let bytes = read_from_start(file, path)?;
+    let first = Stamp::of(file, path)?;
+    let wait = first.unsettled_for(now());
+    if !wait.is_zero() || first.size != bytes.len() as u64 {
+        pause(wait);
+        let again = read_from_start(file, path)?;
+        if again != bytes || Stamp::of(file, path)? != first || first.size != bytes.len() as u64 {
+            return Err(file_problem(path, CHANGED_WHILE_READ));
+        }
+    }
+    if bytes.last().is_some_and(|&last| last != b'\n') {
+        return Err(file_problem(path, NO_FINAL_NEWLINE));
+    }
+    Ok(bytes)
+}
+
+/// Read a pass file: not a link, a regular file, not writable by others,
+/// at most [`MAX_PASS_BYTES`], not changed while it was read, and ending
+/// with a newline. This is the only read of a pass file: the bytes it
+/// returns are both the ones parsed and the ones digested.
+pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
+    let file = open_no_follow(path, OpenOptions::new().read(true))?;
+    let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
+    check_pass_owner_mode(
+        path,
+        meta.uid(),
+        rustix::process::geteuid().as_raw(),
+        meta.mode(),
+    )?;
+    settled_bytes(&file, path, std::time::SystemTime::now, std::thread::sleep)
+}
+
 /// Read, validate and digest the pass at `path`.
+///
+/// A file modified in the last 0.25 s may be part of a save in progress, so
+/// it is read again 0.25 s after the modification and must not have changed:
+/// the call can wait that long (2.25 s when the modification time has no
+/// fraction of a second).
 ///
 /// # Errors
 ///
 /// [`Error::Symlink`], [`Error::NotRegular`], [`Error::Insecure`] (group or
 /// other may write it), [`Error::TooLarge`], [`Error::Io`], and
-/// [`Error::Invalid`] with every problem found.
+/// [`Error::Invalid`] with every problem found, or with one `(file)`
+/// problem when the file changed while it was read or its last line has no
+/// newline.
 pub fn load(path: &Path) -> Result<LoadedPass, Error> {
     load_with_bytes(path).map(|(loaded, _)| loaded)
 }
@@ -462,5 +587,190 @@ mod ownership {
             check_pass_owner_mode(p, 1002, 1001, 0o644),
             Err(Error::UntrustedOwner { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod settle {
+    use super::*;
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The pass the evaluator rewrote: its last line restricts the shared
+    /// address to one name.
+    fn named_pass() -> String {
+        format!(
+            "{}\n[[destination]]\nlabel = \"shop-cdn\"\naddress = \"203.0.113.10\"\nprotocol = \"tcp\"\nports = 443\nnames = [\"shop.example.com\"]\n",
+            crate::pass::tests::GOOD
+        )
+    }
+
+    fn written(text: &str) -> (tempfile::TempDir, PathBuf, File) {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("pass.toml");
+        fs::write(&path, text).expect("write");
+        let file = File::open(&path).expect("open");
+        (dir, path, file)
+    }
+
+    fn modified(file: &File) -> SystemTime {
+        file.metadata()
+            .and_then(|meta| meta.modified())
+            .expect("modification time")
+    }
+
+    fn refusal(result: Result<Vec<u8>, Error>) -> String {
+        match result {
+            Err(Error::Invalid { problems, .. }) if problems.len() == 1 => {
+                assert_eq!(problems[0].field, "(file)");
+                problems[0].message.clone()
+            }
+            other => panic!("expected one file problem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_a_recent_modification_waits_and_only_for_the_rest_of_the_period() {
+        let at = |seconds, nanos| UNIX_EPOCH + Duration::new(seconds, nanos);
+        let stamp = Stamp {
+            size: 0,
+            modified: (1_000, 250_000_000),
+        };
+        let written = at(1_000, 250_000_000);
+        assert_eq!(stamp.unsettled_for(written), PASS_SETTLE);
+        assert_eq!(
+            stamp.unsettled_for(written + PASS_SETTLE / 4),
+            PASS_SETTLE * 3 / 4
+        );
+        assert_eq!(stamp.unsettled_for(written + PASS_SETTLE), Duration::ZERO);
+        assert_eq!(stamp.unsettled_for(at(2_000, 0)), Duration::ZERO);
+        // A modification time ahead of the clock waits the whole period, no more.
+        assert_eq!(stamp.unsettled_for(at(900, 0)), PASS_SETTLE);
+        assert_eq!(stamp.unsettled_for(UNIX_EPOCH), PASS_SETTLE);
+        // Whole seconds: the write may have been up to two seconds later.
+        let coarse = Stamp {
+            size: 0,
+            modified: (1_000, 0),
+        };
+        let longest = PASS_SETTLE + COARSE_TIMESTAMP;
+        assert_eq!(coarse.unsettled_for(at(1_000, 0)), longest);
+        assert_eq!(
+            coarse.unsettled_for(at(1_001, 0)),
+            longest.saturating_sub(Duration::from_secs(1))
+        );
+        assert_eq!(coarse.unsettled_for(at(1_000, 0) + longest), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_settled_file_is_read_once() {
+        let text = named_pass();
+        let (_dir, path, file) = written(&text);
+        let later = modified(&file) + PASS_SETTLE + COARSE_TIMESTAMP;
+        let bytes = settled_bytes(&file, &path, || later, |_| panic!("no pause")).expect("settled");
+        assert_eq!(bytes, text.as_bytes());
+    }
+
+    #[test]
+    fn a_fresh_file_is_read_again_once_the_period_has_passed() {
+        let text = named_pass();
+        let (_dir, path, file) = written(&text);
+        let soon = modified(&file) + PASS_SETTLE / 4;
+        let mut paused = None;
+        let bytes =
+            settled_bytes(&file, &path, || soon, |wait| paused = Some(wait)).expect("unchanged");
+        assert_eq!(paused, Some(PASS_SETTLE * 3 / 4));
+        assert_eq!(bytes, text.as_bytes());
+    }
+
+    #[test]
+    fn a_valid_prefix_whose_last_line_arrives_during_the_pause_is_refused() {
+        let text = named_pass();
+        let (prefix, last) = text
+            .trim_end()
+            .rsplit_once('\n')
+            .map(|(prefix, last)| (format!("{prefix}\n"), format!("{last}\n")))
+            .expect("lines");
+        assert!(last.starts_with("names = "), "{last}");
+        // The prefix alone is a valid pass: what a torn read would see.
+        crate::pass::Pass::parse(&prefix).expect("a valid prefix");
+        let (_dir, path, file) = written(&prefix);
+        let now = modified(&file);
+        let result = settled_bytes(
+            &file,
+            &path,
+            || now,
+            |_| {
+                let mut writer = OpenOptions::new().append(true).open(&path).expect("open");
+                writer
+                    .write_all(last.as_bytes())
+                    .expect("the rest of the save");
+            },
+        );
+        assert_eq!(refusal(result), CHANGED_WHILE_READ);
+    }
+
+    #[test]
+    fn the_same_bytes_saved_again_during_the_pause_are_refused() {
+        let text = named_pass();
+        let (_dir, path, file) = written(&text);
+        let now = modified(&file);
+        let result = settled_bytes(
+            &file,
+            &path,
+            || now,
+            |_| {
+                let writer = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path)
+                    .expect("open");
+                (&writer).write_all(text.as_bytes()).expect("save");
+                writer
+                    .set_modified(now + Duration::from_millis(1))
+                    .expect("a later time");
+            },
+        );
+        assert_eq!(refusal(result), CHANGED_WHILE_READ);
+    }
+
+    #[test]
+    fn a_pass_replaced_by_mv_during_the_pause_is_read_as_it_was_opened() {
+        let text = named_pass();
+        let (dir, path, file) = written(&text);
+        let now = modified(&file);
+        let bytes = settled_bytes(
+            &file,
+            &path,
+            || now,
+            |_| {
+                let staged = dir.path().join("pass.toml.new");
+                fs::write(&staged, "format = 1\n").expect("stage");
+                fs::rename(&staged, &path).expect("mv");
+            },
+        )
+        .expect("the opened file did not change");
+        assert_eq!(bytes, text.as_bytes());
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_is_refused() {
+        for text in [
+            "format = 1",
+            "ports = 44",
+            "format = 1\r",
+            "format = 1\n# end",
+        ] {
+            let (_dir, path, file) = written(text);
+            let later = modified(&file) + PASS_SETTLE + COARSE_TIMESTAMP;
+            let result = settled_bytes(&file, &path, || later, |_| panic!("no pause"));
+            assert_eq!(refusal(result), NO_FINAL_NEWLINE, "{text:?}");
+        }
+        for text in ["format = 1\n", "format = 1\r\n", ""] {
+            let (_dir, path, file) = written(text);
+            let later = modified(&file) + PASS_SETTLE + COARSE_TIMESTAMP;
+            let bytes = settled_bytes(&file, &path, || later, |_| panic!("no pause"))
+                .expect("ends with a newline or is empty");
+            assert_eq!(bytes, text.as_bytes());
+        }
     }
 }

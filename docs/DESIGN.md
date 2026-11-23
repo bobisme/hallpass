@@ -342,6 +342,31 @@ witness catches them.
   the approval. A ledger readable or writable by group or others is refused.
 - `init` creates with `O_EXCL` and mode 0600 and never overwrites, not even
   through a dangling link.
+- One function reads a pass file, for every command and the library. The
+  bytes it returns are the ones parsed and the ones digested. After reading
+  it `fstat`s the open file. If the modification time is less than 0.25 s
+  old, it waits until 0.25 s after that time, reads the open file again, and
+  requires the same bytes, size and modification time, or the pass is
+  `invalid-pass`. A save in place truncates the file and writes it in
+  pieces, and a prefix that ends at a line boundary can be a valid pass
+  that grants more than the whole (the evaluator's 4 KiB writes, one of
+  them ending just before the last `names` line). Editors and tools
+  normally pause microseconds between writes, and Linux throttles a writer
+  for at most 200 ms at a time, so 0.25 s leaves a margin and keeps the
+  delay short. Only a command that reads the pass within 0.25 s of a write
+  waits. A modification time
+  with no fraction of a second may be a whole-second file system's
+  rounding, so 2 s is added to it. The second read uses the open file: a
+  pass replaced by `mv` meanwhile is read as it was when it was opened.
+  The status-change time is not used: `chmod` and `mv` change it without
+  changing the bytes.
+- A pass whose last byte is not a newline is refused. A cut inside a line
+  can still parse and change the approval (`ports = 443` read as
+  `ports = 44`). TOML does not require the newline, so a pass saved by an
+  editor set not to add one is refused until the newline is added.
+- Rejected: a file lease, which tells whether any process has the file
+  open for writing, but needs the file's owner and a signal handler, which
+  needs `unsafe` code.
 
 ## The test clock
 
@@ -398,6 +423,16 @@ No locking crate: the standard library has file locks.
   could be edited undetected until the next spend updates the witness.
 - **Locks are advisory and local.** `flock` does not work reliably on some
   network file systems. Keep the pass on a local disk.
+- **A pass saved in place.** A save that truncates the pass and writes it
+  in pieces leaves a prefix on disk, and the prefix can be a valid pass
+  that grants more. hallpass reads a pass modified in the last 0.25 s again
+  0.25 s after the modification and refuses it if anything changed, and it
+  refuses a last line without a newline. A save that pauses for more than
+  0.25 s part-way, or a writer that sets the modification time back, can
+  still be read part-way. Replace a pass by writing the new version in the
+  same directory, `chmod 600`, then `mv` over the old file; a tool that
+  spends while the owner may change the pass should pin the digest
+  (`--digest`, `expect_digest`).
 - **The window uses the caller's clock.** Changing the system clock moves
   the window. CLI spends sample time after preparatory witness writes under the writer locks;
   status, permits and previews sample after verifying their evidence. A

@@ -137,6 +137,9 @@ The sixth `spend` of `calls` succeeds and the seventh is refused (exit 2),
 assuming one call per spend under the example approval. Concurrent CLI
 processes sharing the ledger and witness use the same ceiling. Set
 `revoked = true` in the file and the next CLI `spend` or `permits` refuses.
+To change a pass that is in use, write the new version to a file in the same
+directory, `chmod 600` it, and `mv` it over the old file, so that no command
+reads a half-saved pass. See [Changing a pass](docs/PASS-FORMAT.md#changing-a-pass).
 
 If the ledger goes missing after the local witness recorded a debit, hallpass
 reports the missing history. Restore the ledger if available. If it was lost,
@@ -201,6 +204,10 @@ What it guards against:
   a ceiling hold across commands and concurrent processes.
 - **A pass that changed mid-run**: the digest identifies the exact file;
   `spend --digest` refuses if it changed.
+- **A pass read while it is being saved**: a pass modified in the last
+  quarter second is read again once it has gone that long unchanged, and refused as
+  `invalid-pass` if it changed meanwhile. A pass whose last line has no
+  newline is refused too.
 - **Damaged state**: CLI `permits` and `spend` return an error if the pass
   is unreadable or the ledger fails verification.
 - **A lost, replaced or rewound ledger**: a small witness in
@@ -224,6 +231,9 @@ What it does not guard against:
 - the same pass used from two machines or user accounts (each has its own
   witness);
 - a wrong system clock (the window uses the decision clock; status and spends warn if it is strictly earlier than the last ledger event);
+- a save over the pass that pauses for more than a quarter second part-way:
+  replace the pass with `mv`, and pin the digest (`--digest`) when
+  spending while the owner may change the pass;
 - network file systems where `flock` is unreliable;
 - what happens inside a long step after a tool has asked (revocation takes
   effect at the next question).

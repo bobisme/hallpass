@@ -203,13 +203,16 @@ Subject: Re: Approval: web edge test
 Please finish by 12:00 UTC today, and keep the total to 60 bytes.
 ```
 
-Copy the change into the pass. Edit this file in place rather than save a
-second file with the same ID: that file would have no ledger beside it, and
+Copy the change into the pass. Replace this file rather than keep a second
+file with the same ID: that file would have no ledger beside it, and
 hallpass would refuse it as `ledger-elsewhere`. Keep the ID and the
-reference, so the ledger and its totals carry on:
+reference, so the ledger and its totals carry on. Write the new version
+beside the old one, make it private, then `mv` it over the old file. A
+command that runs meanwhile reads either the old pass or the new one,
+never a save in progress:
 
 ```sh
-cat > engagement.pass.toml <<'PASS'
+cat > engagement.pass.toml.new <<'PASS'
 # Copied from Pat Owner's email of 2026-11-19.
 # Narrowed by the reply of 2026-11-20: end at 12:00, at most 60 bytes.
 format = 1
@@ -237,6 +240,8 @@ names = ["app.example.org"]
 requests = 5
 bytes = 60
 PASS
+chmod 600 engagement.pass.toml.new
+mv engagement.pass.toml.new engagement.pass.toml
 ```
 
 The journal still pins the first revision. The next unit is refused, and

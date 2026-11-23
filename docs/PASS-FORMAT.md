@@ -65,7 +65,10 @@ requests = 500
   `\"` and `\\` are accepted; a single-quoted string has no escapes.
 - **The file** must be UTF-8, at most 1 MiB, a regular file (not a symbolic
   link), owned by the effective user or root, and not writable by group or others (mode 0600 or 0644; `init`
-  writes 0600).
+  writes 0600). Its last line must end with a newline: a last line without
+  one may be a save cut short. `init` writes the newline. A file modified in
+  the last quarter second is read twice; see [Changing a
+  pass](#changing-a-pass).
 - **Field paths** in problems are dotted: `approval.valid_until`,
   `ceilings.calls`, `destination[2].ports`. Destinations count from 1, in
   file order.
@@ -325,6 +328,45 @@ bytes. Any edit changes it, a comment included. A tool records it at the
 start of a run, and passes it to `spend --digest` to be refused
 (`pass-changed`) if the pass was edited during the run. The digest is only
 printed for a pass that validates.
+
+## Changing a pass
+
+Replace a pass in one step, so that no command reads it half-written.
+Write the new version to a file in the same directory, make it private,
+check it, then `mv` it over the old file:
+
+```sh
+cp engagement.pass.toml engagement.pass.toml.new
+$EDITOR engagement.pass.toml.new
+chmod 600 engagement.pass.toml.new
+hallpass check engagement.pass.toml.new
+mv engagement.pass.toml.new engagement.pass.toml
+```
+
+`mv` within one directory renames the file in one step: a command that has
+already opened the pass reads the old version, and every later one reads
+the new version. The path stays the same, so the ledger beside it carries
+on. A revision kept under a second name with the same id has no ledger
+beside it and is refused as `ledger-elsewhere`.
+
+Most editors, and `cat > FILE`, save by writing the file at its path in
+pieces, starting from an empty file. For a moment the path holds only the
+first part, and that part can be a valid pass that grants more than the
+whole: the pass without its last `names` line, for example. So hallpass
+reads a pass whose modification time is less than a quarter second old
+again once that quarter second has passed (2.25 seconds when the time has
+no fraction of a second, as on file systems that keep whole seconds). If
+the bytes, the size or the modification time changed, the pass is refused
+as `invalid-pass` (the file changed while hallpass was reading it); run the
+command again once the save has finished. A pass modified longer ago is
+read once, with no wait.
+
+A save that pauses for more than a quarter second part-way can still be read
+part-way. Replace the pass with `mv`, and pin the digest (`--digest`, or
+`expect_digest` in Rust) in any tool that spends while the owner may change
+the pass. A pinned spend refuses every pass that differs from the pinned
+bytes, a part-written one included: `pass-changed`, or `invalid-pass` when
+the save is caught in progress.
 
 ## Ledger
 
