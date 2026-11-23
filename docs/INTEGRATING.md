@@ -75,10 +75,19 @@ hallpass --format json test-pass docs/review-approval.toml \
 ```
 
 The weak fixture checks only an allowed name. Its report shows that removing
-the destination's names survives. The strong fixture adds a wrong-name
-refusal and an adjacent-port refusal; the report names the first case that
-distinguishes each edit. Each mutation changes one destination term in an
-in-memory copy and uses the ordinary evaluator. Overlapping rules can make an
+the destination's names survives. The strong fixture adds refusals for a
+wrong name, adjacent ports, the neighbouring address, the other transport
+and the instants one second outside each end of the window; the report names the
+first case that distinguishes each edit. Each mutation changes one term in an
+in-memory copy and uses the ordinary evaluator. Every mutation only loosens
+the pass. Besides names and ports, the check widens each network by one bit
+(a single address becomes its /31 or /127), adds the other transport as a
+second destination, and moves `valid_from` one second earlier and
+`valid_until` one second later. A mutation that would not validate, such as a
+network that would pass the breadth cap, is reported as `skipped` with a
+`reason`. Raising a ceiling is always `skipped`: a case cannot spend, so no
+case can see it. Skipped mutations are not counted as tested or survived.
+Text output prints one line per mutation. Overlapping rules can make an
 edit semantically redundant, so survivors are review prompts and never
 instructions to alter the approval. The check caps itself at 64 mutations and
 4,096 case evaluations. Inspect `truncated`; partial analysis cannot be

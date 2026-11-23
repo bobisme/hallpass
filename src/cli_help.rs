@@ -39,7 +39,7 @@ fn guide(name: &str) -> Guide {
         ),
         "check" => (
             &["hallpass --format json check engagement.pass.toml"],
-            "On an invalid pass, correct each problems[].field using the owner's approval. After validation, use status to inspect the live window, balances and witness.",
+            "On an invalid pass, correct each problems[].field using the owner's approval. Read warnings: a name-restriction-overlap warning means another destination allows the same addresses without names, so run lint for details. The pass stays valid and check exits 0. After validation, use status to inspect the live window, balances and witness.",
         ),
         "rehearse" => (
             &["hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml"],
@@ -121,7 +121,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml",
                 "hallpass --format json test-pass engagement.pass.toml owner-suite.toml --strength",
             ],
-            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. --strength evaluates the baseline, then bounded in-memory copies with destination names removed or an adjacent valid port added. Inspect mutation_strength.mutations and first_distinguishing_case. Survivors and partial analysis exit 2; survivors are review prompts. All evaluations are offline.",
+            "Run the bundled example from the checkout, or supply your own pass and suite paths. Each case provides id, at, to and expected, with optional name and duration. --strength evaluates the baseline, then bounded in-memory copies with destination names removed, an adjacent valid port added, a network widened by one bit, the other transport added, or the window moved one second wider. Mutations that cannot be observed or would not validate, such as ceilings, are reported as skipped. Inspect mutation_strength.mutations and first_distinguishing_case. Survivors and partial analysis exit 2; survivors are review prompts. All evaluations are offline.",
         ),
         "approval-id" => (
             &[

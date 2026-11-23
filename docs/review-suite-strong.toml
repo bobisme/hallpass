@@ -27,3 +27,31 @@ at = "2026-11-20T09:00:00Z"
 to = "192.0.2.10:444/tcp"
 name = "app.example.com"
 expected = "port-not-listed"
+
+[[case]]
+id = "neighbor-address-refusal"
+at = "2026-11-20T09:00:00Z"
+to = "192.0.2.11:443/tcp"
+name = "app.example.com"
+expected = "address-not-listed"
+
+[[case]]
+id = "other-transport-refusal"
+at = "2026-11-20T09:00:00Z"
+to = "192.0.2.10:443/udp"
+name = "app.example.com"
+expected = "port-not-listed"
+
+[[case]]
+id = "before-window-refusal"
+at = "2026-11-20T07:59:59Z"
+to = "192.0.2.10:443/tcp"
+name = "app.example.com"
+expected = "not-yet-valid"
+
+[[case]]
+id = "window-end-refusal"
+at = "2026-11-20T17:00:00Z"
+to = "192.0.2.10:443/tcp"
+name = "app.example.com"
+expected = "expired"

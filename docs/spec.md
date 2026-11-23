@@ -15,6 +15,11 @@ authorizes a spend. `hallpass lint PASS` reports named rules overlapping
 nameless rules for the same address family, protocol, and ports; each claimed
 effective allowance is replayed through `permits_named` at the supplied time.
 Lint reports at most 256 findings and indicates when it truncated the list.
+`check` and `status` also warn about each such pair, in text and in
+`warnings` and `name_restriction_overlaps`. The pass stays valid and `check`
+exits 0. In `diff`, `before` and `after` are JSON strings, numbers or null
+(absent); text prints absent values as `none`. A network change is named
+`destination[LABEL].network`, or `.address` when both sides are single hosts.
 
 `diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
 destination decisions using the ordinary evaluator at the supplied offset
@@ -40,9 +45,14 @@ digest-pinning workflow in the [integration guide](INTEGRATING.md).
 Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
 invalid input or an error. See the [example suite](review-suite.toml).
 The opt-in `--strength` mode first checks the baseline, then evaluates up to 64
-in-memory mutations that remove destination name restrictions or extend a
-port range by one adjacent valid port. It reports the first case that
-distinguishes each edit or marks the edit as surviving. Work is capped at
+in-memory mutations that only loosen the pass: remove destination name
+restrictions, extend a port range by one adjacent valid port, widen a network
+by one bit (a single address becomes a /31 or /127), add the other transport,
+and move `valid_from` one second earlier and `valid_until` one second later.
+It reports the first case that distinguishes each edit or marks the edit as
+surviving. A mutation that would not validate, and every ceiling change
+(cases cannot spend), has status `skipped` with a `reason`; `mutations_skipped`
+counts them and `mutations_tested` does not. Work is capped at
 4,096 total case evaluations; incomplete analysis exits 2 and is explicitly
 truncated. Survivors are review prompts, never instructions to change the
 approval.

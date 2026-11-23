@@ -516,6 +516,13 @@ fn check(file: &Path) -> Output {
             } else {
                 ""
             };
+            let overlaps = hallpass::review::name_overlap_warnings(&loaded.pass);
+            let mut warnings = hallpass::review::breadth_warnings(&breadth);
+            warnings.extend(overlaps.iter().map(|w| w.message.clone()));
+            let mut overlap_text = String::new();
+            for w in &overlaps {
+                let _ = writeln!(overlap_text, "WARNING: {}", w.message);
+            }
             Output {
                 code: OK,
                 json: json!({
@@ -527,10 +534,11 @@ fn check(file: &Path) -> Output {
                     "require_target": loaded.pass.require_target,
                     "problems": [],
                     "breadth": breadth,
-                    "warnings": hallpass::review::breadth_warnings(&breadth),
+                    "warnings": warnings,
+                    "name_restriction_overlaps": overlaps,
                 }),
                 text: format!(
-                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}",
+                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}{overlap_text}",
                     file.display(),
                     loaded.pass.id,
                     loaded.pass.destinations.len(),
@@ -620,6 +628,43 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
     }
 }
 
+/// One summary line, then one line per mutation.
+fn strength_text(report: &Value, out: &mut String) {
+    let count = |key: &str| report[key].as_u64().unwrap_or(0);
+    let _ = writeln!(
+        out,
+        "{} mutation(s) tested, {} survived, {} skipped.",
+        count("mutations_tested"),
+        count("mutations_survived"),
+        count("mutations_skipped")
+    );
+    let field = |v: &Value| {
+        v.as_str()
+            .map_or_else(String::new, |t| safe(t).into_owned())
+    };
+    for mutation in report["mutations"].as_array().into_iter().flatten() {
+        let _ = write!(
+            out,
+            "  {:<14} {}",
+            field(&mutation["status"]),
+            field(&mutation["changed_term"])
+        );
+        if let Some(first) = mutation["first_distinguishing_case"].as_object() {
+            let _ = write!(
+                out,
+                " (case {}: {} -> {})",
+                field(&first["id"]),
+                field(&first["baseline"]),
+                field(&first["mutated"])
+            );
+        }
+        if let Some(reason) = mutation["reason"].as_str() {
+            let _ = write!(out, " ({})", safe(reason));
+        }
+        out.push('\n');
+    }
+}
+
 fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
     let loaded = match hallpass::load(file) {
         Ok(v) => v,
@@ -687,21 +732,7 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
     if let Some(report) = strength_report {
         let status = report["result"].as_str().unwrap_or("error");
         let _ = writeln!(output.text, "Mutation-strength result: {status}.");
-        for mutation in report["mutations"].as_array().into_iter().flatten() {
-            let _ = write!(
-                output.text,
-                "{}: {} -> {}",
-                mutation["label"], mutation["changed_term"], mutation["status"]
-            );
-            if let Some(first) = mutation["first_distinguishing_case"].as_object() {
-                let _ = write!(
-                    output.text,
-                    " (first distinguished by case {}: {} -> {})",
-                    first["id"], first["baseline"], first["mutated"]
-                );
-            }
-            output.text.push('\n');
-        }
+        strength_text(&report, &mut output.text);
         if report["truncated"] == true {
             output.text.push_str(
                 "Mutation analysis was truncated; it does not establish full suite strength.\n",
@@ -911,7 +942,12 @@ fn status_with_clock(
     let breadth = hallpass::review::breadth(pass);
     let mut warnings = view.warnings.clone();
     warnings.extend(hallpass::review::breadth_warnings(&breadth));
+    let overlaps = hallpass::review::name_overlap_warnings(pass);
+    warnings.extend(overlaps.iter().map(|w| w.message.clone()));
     let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
+    for w in &overlaps {
+        let _ = writeln!(text, "WARNING: {}", w.message);
+    }
     let _ = writeln!(
         text,
         "Declared breadth: IPv4 {}, IPv6 {}.",
@@ -943,6 +979,7 @@ fn status_with_clock(
             "unlisted_spends": unlisted,
             "ledger": ledger_json(&view),
             "warnings": warnings,
+            "name_restriction_overlaps": overlaps,
             "refusal": refusal.as_ref().map(refusal_json),
         }),
         text,

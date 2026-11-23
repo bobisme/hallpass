@@ -21,8 +21,10 @@ pub use coverage::{Capabilities, CoverageFinding, CoverageReport, consumer_cover
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldChange {
     pub field: String,
-    pub before: String,
-    pub after: String,
+    /// A JSON string, number or null (absent).
+    pub before: serde_json::Value,
+    /// A JSON string, number or null (absent).
+    pub after: serde_json::Value,
     pub review_required: bool,
 }
 
@@ -48,7 +50,20 @@ fn change(
     after: impl ToString,
     review: bool,
 ) {
-    let (before, after) = (before.to_string(), after.to_string());
+    let (before, after) = (
+        serde_json::Value::String(before.to_string()),
+        serde_json::Value::String(after.to_string()),
+    );
+    change_value(out, field, before, after, review);
+}
+
+fn change_value(
+    out: &mut Vec<FieldChange>,
+    field: impl Into<String>,
+    before: serde_json::Value,
+    after: serde_json::Value,
+    review: bool,
+) {
     if before != after {
         out.push(FieldChange {
             field: field.into(),
@@ -57,6 +72,21 @@ fn change(
             review_required: review,
         });
     }
+}
+
+/// Ports as `status` prints them: `443, 8443` and `10000-10100`.
+fn ports_text(ranges: &[(u16, u16)]) -> String {
+    ranges
+        .iter()
+        .map(|&(start, end)| {
+            if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn exact_stamp(instant: OffsetDateTime) -> String {
@@ -112,11 +142,11 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
         b.approval.revoked,
         true,
     );
-    change(
+    change_value(
         &mut changes,
         "approval.revoked_reason",
-        format!("{:?}", a.approval.revoked_reason),
-        format!("{:?}", b.approval.revoked_reason),
+        serde_json::json!(a.approval.revoked_reason),
+        serde_json::json!(b.approval.revoked_reason),
         true,
     );
     change(&mut changes, "name", &a.name, &b.name, false);
@@ -137,9 +167,14 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
         let Some(y) = b.destinations.iter().find(|d| d.label == *label) else {
             continue;
         };
+        let field = if x.network.is_host() && y.network.is_host() {
+            "address"
+        } else {
+            "network"
+        };
         change(
             &mut changes,
-            format!("destination[{label}].address"),
+            format!("destination[{label}].{field}"),
             x.network,
             y.network,
             true,
@@ -154,25 +189,15 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
         change(
             &mut changes,
             format!("destination[{label}].ports"),
-            x.ports
-                .normalized_ranges()
-                .iter()
-                .map(|r| format!("{}-{}", r.0, r.1))
-                .collect::<Vec<_>>()
-                .join(","),
-            y.ports
-                .normalized_ranges()
-                .iter()
-                .map(|r| format!("{}-{}", r.0, r.1))
-                .collect::<Vec<_>>()
-                .join(","),
+            ports_text(&x.ports.normalized_ranges()),
+            ports_text(&y.ports.normalized_ranges()),
             true,
         );
-        change(
+        change_value(
             &mut changes,
             format!("destination[{label}].hostname"),
-            format!("{:?}", x.hostname),
-            format!("{:?}", y.hostname),
+            serde_json::json!(x.hostname),
+            serde_json::json!(y.hostname),
             false,
         );
         let mut old_names = x.names.iter().map(HostName::as_str).collect::<Vec<_>>();
@@ -210,11 +235,11 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
     );
     let counters: BTreeSet<_> = a.ceilings.keys().chain(b.ceilings.keys()).collect();
     for counter in counters {
-        change(
+        change_value(
             &mut changes,
             format!("ceilings.{counter}"),
-            format!("{:?}", a.ceilings.get(counter)),
-            format!("{:?}", b.ceilings.get(counter)),
+            serde_json::json!(a.ceilings.get(counter)),
+            serde_json::json!(b.ceilings.get(counter)),
             true,
         );
     }
@@ -377,6 +402,40 @@ pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
         }
     }
     report
+}
+
+/// One pair of destinations where a nameless rule defeats a `names` list.
+#[derive(Clone, Debug, Serialize)]
+pub struct NameOverlapWarning {
+    pub code: &'static str,
+    pub named_label: String,
+    pub unnamed_label: String,
+    pub message: String,
+}
+
+/// Advice for `check` and `status`: one entry per pair that `lint` reports as
+/// `name-restriction-overlap`. The pass stays valid; the names list may have
+/// no effect for the shared addresses.
+#[must_use]
+pub fn name_overlap_warnings(pass: &Pass) -> Vec<NameOverlapWarning> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for f in lint(pass, pass.approval.valid_from).findings {
+        if !seen.insert((f.named_label.clone(), f.unnamed_label.clone())) {
+            continue;
+        }
+        let message = format!(
+            "destination `{}` restricts names, but destination `{}` allows the same addresses and ports without names, so the names list may have no effect there; run `hallpass lint` for details",
+            f.named_label, f.unnamed_label
+        );
+        out.push(NameOverlapWarning {
+            code: f.code,
+            named_label: f.named_label,
+            unnamed_label: f.unnamed_label,
+            message,
+        });
+    }
+    out
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -624,6 +683,43 @@ pub fn cases_with_strength(
     Ok((baseline, report))
 }
 
+/// The network one bit wider, when that change only loosens the pass and
+/// still validates. The error says why the mutation was skipped.
+fn widened(destination: &crate::Destination) -> Result<crate::Network, String> {
+    let net = destination.network;
+    let Some(prefix) = net.prefix().checked_sub(1) else {
+        return Err("the network already covers every address".to_owned());
+    };
+    let (cap, floor) = match net.addr() {
+        IpAddr::V4(_) => (crate::pass::IPV4_CAP, crate::pass::IPV4_FLOOR),
+        IpAddr::V6(_) => (crate::pass::IPV6_CAP, crate::pass::IPV6_FLOOR),
+    };
+    if prefix < floor {
+        return Err(format!(
+            "/{prefix} is broader than /{floor}, the widest network a pass accepts"
+        ));
+    }
+    if prefix < cap && !destination.whole_network_approved {
+        return Err(format!(
+            "/{prefix} is broader than the /{cap} breadth cap and the destination has no whole_network_approved"
+        ));
+    }
+    if net.addr().is_ipv4() && net.prefix() == 31 {
+        return Err("a /30 does not treat its first and last addresses as hosts, so it would not only loosen".to_owned());
+    }
+    let base = match net.addr() {
+        IpAddr::V4(a) => {
+            let mask = u32::MAX << (32 - u32::from(prefix));
+            IpAddr::V4((u32::from(a) & mask).into())
+        }
+        IpAddr::V6(a) => {
+            let mask = u128::MAX << (128 - u32::from(prefix));
+            IpAddr::V6((u128::from(a) & mask).into())
+        }
+    };
+    crate::address::parse_network(&format!("{base}/{prefix}")).map_err(|e| e.to_string())
+}
+
 #[allow(clippy::too_many_lines)]
 fn strength_report(
     pass: &Pass,
@@ -635,8 +731,23 @@ fn strength_report(
 
     #[derive(Clone)]
     enum Edit {
-        RemoveNames { index: usize },
-        AddPort { index: usize, port: u16 },
+        RemoveNames {
+            index: usize,
+        },
+        AddPort {
+            index: usize,
+            port: u16,
+        },
+        Widen {
+            index: usize,
+            network: crate::Network,
+        },
+        OtherTransport {
+            index: usize,
+            label: String,
+        },
+        ValidFrom(OffsetDateTime),
+        ValidUntil(OffsetDateTime),
     }
     struct Candidate {
         label: String,
@@ -667,6 +778,9 @@ fn strength_report(
         }));
     }
     let mut candidates = Vec::new();
+    // Mutations that cannot be run: (label, changed term, reason). Reported as
+    // skipped, never as survived.
+    let mut skipped: Vec<(String, String, String)> = Vec::new();
     let mut candidate_overflow = false;
     for (index, destination) in pass.destinations.iter().enumerate() {
         if !destination.names.is_empty() {
@@ -726,6 +840,121 @@ fn strength_report(
         if candidate_overflow {
             break;
         }
+        let kind = if destination.network.is_host() {
+            "address"
+        } else {
+            "network"
+        };
+        match widened(destination) {
+            Ok(network) => {
+                candidate_overflow = push_candidate(
+                    &mut candidates,
+                    Candidate {
+                        label: destination.label.clone(),
+                        changed_term: format!(
+                            "destination[{}].{kind}: widen {} to {network}",
+                            destination.label, destination.network
+                        ),
+                        edit: Edit::Widen { index, network },
+                    },
+                    MAX_MUTATIONS,
+                );
+            }
+            Err(reason) => skipped.push((
+                destination.label.clone(),
+                format!(
+                    "destination[{}].{kind}: widen by one bit",
+                    destination.label
+                ),
+                reason,
+            )),
+        }
+        if candidate_overflow {
+            break;
+        }
+        let other = match destination.protocol {
+            crate::Protocol::Tcp => crate::Protocol::Udp,
+            crate::Protocol::Udp => crate::Protocol::Tcp,
+        };
+        let extra = format!("{}-{other}", destination.label);
+        if pass.destinations.iter().any(|d| d.label == extra) {
+            skipped.push((
+                destination.label.clone(),
+                format!(
+                    "destination[{}].protocol: also allow {other}",
+                    destination.label
+                ),
+                format!("the added destination label `{extra}` is already used"),
+            ));
+        } else {
+            candidate_overflow = push_candidate(
+                &mut candidates,
+                Candidate {
+                    label: destination.label.clone(),
+                    changed_term: format!(
+                        "destination[{}].protocol: also allow {other}",
+                        destination.label
+                    ),
+                    edit: Edit::OtherTransport {
+                        index,
+                        label: extra,
+                    },
+                },
+                MAX_MUTATIONS,
+            );
+        }
+        if candidate_overflow {
+            break;
+        }
+    }
+    if !candidate_overflow {
+        let step = Duration::SECOND;
+        let window = [
+            (
+                "approval.valid_from: one second earlier",
+                pass.approval.valid_from.checked_sub(step),
+                true,
+            ),
+            (
+                "approval.valid_until: one second later",
+                pass.approval.valid_until.checked_add(step),
+                false,
+            ),
+        ];
+        for (term, moved, from) in window {
+            match moved.and_then(crate::decision::in_utc) {
+                Some(instant) => {
+                    candidate_overflow = push_candidate(
+                        &mut candidates,
+                        Candidate {
+                            label: "approval".to_owned(),
+                            changed_term: term.to_owned(),
+                            edit: if from {
+                                Edit::ValidFrom(instant)
+                            } else {
+                                Edit::ValidUntil(instant)
+                            },
+                        },
+                        MAX_MUTATIONS,
+                    );
+                }
+                None => skipped.push((
+                    "approval".to_owned(),
+                    term.to_owned(),
+                    "the moved instant is outside the years 0001 to 9999 in UTC".to_owned(),
+                )),
+            }
+            if candidate_overflow {
+                break;
+            }
+        }
+    }
+    for name in pass.ceilings.keys() {
+        skipped.push((
+            "ceilings".to_owned(),
+            format!("ceilings.{name}: raise"),
+            "a case cannot spend, so a ceiling change cannot change any case result".to_owned(),
+        ));
     }
     let mut evaluations = baseline.len();
     let mut reports = Vec::new();
@@ -743,6 +972,18 @@ fn strength_report(
                 mutated.destinations[*index].ports = crate::PortSet::from_ranges(ranges)
                     .map_err(|error| format!("cannot apply adjacent port mutation: {error}"))?;
             }
+            Edit::Widen { index, network } => mutated.destinations[*index].network = *network,
+            Edit::OtherTransport { index, label } => {
+                let mut extra = mutated.destinations[*index].clone();
+                extra.protocol = match extra.protocol {
+                    crate::Protocol::Tcp => crate::Protocol::Udp,
+                    crate::Protocol::Udp => crate::Protocol::Tcp,
+                };
+                extra.label.clone_from(label);
+                mutated.destinations.push(extra);
+            }
+            Edit::ValidFrom(instant) => mutated.approval.valid_from = *instant,
+            Edit::ValidUntil(instant) => mutated.approval.valid_until = *instant,
         }
         let changed = evaluate_cases(&mutated, parsed);
         evaluations += changed.len();
@@ -758,7 +999,17 @@ fn strength_report(
             "first_distinguishing_case": first,
         }));
     }
-    let truncated = candidate_overflow || reports.len() < candidates.len();
+    let tested = reports.len();
+    let truncated = candidate_overflow || tested < candidates.len();
+    for (label, changed_term, reason) in &skipped {
+        reports.push(serde_json::json!({
+            "label": label,
+            "changed_term": changed_term,
+            "status": "skipped",
+            "reason": reason,
+            "first_distinguishing_case": null,
+        }));
+    }
     let survivors = reports
         .iter()
         .filter(|row| row["status"] == "survived")
@@ -775,8 +1026,9 @@ fn strength_report(
         "baseline": if baseline_failed { "failed" } else { "passed" },
         "baseline_cases": baseline.len(),
         "baseline_mismatches": baseline.iter().filter(|row| row["match"] != true).count(),
-        "mutations_tested": reports.len(),
+        "mutations_tested": tested,
         "mutations_survived": survivors,
+        "mutations_skipped": skipped.len(),
         "evaluations": evaluations,
         "truncated": truncated,
         "mutations": reports,

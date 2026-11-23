@@ -200,6 +200,16 @@ pub fn review_diff(args: &DiffArgs) -> Output {
     output
 }
 
+/// A changed value as plain text: null and empty read `none`.
+fn plain(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "none".to_owned(),
+        serde_json::Value::String(text) if text.is_empty() => "none".to_owned(),
+        serde_json::Value::String(text) => safe(text).into_owned(),
+        other => other.to_string(),
+    }
+}
+
 fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
     let old = &a.path;
     let new = &b.path;
@@ -216,8 +226,8 @@ fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
             text,
             "{}: {} -> {}{}",
             c.field,
-            safe(&c.before),
-            safe(&c.after),
+            plain(&c.before),
+            plain(&c.after),
             if c.review_required {
                 " [review required]"
             } else {

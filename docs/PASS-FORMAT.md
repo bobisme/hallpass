@@ -172,7 +172,8 @@ Suppose `web` grants TCP port 443 on `192.0.2.10` for the name
 `192.0.2.0/28` with no names, an unnamed request to `192.0.2.10:443/tcp`
 also qualifies through `subnet` during the approval window. Run
 `hallpass lint PASS` to see both labels, the shared service and the example
-decision. The stable finding code is `name-restriction-overlap`.
+decision. The stable finding code is `name-restriction-overlap`. `check` and
+`status` print the same overlap as a warning, and `check` still exits 0.
 
 ### Address spelling
 
