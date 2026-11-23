@@ -167,7 +167,7 @@ fn history_guide(name: &str) -> Guide {
         ),
         "checkpoint" => (
             &["hallpass --format json checkpoint engagement.pass.toml > checkpoint.json"],
-            "After a ledger exists, retain this JSON separately from it. Use verify-checkpoint on the ledger and the retained JSON to check the history later.",
+            "After a ledger exists, retain this JSON separately from it. Before the first spend it exits 2 with result empty and exports nothing. JSON witness.relation says matches, lags or absent. Use verify-checkpoint on the ledger and the retained JSON to check the history later.",
         ),
         "verify-checkpoint" => (
             &[

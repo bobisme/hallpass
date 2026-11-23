@@ -1021,6 +1021,32 @@ pub enum CheckpointStatus {
     Mismatch,
 }
 
+/// How the local witness relates to an exported checkpoint, observed under
+/// the same lock as the export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitnessRelation {
+    /// The witness records exactly the exported tail.
+    Matches,
+    /// The witness records a verified older prefix of the exported ledger.
+    Lags {
+        /// Sequence the witness recorded.
+        witnessed: u64,
+        /// Sequence of the exported checkpoint.
+        exported: u64,
+    },
+    /// There is no witness for this pass.
+    Absent,
+}
+
+/// Outcome of a checkpoint export.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckpointExport {
+    /// No ledger exists and no witness records a spend: nothing to commit to.
+    Empty,
+    /// A checkpoint of the verified ledger, with the observed witness relation.
+    Exported(Checkpoint, WitnessRelation),
+}
+
 /// Export a checkpoint and say whether local witness corroboration exists.
 ///
 /// # Errors
@@ -1029,7 +1055,41 @@ pub fn export_checkpoint(
     loaded: &LoadedPass,
     state: &StateDir,
 ) -> Result<(Checkpoint, bool), Error> {
+    match export_checkpoint_observed(loaded, state)? {
+        CheckpointExport::Exported(checkpoint, relation) => {
+            Ok((checkpoint, relation != WitnessRelation::Absent))
+        }
+        CheckpointExport::Empty => Err(Error::io(
+            &ledger_path(&loaded.path),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        )),
+    }
+}
+
+/// Export a checkpoint and report how the witness relates to it. A pass with
+/// no ledger and no witnessed spend exports [`CheckpointExport::Empty`].
+///
+/// # Errors
+/// If the ledger or local witness is unusable or contradicts the ledger.
+pub fn export_checkpoint_observed(
+    loaded: &LoadedPass,
+    state: &StateDir,
+) -> Result<CheckpointExport, Error> {
     let path = ledger_path(&loaded.path);
+    if matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        let witness = state.read(&loaded.pass.id)?;
+        // A witness of recorded spends with no ledger is an error here.
+        compare(
+            &loaded.path,
+            &path,
+            None,
+            witness.as_ref(),
+            state,
+            &loaded.pass.id,
+        )?;
+        return Ok(CheckpointExport::Empty);
+    }
     let file = open_no_follow(&path, OpenOptions::new().read(true))?;
     check_private(&path, &file)?;
     file.lock_shared().map_err(|e| Error::io(&path, &e))?;
@@ -1049,14 +1109,22 @@ pub fn export_checkpoint(
         state,
         &loaded.pass.id,
     )?;
-    Ok((
+    let relation = match witness.as_ref() {
+        None => WitnessRelation::Absent,
+        Some(w) if w.seq == parsed.seq => WitnessRelation::Matches,
+        Some(w) => WitnessRelation::Lags {
+            witnessed: w.seq,
+            exported: parsed.seq,
+        },
+    };
+    Ok(CheckpointExport::Exported(
         Checkpoint {
             version: 1,
             pass_id: loaded.pass.id.clone(),
             seq: parsed.seq,
             hash: parsed.tail.to_string(),
         },
-        witness.is_some(),
+        relation,
     ))
 }
 

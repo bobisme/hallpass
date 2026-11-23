@@ -37,7 +37,11 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
             text,
             "  #{} {} {}  charges={} targets={}",
             row.seq,
-            row.time,
+            hallpass::time::OffsetDateTime::parse(
+                &row.time,
+                &hallpass::time::format_description::well_known::Rfc3339
+            )
+            .map_or_else(|_| row.time.clone(), hallpass::stamp),
             row.digest,
             json!(row.charges),
             json!(row.targets)

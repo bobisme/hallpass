@@ -595,8 +595,13 @@ requires a new preview. An adoption already appended before a subsequent witness
 write failure still counts; inspect the ledger before retrying.
 
 `checkpoint` exports a versioned pass ID, sequence and exact-line hash, plus
-whether a local witness corroborates the history. Sequence zero identifies the
-header. `verify-checkpoint` validates the supplied ledger and reports `exact`
+whether a local witness corroborates the history. JSON `witness.relation` is
+`matches`, `lags` or `absent`, observed under the same lock as the export, with
+`witnessed_seq` and `exported_seq`. Only `lags` and `absent` add a warning.
+`local_corroboration` is true for `matches` and `lags`. A pass with no ledger and
+no witnessed spend has nothing to commit to. `checkpoint` then exits 2 with
+`result = "empty"`, `checkpoint = null` and empty text output. A witnessed spend
+with a missing ledger is still an error. `verify-checkpoint` validates the supplied ledger and reports `exact`
 or `extended` (exit 0), `mismatch` (exit 2), or an input/error condition (exit
 1). Verification uses the supplied checkpoint as its trust input and does not
 read or create a witness. Retain checkpoints separately from the ledger.

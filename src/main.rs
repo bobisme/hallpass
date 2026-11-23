@@ -414,7 +414,15 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         Error::AppendUncertain { .. } => {
             "Do not proceed or retry automatically. Inspect the ledger.\n"
         }
-        _ => "Nothing was permitted.\n",
+        // Only commands that decide whether something is permitted say so.
+        _ if matches!(
+            command,
+            "spend" | "permits" | "check" | "rehearse" | "capacity" | "status"
+        ) =>
+        {
+            "Nothing was permitted.\n"
+        }
+        _ => "",
     });
     Output {
         code: ERROR,
@@ -424,7 +432,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
             "file": file.map(|f| f.display().to_string()),
             "error": {
                 "code": error.code(),
-                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), Error::LockTimeout{..}=>Some("not-recorded"), _=>None },
+                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), Error::LockTimeout{..}=>Some("not-recorded"), Error::WitnessUnavailable{detail,..} if !detail.contains("was recorded in the ledger") => Some("not-recorded"), _=>None },
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
                 "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
                 "message": error.to_string(),
@@ -1642,16 +1650,42 @@ fn retrieve(directory: &Path, digest: &str) -> Output {
 
 fn checkpoint(file: &Path) -> Output {
     let result = hallpass::load(file)
-        .and_then(|loaded| hallpass::export_checkpoint(&loaded, &StateDir::from_env()));
+        .and_then(|loaded| hallpass::export_checkpoint_observed(&loaded, &StateDir::from_env()));
     match result {
-        Ok((checkpoint, corroborated)) => {
+        Ok(hallpass::CheckpointExport::Exported(checkpoint, relation)) => {
             let value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash});
+            let (corroboration, warning) = match relation {
+                hallpass::WitnessRelation::Matches => (
+                    json!({"relation": "matches", "witnessed_seq": checkpoint.seq, "exported_seq": checkpoint.seq}),
+                    None,
+                ),
+                hallpass::WitnessRelation::Lags {
+                    witnessed,
+                    exported,
+                } => (
+                    json!({"relation": "lags", "witnessed_seq": witnessed, "exported_seq": exported}),
+                    Some(format!(
+                        "The witness corroborates only through sequence {witnessed}; the exported checkpoint is at sequence {exported}."
+                    )),
+                ),
+                hallpass::WitnessRelation::Absent => (
+                    json!({"relation": "absent", "witnessed_seq": null, "exported_seq": checkpoint.seq}),
+                    Some("There is no local witness corroboration.".to_owned()),
+                ),
+            };
             Output {
                 code: 0,
                 text: format!("{value}\n"),
-                json: json!({"command": "checkpoint", "result": "ok", "checkpoint": value, "local_corroboration": corroborated, "warnings": [if corroborated { "The witness corroborates a prefix and may lag the exported tail." } else { "There is no local witness corroboration." }]}),
+                json: json!({"command": "checkpoint", "result": "ok", "checkpoint": value, "local_corroboration": relation != hallpass::WitnessRelation::Absent, "witness": corroboration, "warnings": warning.into_iter().collect::<Vec<_>>()}),
             }
         }
+        // Nothing is recorded, so there is no line to commit to. Exit 2 and an
+        // empty stdout keep a redirected checkpoint file from looking valid.
+        Ok(hallpass::CheckpointExport::Empty) => Output {
+            code: REFUSED,
+            text: String::new(),
+            json: json!({"command": "checkpoint", "result": "empty", "checkpoint": null, "local_corroboration": false, "witness": {"relation": "absent", "witnessed_seq": null, "exported_seq": null}, "warnings": ["Nothing has been recorded yet: no ledger exists, so there is no checkpoint to export."]}),
+        },
         Err(e) => error_output("checkpoint", Some(file), &e),
     }
 }

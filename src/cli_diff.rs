@@ -124,6 +124,16 @@ pub fn review_diff(args: &DiffArgs) -> Output {
             &Error::Usage("--at requires --examples or --containment".to_owned()),
         );
     }
+    if at.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("now")) {
+        return error_output(
+            "diff",
+            None,
+            &Error::Usage(
+                "--at does not accept `now`; supply an RFC 3339 timestamp with an offset"
+                    .to_owned(),
+            ),
+        );
+    }
     let review_at = match at
         .as_deref()
         .map(|s| OffsetDateTime::parse(s, &hallpass::time::format_description::well_known::Rfc3339))
