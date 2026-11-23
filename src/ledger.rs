@@ -1404,6 +1404,20 @@ fn decide_spend_targets(
     Ok(labels)
 }
 
+/// Refuse the first charged name that is not a ceiling of the pass.
+///
+/// Runs before [`check_required_charges`], so a misspelt counter is named as
+/// unknown rather than as a missing required counter.
+fn check_known_counters<'a>(
+    pass: &crate::Pass,
+    counters: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Refusal> {
+    for counter in counters {
+        declared_ceiling(pass, counter)?;
+    }
+    Ok(())
+}
+
 /// Apply the same mandatory-charge policy after scope checks for every debit shape.
 fn check_required_charges(
     pass: &crate::Pass,
@@ -1823,7 +1837,8 @@ fn evaluate_spend(
         warnings,
     };
     match decide_spend_targets(loaded, request, now) {
-        Ok(labels) => match check_required_charges(&loaded.pass, |name| name == request.counter)
+        Ok(labels) => match check_known_counters(&loaded.pass, [request.counter])
+            .and_then(|()| check_required_charges(&loaded.pass, |name| name == request.counter))
             .and_then(|()| decide_ceiling(&loaded.pass, request.counter, request.amount, spent))
         {
             Ok(()) => {

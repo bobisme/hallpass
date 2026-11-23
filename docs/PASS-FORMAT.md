@@ -82,6 +82,21 @@ reject the new key through their unknown-key check. Each debit uses the rule
 in its current pass revision. Historical ledger records retain their original
 charges. `permits` checks window and destination only.
 
+The rule applies to **every debit under the pass**, whatever kind of work it
+records. It does not apply only to the debits you have in mind. If the pass
+also meters other work, such as scans, each of those debits must charge every
+required counter too, and each charge must be a positive amount. With
+`required_counters_v1 = ["requests", "bytes"]`, a scan is refused unless it
+charges both:
+
+```sh
+hallpass spend pass.toml --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp
+```
+
+Charges must be strictly positive, so a unit that has no bytes to report
+cannot satisfy `bytes`. If the owner does not mean the rule for that work,
+put it in a separate pass with its own `required_counters_v1`, or with none.
+
 Place `require_target_v1 = true` before any table header to require a literal
 destination on every debit. For example, the top level of a metered pass
 can start with

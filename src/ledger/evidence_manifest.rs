@@ -1,6 +1,6 @@
 //! Bounded, local manifests reconciled against a single verified history scan.
 use super::evidence::DETAIL_LIMIT;
-use super::{VerifiedEvent, debit, visit_view};
+use super::{VerifiedEvent, debit, display_safe, visit_view};
 use crate::{Digest, Error, HostName, LoadedPass, StateDir, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,50 +154,186 @@ fn read_manifest(path: &Path, id: &str) -> Result<Manifest, Error> {
     }
     let manifest: Manifest = serde_json::from_slice(&bytes)
         .map_err(|e| Error::Usage(format!("invalid manifest: {e}")))?;
-    if manifest.version != 1
-        || manifest.pass_id != id
-        || !(1..=MAX_MANIFEST_ROWS).contains(&manifest.units.len())
-    {
-        return Err(Error::Usage(
-            "manifest version, pass ID, or row count is invalid".into(),
-        ));
+    if manifest.version != 1 {
+        return Err(Error::Usage(format!(
+            "manifest field version is {}; it must be 1. Set \"version\": 1 and run reconcile again",
+            manifest.version
+        )));
     }
-    let mut refs = BTreeSet::new();
-    for unit in &manifest.units {
-        if !debit::valid_text(&unit.caller_ref, crate::MAX_CALLER_REF)
-            || !refs.insert(&unit.caller_ref)
-            || unit.digest.parse::<Digest>().is_err()
-        {
-            return Err(Error::Usage(
-                "manifest reference or digest is invalid or duplicated".into(),
-            ));
-        }
-        debit::check_charges(
-            unit.charges.len(),
-            unit.charges.iter().map(|c| (c.counter.as_str(), c.amount)),
-        )
-        .map_err(|e| Error::Usage(e.into()))?;
-        if let Some(targets) = &unit.targets {
-            if targets.is_empty() || targets.len() > crate::MAX_TARGETS {
-                return Err(Error::Usage("invalid manifest target count".into()));
-            }
-            for t in targets {
-                if !t
-                    .target
-                    .parse::<Target>()
-                    .is_ok_and(|v| v.to_string() == t.target)
-                    || t.name.as_deref().is_some_and(|name| {
-                        !HostName::canonical(name).is_ok_and(|v| v.to_string() == name)
-                    })
-                {
-                    return Err(Error::Usage(
-                        "manifest target or name is not canonical".into(),
-                    ));
-                }
-            }
-        }
+    if manifest.pass_id != id {
+        return Err(Error::Usage(format!(
+            "manifest field pass_id is \"{}\" but this pass is \"{}\"; reconcile needs the manifest written for this pass. Use the pass it names, or a manifest for \"{}\"",
+            display_safe(&manifest.pass_id),
+            display_safe(id),
+            display_safe(id)
+        )));
+    }
+    if !(1..=MAX_MANIFEST_ROWS).contains(&manifest.units.len()) {
+        return Err(Error::Usage(format!(
+            "manifest has {} rows; it must have 1 to {MAX_MANIFEST_ROWS}. Split a larger set into several manifests and reconcile each",
+            manifest.units.len()
+        )));
+    }
+    let mut refs: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, unit) in manifest.units.iter().enumerate() {
+        validate_row(unit, i + 1, &mut refs)?;
     }
     Ok(manifest)
+}
+
+/// A validation error for one manifest row. It names the row (counted from
+/// 1 in file order), the caller reference, the field, the escaped value and
+/// what to do.
+fn row_error(
+    row: usize,
+    caller_ref: &str,
+    field: &str,
+    value: &str,
+    problem: &str,
+    fix: &str,
+) -> Error {
+    Error::Usage(format!(
+        "manifest row {row} (caller_ref \"{}\"): {field} {problem}: \"{}\"; {fix}",
+        display_safe(caller_ref),
+        display_safe(value)
+    ))
+}
+
+/// Check one row, in the order a reader would fix them: reference, digest,
+/// charges, then destinations.
+fn validate_row<'a>(
+    unit: &'a Unit,
+    row: usize,
+    refs: &mut BTreeMap<&'a str, usize>,
+) -> Result<(), Error> {
+    let r = unit.caller_ref.as_str();
+    let fix_ref = format!(
+        "give the row a caller_ref of 1 to {} characters with no control or disguising characters, then run reconcile again",
+        crate::MAX_CALLER_REF
+    );
+    if !debit::valid_text(r, crate::MAX_CALLER_REF) {
+        return Err(row_error(
+            row,
+            r,
+            "caller_ref",
+            r,
+            "is empty, too long, or has control or disguising characters",
+            &fix_ref,
+        ));
+    }
+    if let Some(first) = refs.insert(r, row) {
+        return Err(row_error(
+            row,
+            r,
+            "caller_ref",
+            r,
+            &format!("repeats the caller_ref of row {first}"),
+            "give each row its own caller_ref, since a ledger debit is matched to one row by it; then run reconcile again",
+        ));
+    }
+    if unit.digest.parse::<Digest>().is_err() {
+        return Err(row_error(
+            row,
+            r,
+            "digest",
+            &unit.digest,
+            "is not a digest",
+            "copy the digest printed for this debit: sha256: and 64 lower-case hex digits; then run reconcile again",
+        ));
+    }
+    if let Err(problem) = debit::check_charges(
+        unit.charges.len(),
+        unit.charges.iter().map(|c| (c.counter.as_str(), c.amount)),
+    ) {
+        let shown = serde_json::to_string(&unit.charges).unwrap_or_default();
+        return Err(row_error(
+            row,
+            r,
+            "charges",
+            &shown,
+            &format!("is invalid ({problem})"),
+            "list each counter once, named as the pass's ceilings name it, with a whole amount of at least 1; then run reconcile again",
+        ));
+    }
+    let Some(targets) = &unit.targets else {
+        return Ok(());
+    };
+    validate_targets(row, r, targets)
+}
+
+/// Check the destinations of one row: their count, then each address and name.
+fn validate_targets(row: usize, r: &str, targets: &[ExpectedTarget]) -> Result<(), Error> {
+    if targets.is_empty() || targets.len() > crate::MAX_TARGETS {
+        return Err(row_error(
+            row,
+            r,
+            "targets",
+            &targets.len().to_string(),
+            &format!(
+                "lists {} destinations; it must list 1 to {}",
+                targets.len(),
+                crate::MAX_TARGETS
+            ),
+            &format!(
+                "leave targets out, or list 1 to {} destinations; then run reconcile again",
+                crate::MAX_TARGETS
+            ),
+        ));
+    }
+    for (j, t) in targets.iter().enumerate() {
+        let field = format!("targets[{}].target", j + 1);
+        match t.target.parse::<Target>() {
+            Ok(v) if v.to_string() == t.target => {}
+            Ok(v) => {
+                return Err(row_error(
+                    row,
+                    r,
+                    &field,
+                    &t.target,
+                    "is not canonical",
+                    &format!("write `{v}` in its place, then run reconcile again"),
+                ));
+            }
+            Err(_) => {
+                return Err(row_error(
+                    row,
+                    r,
+                    &field,
+                    &t.target,
+                    "is not a destination",
+                    "write ADDR:PORT/PROTO, for example `192.0.2.10:443/tcp`, then run reconcile again",
+                ));
+            }
+        }
+        let Some(name) = &t.name else { continue };
+        let field = format!("targets[{}].name", j + 1);
+        match name.parse::<HostName>() {
+            Ok(v) if v.as_str() == name => {}
+            Ok(v) => {
+                return Err(row_error(
+                    row,
+                    r,
+                    &field,
+                    name,
+                    "is not canonical",
+                    &format!(
+                        "write `{v}` (lower case, no trailing dot) in its place, then run reconcile again"
+                    ),
+                ));
+            }
+            Err(reason) => {
+                return Err(row_error(
+                    row,
+                    r,
+                    &field,
+                    name,
+                    "is not a host name",
+                    &format!("correct it, then run reconcile again; reason: {reason}"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 /// Reconcile one bounded manifest against verified available ledger history.
 ///

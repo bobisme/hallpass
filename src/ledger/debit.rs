@@ -497,13 +497,16 @@ pub(super) fn decide_debit_policy(
     now: OffsetDateTime,
 ) -> Result<Vec<String>, TargetRefusal> {
     let labels = decide_spend_targets(loaded, policy, now)?;
-    super::check_required_charges(&loaded.pass, |name| {
-        charges.iter().any(|c| c.counter == name)
-    })
-    .map_err(|reason| TargetRefusal {
-        reason,
-        index: None,
-    })?;
+    super::check_known_counters(&loaded.pass, charges.iter().map(|c| c.counter))
+        .and_then(|()| {
+            super::check_required_charges(&loaded.pass, |name| {
+                charges.iter().any(|c| c.counter == name)
+            })
+        })
+        .map_err(|reason| TargetRefusal {
+            reason,
+            index: None,
+        })?;
     Ok(labels)
 }
 

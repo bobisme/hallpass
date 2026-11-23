@@ -214,9 +214,10 @@ request name follows the destination rules.
    `permits` for it, with the name and `needed` (`embedded-ipv4`,
    `network-or-broadcast`, `address-not-listed`, `port-not-listed`,
    `name-required`, `name-not-listed`), `target-required` (an
-   owner-required destination was omitted), `required-counter-missing` (the
-   debit omitted an owner-required charge), `unknown-counter` (not in
-   `[ceilings]`), `ceiling-reached` (spent + n > total). The destination is
+   owner-required destination was omitted), `unknown-counter` (a charged
+   name is not in `[ceilings]`; checked before the required counters, so a
+   typo is named as unknown), `required-counter-missing` (the debit omitted
+   an owner-required charge), `ceiling-reached` (spent + n > total). The destination is
    decided against the pass as read under the locks, the same reading the
    entry's digest names.
 7. Otherwise append one entry (time, counter, n, digest of the pass as just
