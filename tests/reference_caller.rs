@@ -41,6 +41,13 @@ protocol = "tcp"
 ports = 443
 names = ["app.example.org"]
 
+[[destination]]
+label = "web6"
+address = "2001:db8::10"
+protocol = "tcp"
+ports = 443
+names = ["app.example.org"]
+
 [ceilings]
 requests = 5
 bytes = 100
@@ -242,6 +249,71 @@ fn a_unit_is_sent_only_after_a_verified_debit() {
             .contains("Spent: bytes 24 of 100, requests 1 of 5.")
     );
     assert!(handoff.stdout.ends_with("Nothing needs attention.\n"));
+}
+
+#[test]
+fn a_target_is_canonicalized_by_hallpass_before_anything_is_journaled() {
+    let shift = Shift::new();
+    shift.pin("shift.jsonl");
+    let run = shift.caller(
+        &[
+            "run",
+            "shift.jsonl",
+            PASSFILE,
+            "unit-1",
+            "--rehearsal",
+            "--to",
+            "[2001:DB8:0:0:0:0:0:10]:443/tcp@APP.Example.ORG.",
+            "--charge",
+            "requests=1",
+            "--charge",
+            "bytes=24",
+        ],
+        None,
+    );
+    assert_eq!(run.code, Some(0));
+    assert_eq!(
+        run.stdout,
+        "unit-1: debit seq 1 verified, unit sent, completion recorded\n"
+    );
+    assert_eq!(shift.sent(), ["unit-1"]);
+    let canonical = json!([{"target": "[2001:db8::10]:443/tcp", "name": "app.example.org"}]);
+    assert_eq!(
+        shift.record("shift.jsonl", "unit-1", "intent")["targets"],
+        canonical
+    );
+    assert_eq!(shift.lines("outbox.jsonl")[0]["targets"], canonical);
+    assert_eq!(shift.debits(), [(1, "unit-1".to_owned())]);
+    let handoff = shift.handoff("shift.jsonl");
+    assert_eq!(handoff.code, Some(0));
+    assert!(line(&handoff, "unit-1").ends_with("sent  debit seq 1  ok: debited and sent"));
+    assert!(handoff.stdout.ends_with("Nothing needs attention.\n"));
+}
+
+#[test]
+fn input_hallpass_would_not_take_is_stopped_before_an_intent_exists() {
+    let shift = Shift::new();
+    shift.pin("shift.jsonl");
+    let run = shift.caller(
+        &[
+            "run",
+            "shift.jsonl",
+            PASSFILE,
+            "unit-1",
+            "--rehearsal",
+            "--to",
+            "[2001:db8::10]:443/tcp@a b",
+            "--charge",
+            "requests=1",
+            "--charge",
+            "bytes=24",
+        ],
+        None,
+    );
+    assert_eq!(run.code, Some(1));
+    assert_eq!(shift.events("shift.jsonl", "unit-1"), Vec::<String>::new());
+    assert_eq!(shift.sent(), Vec::<String>::new());
+    assert_eq!(shift.debits(), []);
 }
 
 #[test]

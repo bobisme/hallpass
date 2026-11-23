@@ -205,6 +205,19 @@ exit 0
 
 ## Preflight and follow-up checks
 
+**Take the canonical form from hallpass.** A reply names its target in
+canonical spelling: lower-case, compressed IPv6 (`[2001:db8::10]:443/tcp`) and
+a lower-case name without a trailing dot. If you compare the reply with the
+string the user typed, `[2001:DB8::10]` or `@API.example.com.` looks like a
+different target, and a debit you made looks like one you did not. Do not
+reimplement the rules. Before you journal an intent, run
+`permits --format json --to ...` once for all targets and copy each entry of
+its `targets` array (`target` and `name`, in order). Use that spelling in the
+intent, the `spend --to` arguments, the expected reply and the reconcile
+manifest. `permits` gives these fields for an allowed and a refused answer.
+Exit 1 (usage error) means `spend` would refuse the input too: stop before
+you write the intent. `docs/reference-caller/caller.py` does this.
+
 Use `spend --dry-run` with the same arguments as the counted operation. Its
 positive result is `would-allow`, with the current balance, a projected
 spent value and a null sequence. Another process may consume the balance

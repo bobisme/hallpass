@@ -96,9 +96,30 @@ def units(records, pass_file):
 
 
 def target(text):
-    """ADDR:PORT/PROTO[@NAME] as the decoder expects it: canonical name or None."""
+    """ADDR:PORT/PROTO[@NAME] as typed. `canonical` spells it the way hallpass does."""
     literal, _, name = text.partition("@")
-    return {"target": literal, "name": name.lower().removesuffix(".") or None}
+    return {"target": literal, "name": name or None}
+
+
+def canonical(a):
+    """Replace each --to by the spelling hallpass itself uses, before any journal write.
+
+    hallpass is the authority on canonical form (lower-case compressed IPv6, lower-case
+    name without a trailing dot), so ask it: `permits` normalizes every --to and says so
+    in `targets`, whether it allows or refuses. An exit other than 0 or 2 means hallpass
+    would not take the input at all; stop before an intent exists."""
+    args = ["permits"]
+    for t in a.to:
+        args += ["--to", t["target"] + ("@" + t["name"] if t["name"] is not None else "")]
+    code, out = hallpass(*args, "--", a.pass_file, rehearsal=a.rehearsal)
+    reply = decode(out)
+    echoed = reply.get("targets")
+    if (code not in (0, 2) or reply.get("command") != "permits" or not isinstance(echoed, list)
+            or len(echoed) != len(a.to)
+            or not all(isinstance(e, dict) and isinstance(e.get("target"), str)
+                       and (e.get("name") is None or isinstance(e["name"], str)) for e in echoed)):
+        fail(f"hallpass would not take these targets: {message(reply)}")
+    return [{"target": e["target"], "name": e.get("name")} for e in echoed]
 
 
 def charge(text):
@@ -149,6 +170,7 @@ def run(a):
     records = read_journal(a.journal)
     if a.ref in {r.get("ref") for r in records}:
         fail(f"{a.ref} is already in {a.journal}; give every unit a new reference")
+    a.to = canonical(a)  # one spelling for the intent, the spend, the reply check and the manifest
     pins = [r for r in records if r["event"] == "pin" and r["pass"] == a.pass_file]
     if not pins:
         fail(f"no pin for {a.pass_file}; review the pass, then run `pin`")
