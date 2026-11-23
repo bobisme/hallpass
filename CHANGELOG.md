@@ -79,6 +79,11 @@ Changes since commit d70c09f.
   has other problems.
 - `diff --at now` is refused with a message that asks for an RFC 3339
   timestamp.
+- Each call still verifies every ledger line, but about 3x faster: at
+  10,000 lines a `permits` or `spend` call takes about 5 ms instead of
+  about 16 ms. docs/DESIGN.md ("Cost per call") gives the measured costs,
+  a practical ledger size and when to batch with `--n`.
+  `tests/ledger_scale.rs` (ignored by default) measures them.
 - docs/spec.md and docs/INTEGRATING.md are reorganized, and the spec's
   lists of refusal codes, error codes, commands and JSON fields are
   current.
