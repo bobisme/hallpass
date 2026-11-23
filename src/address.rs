@@ -22,10 +22,9 @@ pub enum AddressError {
     /// Nothing was written.
     #[error("the value is empty; write a literal IPv4 or IPv6 address")]
     Empty,
-    /// The text looks like a host name.
-    #[error(
-        "`{0}` looks like a host name; a pass grants nothing to names: write the literal IP address the owner approved (a name may go in the informational `hostname` field)"
-    )]
+    /// The text looks like a host name. Callers add the advice that fits
+    /// them: a query and a pass file need different next steps.
+    #[error("`{0}` looks like a host name; a pass grants nothing to names")]
     Hostname(String),
     /// The text is not an address at all.
     #[error("`{0}` is not a literal IPv4 or IPv6 address")]
@@ -704,7 +703,12 @@ impl FromStr for Target {
         };
         let port =
             parse_port(port).ok_or_else(|| format!("`{port}` is not a port 1-65535; {usage}"))?;
-        let ip = parse_query_address(host).map_err(|e| e.to_string())?;
+        let ip = parse_query_address(host).map_err(|e| match e {
+            AddressError::Hostname(name) => format!(
+                "`{name}` is a host name, not an address, and a question checks only literal addresses: resolve the name yourself, ask with the literal IP address it resolves to (ADDRESS:PORT/PROTOCOL), and pass the name with --name"
+            ),
+            other => other.to_string(),
+        })?;
         Ok(Self { ip, port, protocol })
     }
 }

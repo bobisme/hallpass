@@ -403,9 +403,12 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         Error::Invalid { problems, .. } => problems,
         _ => &[],
     };
-    let mut text = format!("hallpass {command}: error: {}\n", safe(&error.to_string()));
+    let mut text = format!(
+        "hallpass {command}: error: {}\n",
+        safe_message(&error.to_string())
+    );
     for p in problems {
-        let _ = writeln!(text, "  - {}", safe(&p.to_string()));
+        let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
     }
     text.push_str(match error {
         Error::WitnessNotUpdated { .. } => {
@@ -1611,6 +1614,22 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
 /// Operator-supplied text, escaped for a terminal.
 fn safe(text: &str) -> std::borrow::Cow<'_, str> {
     hallpass::display_safe(text)
+}
+
+/// An error message made safe for a terminal, with its backslashes left as
+/// written. The messages already carry their own escapes (`\"`, `\\`, and
+/// `\u{...}` from `escape_default`), so escaping each backslash again would
+/// show every one doubled. Every other unsafe character is still escaped.
+fn safe_message(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '\\' {
+                c.to_string()
+            } else {
+                safe(&c.to_string()).into_owned()
+            }
+        })
+        .collect()
 }
 
 fn archive(file: &Path, directory: &Path) -> Output {

@@ -12,7 +12,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use toml::{Table, Value};
 
-use crate::address::{Network, Protocol, parse_address, parse_network};
+use crate::address::{AddressError, Network, Protocol, parse_address, parse_network};
 use crate::name::{HostName, MAX_NAMES};
 use crate::ports::PortSet;
 
@@ -530,9 +530,28 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
         );
         return None;
     }
+    // Labels are checked over the raw entries, so a duplicate is reported
+    // even when either destination has other problems.
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let Some(label) = entry
+            .as_table()
+            .and_then(|t| t.get("label"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if let Some(first) = seen.insert(label, i + 1) {
+            w.problem(
+                format!("destination[{}].label", i + 1),
+                format!(
+                    "`{label}` is also the label of destination[{first}]; labels must be unique"
+                ),
+            );
+        }
+    }
     let mut out = Vec::new();
     let mut complete = true;
-    let mut labels: BTreeMap<String, usize> = BTreeMap::new();
     for (i, entry) in entries.iter().enumerate() {
         let prefix = format!("destination[{}]", i + 1);
         let Value::Table(t) = entry else {
@@ -541,18 +560,7 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
             continue;
         };
         match parse_destination(w, t, &prefix) {
-            Some(d) => {
-                if let Some(first) = labels.insert(d.label.clone(), i + 1) {
-                    w.problem(
-                        format!("{prefix}.label"),
-                        format!(
-                            "`{}` is also the label of destination[{first}]; labels must be unique",
-                            d.label
-                        ),
-                    );
-                }
-                out.push(d);
-            }
+            Some(d) => out.push(d),
             None => complete = false,
         }
     }
@@ -713,6 +721,18 @@ fn parse_names(w: &mut Walker, t: &Table, p: &str) -> Option<Vec<HostName>> {
     complete.then_some(out)
 }
 
+/// The problem text for an address or network that a pass file refused. A
+/// host name gets the pass-file advice: `names` restricts the destination,
+/// while `hostname` only records what the owner calls it.
+fn address_problem(e: &AddressError) -> String {
+    match e {
+        AddressError::Hostname(name) => format!(
+            "`{name}` is a host name, and a pass grants nothing to names: write the literal IP address the owner approved in `address` or `network`. To restrict the destination to a name, add `names = [\"{name}\"]`; `hostname` only records what the owner calls it and grants nothing"
+        ),
+        other => other.to_string(),
+    }
+}
+
 fn parse_target_field(w: &mut Walker, t: &Table, p: &str, whole: bool) -> Option<Network> {
     match (t.get("address"), t.get("network")) {
         (None, None) => {
@@ -747,7 +767,7 @@ fn parse_target_field(w: &mut Walker, t: &Table, p: &str, whole: bool) -> Option
             match parse_address(text) {
                 Ok(ip) => Some(Network::host(ip)),
                 Err(e) => {
-                    w.problem(field, e.to_string());
+                    w.problem(field, address_problem(&e));
                     None
                 }
             }
@@ -764,7 +784,7 @@ fn parse_target_field(w: &mut Walker, t: &Table, p: &str, whole: bool) -> Option
             let network = match parse_network(text) {
                 Ok(n) => n,
                 Err(e) => {
-                    w.problem(field, e.to_string());
+                    w.problem(field, address_problem(&e));
                     return None;
                 }
             };
