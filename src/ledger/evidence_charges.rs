@@ -49,6 +49,7 @@ pub fn audit_charges(
     state: &StateDir,
     directory: &Path,
 ) -> Result<ChargeAudit, Error> {
+    crate::archive::check_directory(directory)?;
     let mut totals = BTreeMap::new();
     let mut cache: Option<(Digest, Option<Pass>)> = None;
     let mut mismatches = ChargeMismatches::default();

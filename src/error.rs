@@ -22,7 +22,7 @@ pub enum Error {
     },
     /// The path is a symbolic link, which hallpass never follows.
     #[error(
-        "{} is a symbolic link; hallpass does not follow links for a pass or a ledger. Use the path of the real file",
+        "{} is a symbolic link; hallpass does not follow links for a pass or a ledger. Use the path of the real file.",
         path.display()
     )]
     Symlink {
@@ -30,14 +30,14 @@ pub enum Error {
         path: PathBuf,
     },
     /// The path is not a regular file.
-    #[error("{} is not a regular file; give the path of the pass file", path.display())]
+    #[error("{} is not a regular file; give the path of the pass file.", path.display())]
     NotRegular {
         /// The path.
         path: PathBuf,
     },
     /// The file is larger than a pass can be.
     #[error(
-        "{} is larger than {limit} bytes, too large for a pass; a pass is a short text file: check that this is the pass file",
+        "{} is larger than {limit} bytes, too large for a pass; a pass is a short text file: check that this is the pass file.",
         path.display()
     )]
     TooLarge {
@@ -48,7 +48,7 @@ pub enum Error {
     },
     /// Other users may change the file.
     #[error(
-        "{} has mode {mode:04o}, so {who}; run `chmod {fix} {}` and check that its content is what the owner approved",
+        "{} has mode {mode:04o}, so {who}; run `chmod {fix} {}`, then {advice}.",
         path.display(),
         path.display()
     )]
@@ -61,6 +61,8 @@ pub enum Error {
         who: &'static str,
         /// The mode to set.
         fix: &'static str,
+        /// What to check once the mode is fixed, in words, without a full stop.
+        advice: &'static str,
     },
     /// A mutable approval must be controlled by the caller or system administrator.
     #[error("{} is owned by UID {owner}; use an approval owned by effective UID {effective} or root after verifying its content", path.display())]
@@ -79,7 +81,7 @@ pub enum Error {
     },
     /// The ledger cannot be trusted.
     #[error(
-        "the ledger {} is damaged at line {line}: {detail}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed)",
+        "the ledger {} is damaged at line {line}: {detail}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed).",
         path.display()
     )]
     LedgerCorrupt {
@@ -92,7 +94,7 @@ pub enum Error {
     },
     /// The ledger belongs to a different pass id.
     #[error(
-        "the ledger {} belongs to pass `{ledger_id}`, but the pass now says `{pass_id}`. Changing the id does not start a new count. If the owner gave a new approval, write it as a new pass file; otherwise restore id = \"{ledger_id}\"",
+        "the ledger {} belongs to pass `{ledger_id}`, but the pass now says `{pass_id}`. Changing the id does not start a new count. If the owner gave a new approval, write it as a new pass file; otherwise restore id = \"{ledger_id}\".",
         path.display()
     )]
     LedgerForeign {
@@ -108,7 +110,7 @@ pub enum Error {
     LedgerMissing(Box<MissingLedger>),
     /// The ledger does not contain the line the witness recorded.
     #[error(
-        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {} --reason \"...\"`, which records the adoption in the ledger and never lowers a count below what the witness recorded",
+        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {} --reason \"...\"`, which records the adoption in the ledger and never lowers a count below what the witness recorded.",
         path.display(),
         witness.display(),
         pass.display()
@@ -126,7 +128,7 @@ pub enum Error {
     /// The witness cannot be read or written, so a spend cannot be checked
     /// against it.
     #[error(
-        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it",
+        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.",
         dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string())
     )]
     WitnessUnavailable {
@@ -140,7 +142,7 @@ pub enum Error {
     /// The spend was recorded in the ledger, but the witness could not be
     /// updated afterwards.
     #[error(
-        "the spend was recorded in {} as entry {seq}, but the witness could not be updated afterwards ({detail}). Treat this spend as NOT permitted; it still counts against the ceiling. The next command accepts the ledger, since it only adds to what the witness recorded",
+        "the spend was recorded in {} as entry {seq}, but the witness could not be updated afterwards ({detail}). Treat this spend as NOT permitted; it still counts against the ceiling. The next command accepts the ledger, since it only adds to what the witness recorded.",
         path.display()
     )]
     WitnessNotUpdated {
@@ -152,17 +154,17 @@ pub enum Error {
         detail: String,
     },
     /// Append or sync failed. Reconcile the ledger before another attempt.
-    #[error("could not confirm the {event} in {} ({detail}); inspect the ledger before continuing", path.display())]
+    #[error("could not confirm the {event} in {} ({detail}); inspect the ledger before continuing.", path.display())]
     AppendUncertain {
         path: PathBuf,
         event: String,
         detail: String,
     },
     /// The lock-wait budget expired before any debit was appended.
-    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit", path.display())]
+    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit.", path.display())]
     LockTimeout { path: PathBuf },
     /// The file already exists (`init` never overwrites).
-    #[error("{} already exists; hallpass init never overwrites. Choose another path", path.display())]
+    #[error("{} already exists; hallpass init never overwrites. Choose another path.", path.display())]
     Exists {
         /// The file.
         path: PathBuf,
@@ -199,11 +201,11 @@ impl Error {
 
     pub(crate) fn io(path: &std::path::Path, error: &std::io::Error) -> Self {
         let message = match error.kind() {
-            std::io::ErrorKind::NotFound => "no such file; check the path".to_owned(),
+            std::io::ErrorKind::NotFound => "no such file; check the path.".to_owned(),
             std::io::ErrorKind::PermissionDenied => {
-                "permission denied; check the file's owner and mode".to_owned()
+                "permission denied; check the file's owner and mode.".to_owned()
             }
-            _ => error.to_string(),
+            _ => format!("{error}."),
         };
         Self::Io {
             path: path.to_path_buf(),

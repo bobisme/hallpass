@@ -25,6 +25,7 @@ fn directory(dir: &Path) -> Result<fs::File, Error> {
             mode: meta.mode() & 0o7777,
             who: "other users can read or change archived approvals",
             fix: "700",
+            advice: "check that nothing in this directory was changed by someone else",
         });
     }
     let file = fs::File::open(dir).map_err(|e| Error::io(dir, &e))?;
@@ -35,6 +36,15 @@ fn directory(dir: &Path) -> Result<fs::File, Error> {
         ));
     }
     Ok(file)
+}
+
+/// Check that `dir` is an existing real, private archive directory, with the
+/// same checks `retrieve` and `archive` make.
+///
+/// # Errors
+/// If the path is missing, is not a directory, or is not private.
+pub fn check_directory(dir: &Path) -> Result<(), Error> {
+    directory(dir).map(drop)
 }
 
 fn destination(dir: &Path, digest: Digest) -> PathBuf {
@@ -131,6 +141,7 @@ pub fn retrieve_pass(dir: &Path, digest: Digest) -> Result<Vec<u8>, Error> {
             mode: meta.mode() & 0o7777,
             who: "other users can read or change archived approvals",
             fix: "600",
+            advice: "check that its content is the approved pass it was archived from",
         });
     }
     let mut bytes = Vec::new();

@@ -20,32 +20,39 @@ use std::str::FromStr;
 #[non_exhaustive]
 pub enum AddressError {
     /// Nothing was written.
-    #[error("the value is empty; write a literal IPv4 or IPv6 address")]
+    #[error("the value is empty; write a literal IPv4 or IPv6 address.")]
     Empty,
     /// The text looks like a host name. Callers add the advice that fits
     /// them: a query and a pass file need different next steps.
-    #[error("`{0}` looks like a host name; a pass grants nothing to names")]
+    #[error("`{0}` looks like a host name; a pass grants nothing to names.")]
     Hostname(String),
+    /// A numeric IPv4 spelling with a hexadecimal part (`0xcb007101`,
+    /// `0x7f.0.0.1`). Tools such as `inet_aton` read it as an IPv4 address,
+    /// but a pass and a question need the dotted decimal form.
+    #[error(
+        "`{0}` is a non-standard IPv4 spelling; write it in dotted decimal, four parts (for example 10.0.0.1)."
+    )]
+    NonStandardIpv4(String),
     /// The text is not an address at all.
-    #[error("`{0}` is not a literal IPv4 or IPv6 address")]
+    #[error("`{0}` is not a literal IPv4 or IPv6 address.")]
     NotAnAddress(String),
     /// An IPv4 part has a leading zero, which some tools read as octal.
     #[error(
-        "`{0}` has a leading zero in an IPv4 part, which some tools read as octal; write each part without leading zeros (for example 10.0.0.1)"
+        "`{0}` has a leading zero in an IPv4 part, which some tools read as octal; write each part without leading zeros (for example 10.0.0.1)."
     )]
     LeadingZero(String),
     /// A shortened IPv4 form such as `10.1` or a bare integer.
     #[error(
-        "`{0}` is a shortened IPv4 form that tools expand differently; write all four parts (for example 10.0.0.1)"
+        "`{0}` is a shortened IPv4 form that tools expand differently; write all four parts (for example 10.0.0.1)."
     )]
     Shortened(String),
     /// An IPv6 interface (zone) suffix.
     #[error(
-        "`{0}` carries an interface (zone) suffix; a pass cannot name an interface: write the address without `%`"
+        "`{0}` carries an interface (zone) suffix; a pass cannot name an interface: write the address without `%`."
     )]
     Zone(String),
     /// An IPv6 spelling other than the canonical one.
-    #[error("`{given}` is not written in canonical form; write `{canonical}`")]
+    #[error("`{given}` is not written in canonical form; write `{canonical}`.")]
     NotCanonical {
         /// What was written.
         given: String,
@@ -54,7 +61,7 @@ pub enum AddressError {
     },
     /// An IPv6 address that embeds an IPv4 address.
     #[error(
-        "`{given}` is an IPv6 form that carries the IPv4 address {ipv4}; name the IPv4 address itself"
+        "`{given}` is an IPv6 form that carries the IPv4 address {ipv4}; name the IPv4 address itself."
     )]
     EmbedsIpv4 {
         /// What was written.
@@ -74,29 +81,31 @@ pub enum AddressError {
         ipv4: Ipv4Addr,
     },
     /// The unspecified ("any") address, or a network that contains it.
-    #[error("`{0}` is or contains the unspecified (any) address; name the service's own addresses")]
+    #[error(
+        "`{0}` is or contains the unspecified (any) address; name the service's own addresses."
+    )]
     Unspecified(String),
     /// A multicast address or a network that overlaps multicast space.
-    #[error("`{0}` is or overlaps multicast space; a pass names unicast hosts only")]
+    #[error("`{0}` is or overlaps multicast space; a pass names unicast hosts only.")]
     Multicast(String),
     /// The limited broadcast address.
-    #[error("`{0}` is the broadcast address; a pass names unicast hosts only")]
+    #[error("`{0}` is the broadcast address; a pass names unicast hosts only.")]
     Broadcast(String),
     /// The reserved IPv4 block 240.0.0.0/4.
-    #[error("`{0}` is or overlaps the reserved block 240.0.0.0/4, which is not a unicast host")]
+    #[error("`{0}` is or overlaps the reserved block 240.0.0.0/4, which is not a unicast host.")]
     Reserved(String),
     /// A link-local address or network.
     #[error(
-        "`{0}` is or overlaps link-local space (169.254.0.0/16, fe80::/10); link-local addresses are ambiguous without an interface and include cloud metadata endpoints, so a pass does not accept them"
+        "`{0}` is or overlaps link-local space (169.254.0.0/16, fe80::/10); link-local addresses are ambiguous without an interface and include cloud metadata endpoints, so a pass does not accept them."
     )]
     LinkLocal(String),
     /// A network spelling with a malformed prefix length.
     #[error(
-        "`{0}` has a malformed prefix length; write ADDRESS/LENGTH with a decimal length without leading zeros"
+        "`{0}` has a malformed prefix length; write ADDRESS/LENGTH with a decimal length without leading zeros."
     )]
     Prefix(String),
     /// A prefix length longer than the address.
-    #[error("`{given}`: the prefix length {prefix} is longer than {max} bits")]
+    #[error("`{given}`: the prefix length {prefix} is longer than {max} bits.")]
     PrefixTooLong {
         /// What was written.
         given: String,
@@ -107,7 +116,7 @@ pub enum AddressError {
     },
     /// A CIDR whose address part has bits set below the prefix.
     #[error(
-        "`{given}` has host bits set below the prefix; for the network write `{network}`, for one host use `address` instead of `network`"
+        "`{given}` has host bits set below the prefix; for the network write `{network}`, for one host use `address` instead of `network`."
     )]
     HostBits {
         /// What was written.
@@ -117,7 +126,7 @@ pub enum AddressError {
     },
     /// A single address was given where a CIDR was expected, or the reverse.
     #[error(
-        "`{0}` contains `/`; a single `address` has no prefix length: use `network` for a CIDR"
+        "`{0}` contains `/`; a single `address` has no prefix length: use `network` for a CIDR."
     )]
     UnexpectedPrefix(String),
 }
@@ -158,7 +167,7 @@ impl Ipv6Transition {
 
 fn transition_message(given: &str, mechanism: Ipv6Transition, ipv4: Ipv4Addr) -> String {
     format!(
-        "`{given}` is {} that carries the IPv4 address {ipv4}: packets to it are tunnelled or translated over IPv4, past an IPv6-only reading of the list. A pass names native addresses only: name {ipv4} itself, or the host's native IPv6 address",
+        "`{given}` is {} that carries the IPv4 address {ipv4}: packets to it are tunnelled or translated over IPv4, past an IPv6-only reading of the list. A pass names native addresses only: name {ipv4} itself, or the host's native IPv6 address.",
         mechanism.name()
     )
 }
@@ -494,6 +503,9 @@ fn parse_literal_as(text: &str, transitions: bool) -> Result<IpAddr, AddressErro
         }
     }
     let Ok(ip) = IpAddr::from_str(text) else {
+        if hex_ipv4(text) {
+            return Err(AddressError::NonStandardIpv4(text.to_owned()));
+        }
         let alpha = text
             .bytes()
             .any(|b| b.is_ascii_alphabetic() && !b.is_ascii_hexdigit());
@@ -529,6 +541,24 @@ fn parse_literal_as(text: &str, transitions: bool) -> Result<IpAddr, AddressErro
         });
     }
     Ok(ip)
+}
+
+/// True for a numeric IPv4 spelling with a `0x` hexadecimal part, bare or
+/// dotted (`0xcb007101`, `0x7f.0.0.1`), which `inet_aton` reads as an address.
+fn hex_ipv4(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() <= 4
+        && parts.iter().all(|p| {
+            p.strip_prefix("0x")
+                .or_else(|| p.strip_prefix("0X"))
+                .map_or_else(
+                    || !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()),
+                    |hex| !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+                )
+        })
+        && parts
+            .iter()
+            .any(|p| p.starts_with("0x") || p.starts_with("0X"))
 }
 
 /// Parse a single literal destination address.
@@ -705,7 +735,7 @@ impl FromStr for Target {
             parse_port(port).ok_or_else(|| format!("`{port}` is not a port 1-65535; {usage}"))?;
         let ip = parse_query_address(host).map_err(|e| match e {
             AddressError::Hostname(name) => format!(
-                "`{name}` is a host name, not an address, and a question checks only literal addresses: resolve the name yourself, ask with the literal IP address it resolves to (ADDRESS:PORT/PROTOCOL), and pass the name with --name"
+                "`{name}` is a host name, not an address, and a question checks only literal addresses: resolve the name yourself, ask with the literal IP address it resolves to (ADDRESS:PORT/PROTOCOL), and pass the name with --name."
             ),
             other => other.to_string(),
         })?;
@@ -786,7 +816,10 @@ mod tests {
             addr_err("256.0.0.1"),
             AddressError::NotAnAddress(_)
         ));
-        assert!(matches!(addr_err("0x7f.0.0.1"), AddressError::Hostname(_)));
+        assert!(matches!(
+            addr_err("0x7f.0.0.1"),
+            AddressError::NonStandardIpv4(_)
+        ));
     }
 
     #[test]

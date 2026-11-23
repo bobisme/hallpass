@@ -727,7 +727,7 @@ fn parse_names(w: &mut Walker, t: &Table, p: &str) -> Option<Vec<HostName>> {
 fn address_problem(e: &AddressError) -> String {
     match e {
         AddressError::Hostname(name) => format!(
-            "`{name}` is a host name, and a pass grants nothing to names: write the literal IP address the owner approved in `address` or `network`. To restrict the destination to a name, add `names = [\"{name}\"]`; `hostname` only records what the owner calls it and grants nothing"
+            "`{name}` is a host name, and a pass grants nothing to names: write the literal IP address the owner approved in `address` or `network`. To restrict the destination to a name, add `names = [\"{name}\"]`; `hostname` only records what the owner calls it and grants nothing."
         ),
         other => other.to_string(),
     }

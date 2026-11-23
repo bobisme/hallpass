@@ -217,6 +217,7 @@ fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> 
             mode: mode & 0o7777,
             who: "other users can change the approval",
             fix: "600",
+            advice: "check that its content is what the owner approved",
         });
     }
     Ok(())

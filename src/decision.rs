@@ -276,10 +276,10 @@ impl Pass {
                 Err(Refusal {
                     code: RefusalCode::WindowTooShort,
                     message: format!(
-                        "the work may take up to {}, but only {} of the approval window remain (valid until {}); do less, or {new_window}",
+                        "the work may take up to {} and would end at or after the window closes (valid until {}; {} remain); do less, or {new_window}",
                         span(needed),
-                        span(remaining),
-                        stamp(a.valid_until)
+                        stamp(a.valid_until),
+                        span(remaining)
                     ),
                 })
             }

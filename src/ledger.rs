@@ -797,6 +797,7 @@ fn check_private(path: &Path, file: &fs::File) -> Result<(), Error> {
             mode: meta.mode() & 0o7777,
             who: "other users can read or change the ledger",
             fix: "600",
+            advice: "check that no other user or process changed it, since hallpass, not the owner, wrote this ledger",
         });
     }
     Ok(())

@@ -208,6 +208,7 @@ pub fn audit_receipts(
     state: &StateDir,
     directory: &Path,
 ) -> Result<ReceiptAudit, Error> {
+    crate::archive::check_directory(directory)?;
     let mut corroborated = EndpointGroup::default();
     let mut mismatches = EndpointGroup::default();
     let mut gaps = BTreeMap::new();
