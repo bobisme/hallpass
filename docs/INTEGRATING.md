@@ -132,7 +132,9 @@ ceiling together, under one lock, against one reading of the pass file. If
 any of them refuses, nothing is recorded. When `check` or `status` returns
 `require_target: true`, omit `--to` and the debit is refused. On a pass
 that permits targetless accounting, the caller must have asked `permits`
-for every destination itself before a targetless debit.
+for every destination itself before a targetless debit. Such a debit, and
+its `--dry-run`, has a warning in `warnings` that no destination was
+checked.
 
 | Exit | `result` | Meaning | What the caller does |
 |---|---|---|---|
@@ -287,8 +289,8 @@ exit 0
   and always reports `false`. Remove that variable from the environment you
   start hallpass with.
 - **Show `warnings`** to the operator. They are not refusals, but they say
-  things such as "the ledger was moved" or "the witness could not be
-  checked".
+  things such as "the ledger was moved", "the witness could not be
+  checked" or "no destination was checked".
 - **Keep `HOME` and `XDG_STATE_HOME` stable.** The witness that notices a
   deleted or rolled-back ledger lives in `$XDG_STATE_HOME/hallpass` (or
   `~/.local/state/hallpass`). A caller that runs hallpass in a container or
@@ -373,6 +375,9 @@ array. The decoder checks repeated scalar fields and receipt data against
 the matching array entries. The requested duration is evaluated by Hallpass
 and is absent from the spend reply. A sequence identifies the committed debit.
 The caller retains responsibility for correlating each subprocess with its request.
+The decoder also accepts replies from releases that omitted charges on a
+plain scalar spend or the scalar fields on --charge. It passes a targetless
+unit and shows its warning.
 
 The reference runner also runs the [version 2 scalar fixtures](conformance/cases-v2.json).
 New integrations should use version 3 for complete request checking.
@@ -384,8 +389,15 @@ Use positional COUNTER with optional --n for a scalar spend, or repeat
 once. In JSON a successful debit has result "allowed", one seq, and a
 charges array with counter, n, total, spent and remaining for each charge.
 A refusal has result "refused", no sequence, and unchanged balances. Text
-output shows the sequence and per-counter balances. The scalar command keeps
-its existing JSON fields.
+output shows the sequence and per-counter balances.
+
+Every spend reply has the same keys, whatever the flags. The charges array
+is always present, also for a positional COUNTER. The scalar fields counter,
+n, total, spent, remaining and projected_spent repeat the only charge when
+the unit charges one counter, and are null when it charges several. The
+receipt is null unless a committed debit retained one. Its caller_ref is
+null without --caller-ref, and each of its targets has a name, null for an
+unnamed endpoint. The [JSON field list](spec.md#json-fields) gives every key.
 
 A read-only --dry-run returns "would-allow" when all costs fit at the check,
 with current balances, projected_spent per charge and no sequence. An exit status of zero with result

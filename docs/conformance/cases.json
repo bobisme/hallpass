@@ -202,6 +202,102 @@
       "exit": 0,
       "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"extension\":-Infinity}",
       "action": "stop"
+    },
+    {
+      "id": "uniform-several-charges",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0,\"projected_spent\":null},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0,\"projected_spent\":null}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"counter\":null,\"n\":null,\"total\":null,\"spent\":null,\"remaining\":null,\"projected_spent\":null,\"reference_evidence\":null}",
+      "action": "proceed"
+    },
+    {
+      "id": "several-charges-scalar-value",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0,\"projected_spent\":null},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0,\"projected_spent\":null}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"counter\":null,\"n\":null,\"total\":null,\"spent\":1,\"remaining\":null,\"projected_spent\":null,\"reference_evidence\":null}",
+      "action": "stop"
+    },
+    {
+      "id": "one-charge-scalar-fields",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0,\"projected_spent\":null}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"counter\":\"calls\",\"n\":1,\"total\":1,\"spent\":1,\"remaining\":0,\"projected_spent\":null,\"reference_evidence\":null}",
+      "action": "proceed",
+      "expected": {
+        "pass_id": "example-2026-11",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mode": "charges",
+        "targets": [
+          {
+            "target": "192.0.2.10:5060/udp",
+            "name": "sip.example.net"
+          },
+          {
+            "target": "[2001:db8::1]:443/tcp",
+            "name": null
+          }
+        ],
+        "charges": [
+          {
+            "counter": "calls",
+            "n": 1
+          }
+        ],
+        "caller_ref": "unit-42",
+        "record_targets": true,
+        "file": "review.pass.toml"
+      }
+    },
+    {
+      "id": "one-charge-conflicting-scalar",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0,\"projected_spent\":null}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"counter\":\"calls\",\"n\":1,\"total\":1,\"spent\":1,\"remaining\":99,\"projected_spent\":null,\"reference_evidence\":null}",
+      "action": "stop",
+      "expected": {
+        "pass_id": "example-2026-11",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mode": "charges",
+        "targets": [
+          {
+            "target": "192.0.2.10:5060/udp",
+            "name": "sip.example.net"
+          },
+          {
+            "target": "[2001:db8::1]:443/tcp",
+            "name": null
+          }
+        ],
+        "charges": [
+          {
+            "counter": "calls",
+            "n": 1
+          }
+        ],
+        "caller_ref": "unit-42",
+        "record_targets": true,
+        "file": "review.pass.toml"
+      }
+    },
+    {
+      "id": "targetless-warning",
+      "exit": 0,
+      "stdout": "{\"command\":\"spend\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[\"no destination was checked: this spend has no --to target, and the pass does not set require_target_v1. Supply --to for each debit. The owner can add require_target_v1 = true to the pass to refuse debits without a target\"],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[],\"target\":null,\"name\":null,\"label\":null,\"charges\":[{\"counter\":\"calls\",\"n\":1,\"total\":1,\"spent\":1,\"remaining\":0,\"projected_spent\":null}],\"receipt\":null,\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\",\"counter\":\"calls\",\"n\":1,\"total\":1,\"spent\":1,\"remaining\":0,\"projected_spent\":null,\"reference_evidence\":null}",
+      "action": "proceed",
+      "expected": {
+        "pass_id": "example-2026-11",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mode": "scalar",
+        "targets": [],
+        "charges": [
+          {
+            "counter": "calls",
+            "n": 1
+          }
+        ],
+        "caller_ref": null,
+        "record_targets": false,
+        "file": "review.pass.toml"
+      },
+      "warnings": [
+        "no destination was checked: this spend has no --to target, and the pass does not set require_target_v1. Supply --to for each debit. The owner can add require_target_v1 = true to the pass to refuse debits without a target"
+      ]
     }
   ]
 }

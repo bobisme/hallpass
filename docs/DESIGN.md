@@ -146,6 +146,22 @@ reuses `permits_named` unchanged, so the two can never disagree. `spend`
 without a target stays, for callers that count something with no single
 destination; it can only be stricter to give one.
 
+A spend without a target that is allowed, or a preview that would allow
+it, has a warning that no destination was checked and that the owner can
+add `require_target_v1 = true`. Without the warning, a forgotten `--to`,
+or a wrapper that drops it, records a debit that nobody checked against
+scope, and nothing says so. A pass with the term refuses such a debit, so
+the warning follows from the decision and needs no second reading of the
+pass. The term stays opt-in. `init` writes it as a commented line, because
+an approval term is the owner's to write, and the template must not add a
+term the owner did not approve.
+
+The spend reply is a view of the decision, not of the ledger line. Every
+reply has the same keys, with null where a key does not apply, so a caller
+decodes one shape whatever the flags. The ledger line keeps its compact
+encoding, which omits absent values, because the chain hashes its exact
+bytes and existing ledgers must still verify.
+
 By default the ledger omits targets. Callers can opt into a debit receipt
 with checked targets and labels using `--record-target`. The command line reports a line it cannot read as a JSON error
 object when `--format json` is on it, because a caller that reads JSON and

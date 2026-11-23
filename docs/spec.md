@@ -201,7 +201,9 @@ trailing dot); the pass must spell them that way, a query need not.
 
 With a target, one spend answers "may I send this much to this destination
 now, and count it". On a pass with `require_target_v1 = true`, every debit
-must supply at least one target. The request name follows the destination rules.
+must supply at least one target. Without that term, an allowed or previewed
+debit with no target has a warning that no destination was checked. The
+request name follows the destination rules.
 
 1. Request checks, before any file is touched: `n` from 1 to 10^12, note one
    line of at most 500 characters with no control character (newline, tab,
@@ -379,7 +381,8 @@ and `file`. Help and version requests return their own command name and
 a damaged, lost or changed record is an error there as everywhere.
 
 Warnings (no witness yet, a ledger extended past its witness or moved, a
-witness that could not be checked) go to standard error as
+witness that could not be checked, a debit that checked no destination) go
+to standard error as
 `hallpass: warning: ...` in text output, and into `warnings` in JSON.
 
 `ledger` is read-only. It takes the same shared lock as `status`, verifies
@@ -420,12 +423,28 @@ be empty. Commands that report a pass path use `file`.
   `refusal` (`{code, message}` or null).
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
   (normalized), `name` (normalized, or null), `label` (or null), `refusal` (or null), `window`.
-- **spend**: `digest`, `pass_id`, `now`, `test_clock`, `counter`, `n`,
-  `total` (null for an unknown counter), `spent` (after the spend if
-  recorded, else current), `remaining` (or null), `seq` (the new entry's
-  sequence number, or null), `note`, `target` and `name` (normalized, null
-  without `--to` or `--name`), `label` (the permitting destination when
-  recorded with `--to`, else null), `refusal` (or null).
+- **spend**: every reply (`allowed`, `would-allow` or `refused`) has the
+  same keys, whatever the flags. `file`, `digest`, `pass_id`, `now`,
+  `test_clock`, `charges` (list of `{counter, n, total, spent, remaining,
+  projected_spent}` in request order, one entry for a positional COUNTER;
+  `total` and `remaining` null for an unknown counter, `spent` after the
+  spend if recorded, else current, `projected_spent` the projected total
+  of a positive `--dry-run`, else null), `counter`, `n`, `total`, `spent`,
+  `remaining` and `projected_spent` (the same values as the only charge
+  when the unit charges one counter, all null when it charges several),
+  `seq` (the new entry's sequence number, or null), `note`, `targets` (list
+  of `{target, name, label}` in request order), `refused_target`
+  (one-based, or null), `target` and `name` (of the first target,
+  normalized, null without `--to` or `--name`), `label` (the destination
+  that permits the first target when the spend is or would be allowed,
+  else null), `receipt`
+  (`{caller_ref, targets}` retained by a committed debit that asked for
+  one, else null; `caller_ref` is null without `--caller-ref`, `targets`
+  is empty without `--record-target`, and each entry is `{target, name,
+  label}` with `name` null for an unnamed endpoint), `refusal` (or null),
+  `reference_evidence` (for `duplicate-reference` and
+  `reference-inconclusive`, else null). The ledger line keeps its own,
+  shorter encoding.
 - **digest**: `digest`, `pass_id`.
 - **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
   pass now), `counter` (the `--counter` filter or null), `verified` (always

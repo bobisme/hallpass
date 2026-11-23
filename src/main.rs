@@ -1101,36 +1101,37 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
         (Some(r), _, _) => format!("REFUSED: {}.\n", safe(&r.message)),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
+    let reply = cli_debit::SpendReply {
+        result: if outcome.refusal.is_some() {
+            "refused"
+        } else if args.dry_run {
+            "would-allow"
+        } else {
+            "allowed"
+        },
+        file,
+        digest: outcome.digest,
+        pass_id: &outcome.pass_id,
+        now: outcome.now,
+        test_clock: clock.test,
+        charges: vec![cli_debit::ChargeReply::scalar(&outcome, args.dry_run)],
+        seq: outcome.seq,
+        note: args.note,
+        targets: &targets,
+        labels: &outcome.labels,
+        refused_target: outcome.refused_target,
+        receipt: None,
+        refusal: outcome.refusal.as_ref(),
+        reference_evidence: None,
+        warnings: &outcome.warnings,
+    };
     Output {
         code: if outcome.refusal.is_some() {
             REFUSED
         } else {
             OK
         },
-        json: json!({
-            "command": "spend",
-            "result": if outcome.refusal.is_some() { "refused" } else if args.dry_run {"would-allow"} else { "allowed" },
-            "file": file.display().to_string(),
-            "digest": outcome.digest.to_string(),
-            "pass_id": outcome.pass_id,
-            "now": stamp(outcome.now),
-            "test_clock": clock.test,
-            "projected_spent": if args.dry_run && outcome.refusal.is_none(){ Some(outcome.spent+outcome.amount) }else{None},
-            "refused_target":outcome.refused_target,
-            "targets":targets_json(&targets,&outcome.labels),
-            "counter": outcome.counter,
-            "n": outcome.amount,
-            "total": outcome.total,
-            "spent": outcome.spent,
-            "remaining": remaining,
-            "seq": outcome.seq,
-            "note": args.note,
-            "target": target.map(|t| t.to_string()),
-            "name": name.map(hallpass::HostName::as_str),
-            "label": outcome.label,
-            "refusal": outcome.refusal.as_ref().map(refusal_json),
-            "warnings": outcome.warnings,
-        }),
+        json: reply.json(),
         text,
     }
 }
@@ -1185,39 +1186,25 @@ fn debit_spend(
     if let Some(receipt) = &outcome.receipt {
         let _ = writeln!(text, "  receipt {}", debit_receipt_text(receipt));
     }
-    let mut json = json!({
-        "command": "spend",
-        "result": result,
-        "file": file.display().to_string(),
-        "digest": outcome.digest.to_string(),
-        "pass_id": outcome.pass_id,
-        "now": stamp(outcome.now),
-        "test_clock": clock.test,
-        "charges": outcome.charges,
-        "seq": outcome.seq,
-        "note": args.note,
-        "targets": targets_json(targets, &outcome.labels),
-        "refused_target": outcome.refused_target,
-        "target": request.policy.target.map(|t| t.to_string()),
-        "name": request.policy.name.map(hallpass::HostName::as_str),
-        "label": outcome.labels.first(),
-        "receipt": outcome.receipt,
-        "refusal": outcome.refusal.as_ref().map(refusal_json),
-        "warnings": outcome.warnings,
-    });
-    if let Some(evidence) = &outcome.reference_evidence {
-        json["reference_evidence"] = json!(evidence);
+    let json = cli_debit::SpendReply {
+        result,
+        file,
+        digest: outcome.digest,
+        pass_id: &outcome.pass_id,
+        now: outcome.now,
+        test_clock: clock.test,
+        charges: outcome.charges.iter().map(Into::into).collect(),
+        seq: outcome.seq,
+        note: args.note,
+        targets,
+        labels: &outcome.labels,
+        refused_target: outcome.refused_target,
+        receipt: outcome.receipt.as_ref(),
+        refusal: outcome.refusal.as_ref(),
+        reference_evidence: outcome.reference_evidence.as_ref(),
+        warnings: &outcome.warnings,
     }
-    if args.unit.counter.is_some()
-        && let Some(charge) = outcome.charges.first()
-    {
-        json["counter"] = json!(charge.counter);
-        json["n"] = json!(charge.amount);
-        json["total"] = json!(charge.total);
-        json["spent"] = json!(charge.spent);
-        json["remaining"] = json!(charge.remaining);
-        json["projected_spent"] = json!(charge.projected_spent);
-    }
+    .json();
     Output { code, json, text }
 }
 

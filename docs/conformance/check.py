@@ -25,10 +25,12 @@ def _matches_request(reply, expected):
     charges = expected.get("charges")
     if mode not in ("scalar", "charges") or not isinstance(charges, list) or not charges:
         return False
-    if mode == "scalar":
+    # The scalar fields repeat the only charge of a one-counter unit. They are
+    # null when the unit charges several counters, and older replies omit them.
+    if mode == "scalar" or (len(charges) == 1 and reply.get("counter") is not None):
         if len(charges) != 1 or not _charge_matches(reply, charges[0]) or not _balances_match(reply):
             return False
-    elif any(key in reply for key in ("counter", "n", "spent", "total", "remaining")):
+    elif any(reply.get(key) is not None for key in ("counter", "n", "spent", "total", "remaining")):
         return False
 
     targets = expected.get("targets")
@@ -79,7 +81,7 @@ def _matches_request(reply, expected):
             return False
         if any(row.get("projected_spent") is not None for row in actual):
             return False
-        if mode == "scalar":
+        if reply.get("counter") is not None:
             for key in ("total", "spent", "remaining"):
                 if type(reply.get(key)) is not int or type(actual[0].get(key)) is not int or reply[key] != actual[0][key]:
                     return False

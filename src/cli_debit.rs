@@ -1,16 +1,168 @@
-//! Shared spend unit syntax and rendering for the read-only capacity query.
+//! Shared spend unit syntax, the spend reply and rendering for the
+//! read-only capacity query.
 
-use std::{fmt::Write as _, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
 use clap::Args;
 use hallpass::{
-    Charge, Digest, Error, NamedTarget, SpendRequest, StateDir, capacity, stamp, time::Duration,
+    Charge, ChargeOutcome, DebitReceipt, Digest, Error, HostName, NamedTarget, ReferenceEvidence,
+    Refusal, SpendOutcome, SpendRequest, StateDir, capacity, stamp,
+    time::{Duration, OffsetDateTime},
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::{
     Clock, OK, Output, REFUSED, error_output, parse_targets, refusal_json, safe, targets_json,
 };
+
+/// The warning on an allowed or previewed debit that checked no destination.
+/// A pass with `require_target_v1 = true` refuses such a debit, so a reply
+/// with this warning always comes from a pass without that term.
+pub const NO_TARGET_CHECKED: &str = "no destination was checked: this spend has no --to target, and the pass does not set require_target_v1. Supply --to for each debit. The owner can add require_target_v1 = true to the pass to refuse debits without a target";
+
+/// One charge of a spend reply. Every key is always present.
+#[derive(Serialize)]
+pub struct ChargeReply<'a> {
+    counter: &'a str,
+    n: u64,
+    total: Option<u64>,
+    spent: u64,
+    remaining: Option<u64>,
+    projected_spent: Option<u64>,
+}
+
+impl<'a> ChargeReply<'a> {
+    /// The single charge of a scalar spend. A positive preview projects the
+    /// balance after the charge.
+    pub fn scalar(outcome: &'a SpendOutcome, dry_run: bool) -> Self {
+        Self {
+            counter: &outcome.counter,
+            n: outcome.amount,
+            total: outcome.total,
+            spent: outcome.spent,
+            remaining: outcome.remaining(),
+            projected_spent: (dry_run && outcome.refusal.is_none())
+                .then(|| outcome.spent.checked_add(outcome.amount))
+                .flatten(),
+        }
+    }
+}
+
+impl<'a> From<&'a ChargeOutcome> for ChargeReply<'a> {
+    fn from(charge: &'a ChargeOutcome) -> Self {
+        Self {
+            counter: &charge.counter,
+            n: charge.amount,
+            total: charge.total,
+            spent: charge.spent,
+            remaining: charge.remaining,
+            projected_spent: charge.projected_spent,
+        }
+    }
+}
+
+/// A retained receipt in a spend reply. The ledger line omits an absent
+/// reference, an empty target list and an absent name; this view keeps
+/// every key, so the reply shape does not depend on the flags. It is
+/// never written to the ledger.
+#[derive(Serialize)]
+struct ReceiptReply<'a> {
+    caller_ref: Option<&'a str>,
+    targets: Vec<RecordedTargetReply<'a>>,
+}
+
+#[derive(Serialize)]
+struct RecordedTargetReply<'a> {
+    target: &'a str,
+    name: Option<&'a str>,
+    label: &'a str,
+}
+
+impl<'a> From<&'a DebitReceipt> for ReceiptReply<'a> {
+    fn from(receipt: &'a DebitReceipt) -> Self {
+        Self {
+            caller_ref: receipt.caller_ref.as_deref(),
+            targets: receipt
+                .targets
+                .iter()
+                .map(|t| RecordedTargetReply {
+                    target: &t.target,
+                    name: t.name.as_deref(),
+                    label: &t.label,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The decision behind one spend reply: allowed, refused or previewed,
+/// scalar or charged.
+pub struct SpendReply<'a> {
+    pub result: &'static str,
+    pub file: &'a Path,
+    pub digest: Digest,
+    pub pass_id: &'a str,
+    pub now: OffsetDateTime,
+    pub test_clock: bool,
+    pub charges: Vec<ChargeReply<'a>>,
+    pub seq: Option<u64>,
+    pub note: Option<&'a str>,
+    pub targets: &'a [NamedTarget],
+    pub labels: &'a [String],
+    pub refused_target: Option<usize>,
+    pub receipt: Option<&'a DebitReceipt>,
+    pub refusal: Option<&'a Refusal>,
+    pub reference_evidence: Option<&'a ReferenceEvidence>,
+    pub warnings: &'a [String],
+}
+
+impl SpendReply<'_> {
+    /// The JSON reply. Every spend reply has the same keys. The scalar
+    /// fields repeat the only charge of a one-counter unit and are null
+    /// when the unit charges several counters.
+    pub fn json(&self) -> Value {
+        let only = match self.charges.as_slice() {
+            [charge] => Some(charge),
+            _ => None,
+        };
+        let first = self.targets.first();
+        let mut warnings = self.warnings.to_vec();
+        if self.refusal.is_none() && self.targets.is_empty() {
+            warnings.push(NO_TARGET_CHECKED.to_owned());
+        }
+        json!({
+            "command": "spend",
+            "result": self.result,
+            "file": self.file.display().to_string(),
+            "digest": self.digest.to_string(),
+            "pass_id": self.pass_id,
+            "now": stamp(self.now),
+            "test_clock": self.test_clock,
+            "charges": self.charges,
+            "counter": only.map(|c| c.counter),
+            "n": only.map(|c| c.n),
+            "total": only.and_then(|c| c.total),
+            "spent": only.map(|c| c.spent),
+            "remaining": only.and_then(|c| c.remaining),
+            "projected_spent": only.and_then(|c| c.projected_spent),
+            "seq": self.seq,
+            "note": self.note,
+            "targets": targets_json(self.targets, self.labels),
+            "refused_target": self.refused_target,
+            "target": first.map(|t| t.target.to_string()),
+            "name": first.and_then(|t| t.name.as_ref()).map(HostName::as_str),
+            "label": self.labels.first(),
+            "receipt": self.receipt.map(ReceiptReply::from),
+            "refusal": self.refusal.map(refusal_json),
+            "reference_evidence": self.reference_evidence,
+            "warnings": warnings,
+        })
+    }
+}
 
 #[derive(Args)]
 pub struct DebitUnit {

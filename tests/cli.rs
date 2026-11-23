@@ -547,9 +547,14 @@ fn spend_until_ceiling_reached() {
     );
     assert_eq!(out["seq"], 1);
     assert_eq!(
-        out["warnings"],
-        serde_json::json!([]),
-        "a first spend has nothing to warn about"
+        out["warnings"].as_array().map(Vec::len),
+        Some(1),
+        "a first spend warns only that it checked no destination: {out}"
+    );
+    assert!(
+        out["warnings"][0]
+            .as_str()
+            .is_some_and(|w| w.starts_with("no destination was checked"))
     );
     assert_eq!(spend(&file, "calls", NOW).0, 0);
     assert_eq!(spend(&file, "calls", NOW).0, 0);
@@ -1247,7 +1252,9 @@ fn a_pass_moved_without_its_ledger_is_refused_and_with_it_accepted() {
     let warning = out["warnings"][0].as_str().expect("warning");
     assert!(warning.contains("moved or copied"), "{warning}");
     let (_, out) = spend(&moved, "calls", NOW);
-    assert_eq!(out["warnings"].as_array().map(Vec::len), Some(0));
+    // Only the warning about the missing --to remains.
+    assert_eq!(out["warnings"].as_array().map(Vec::len), Some(1));
+    assert!(!out["warnings"].to_string().contains("moved or copied"));
 }
 
 #[test]
