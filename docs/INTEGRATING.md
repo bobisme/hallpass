@@ -229,8 +229,14 @@ a second at 42,000 lines.
   `reference-inconclusive` until `hallpass adopt` records the ledger as it
   stands (only when it is the complete history).
 - **Keep the ledger beside the pass.** `PASS.ledger` is the count. Do not
-  copy the pass elsewhere to "start fresh": the witness refuses that
-  (`ledger-missing`), and `hallpass adopt` is the recorded way out.
+  copy the pass elsewhere to "start fresh". While the original ledger is
+  intact, the copy is refused as `ledger-elsewhere`, and `adopt` refuses it
+  too. Apply an amended approval by replacing the content of the existing
+  pass file, not by saving a second file with the same id. Only a ledger
+  that is really lost (`ledger-missing`) is recovered with `hallpass
+  adopt`. Read `warnings` from `adopt --preview` before you adopt: an
+  adoption that carries totals makes every later `--require-new-ref` spend
+  on that ledger `reference-inconclusive`.
 - **`permits`, `status` and `ledger` are read-only and more forgiving than
   `spend`**: when the witness cannot be checked they still answer, with a
   warning and `"witness": "not-checked"`. Only a `spend` is the permission

@@ -196,8 +196,9 @@ request name follows the destination rules.
    needed (0700), check that it is a private directory and writable, and
    take an exclusive lock on `<pass id>.lock` in it. Read the witness.
 3. If the ledger does not exist: when the witness records any line,
-   `ledger-missing` (nothing is created); otherwise create the ledger with
-   its header.
+   `ledger-missing`, or `ledger-elsewhere` when the ledger is intact where
+   the witness last saw it (nothing is created); otherwise create the
+   ledger with its header.
 4. Open the ledger (not a link, mode exactly private: no group or other
    bits) and take an exclusive lock.
 5. Under both locks: load and validate the pass again from disk (its id
@@ -348,6 +349,7 @@ reads the ledger (`status`, `permits`, `spend`, `ledger`, `adopt`) compares:
 |---|---|---|
 | missing | none, or no lines recorded | nothing spent (`fresh`) |
 | missing | records lines | **error `ledger-missing`**, naming the witnessed totals, where the ledger was last seen and when, and what to do |
+| missing | records lines, and the ledger where the witness last saw it is another file that is intact | **error `ledger-elsewhere`**, naming that ledger and the pass file beside it, and how to apply a revision |
 | present | none | accepted with a warning (`missing`); `spend` records a witness |
 | present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
 | present | the witnessed line is there, and `k` lines follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added lines; they count |
@@ -367,7 +369,24 @@ The path in the witness is informational: identity is the hash chain. A
 pass moved with its ledger is accepted with a warning and the witness
 follows it; the copy left behind is then `ledger-changed` (only one copy
 can be spent from). A second pass file that reuses an id and has no ledger
-is `ledger-missing`, not a fresh count.
+is never a fresh count.
+
+When the ledger beside the pass is missing and the witness last saw it at
+another path, hallpass opens the file there under the rules for any ledger
+(not a link, a regular file, private), verifies its whole chain, and checks
+that it belongs to the pass id and ends with exactly the line the witness
+recorded (same sequence number and hash). If all of that holds, the ledger
+is not lost, and the error is `ledger-elsewhere`. This is the usual case of
+an amended approval saved as a second file with the same id, or of a pass
+moved without its ledger. The message names the intact ledger and the pass
+file beside it, if there is one. To apply a revision, replace the content
+of that pass file with the new one and spend from it; the count carries on.
+If the old file is being retired, or there is none, move the ledger beside
+the new file instead. Do not adopt: adoption would start a second ledger
+for the id. If the file cannot be opened, does not verify, belongs to
+another id, or does not end with the witnessed line (also when it has grown
+past it), the error is `ledger-missing`, as for a lost ledger. Either way
+nothing is counted from that file or created.
 
 ### `adopt(pass, reason, now)`
 
@@ -392,7 +411,18 @@ new last line. The reason follows the note rules and is required. With
 nothing to adopt (the ledger matches its witness, or there is neither a
 ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
-the loss. The window is not checked: an adoption permits nothing.
+the loss. A missing ledger that is intact where the witness last saw it
+is not adopted either: `adopt` and `adopt --preview` both fail with
+`ledger-elsewhere` and record nothing, because the adoption would fork the
+history. There is no flag to force it. If that ledger really is to be
+abandoned, move it away from the path the witness names; the case is then
+`ledger-missing`. The window is not checked: an adoption permits nothing.
+
+When the adoption would carry an amount or record a previous witness of
+at least one line, `adopt --preview` warns in `warnings` that every later
+guarded spend (`--require-new-ref`) on this ledger is refused as
+`reference-inconclusive`. `adopt` repeats the warning when it records the
+adoption.
 
 `adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
 case, present totals, carry and projected totals, prior witness and a versioned
@@ -421,6 +451,9 @@ publication time.
   A new id also has its own witness.
 - The digest changes with any byte; a caller that passed `--digest` gets
   `pass-changed`.
+- Edit the pass file in place. A revision saved as a second file with the
+  same id has no ledger beside it, and is refused as `ledger-elsewhere`
+  while the first file's ledger is intact (see "The witness").
 
 ### Fail-closed cases
 
@@ -438,6 +471,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
+| the ledger is missing, but the ledger the witness last saw at another path is intact (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
 | the spend exhausted its optional writer lock wait budget before appending | `lock-timeout` |
@@ -686,7 +720,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `rehearse` | `simulated`: every step fits | `simulation-refused`: a step is refused | invalid scenario or pass, accounting error |
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
-| `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, missing reason, stale token, unusable state directory |
+| `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, the ledger is intact elsewhere, missing reason, stale token, unusable state directory |
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
 | `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
@@ -931,7 +965,7 @@ Crate `hallpass` (re-exports `time`):
 | `ledger_path(path)` | `<pass>.ledger` |
 | `write_template(path)`, `TEMPLATE` | `init` |
 | `parse_address`, `parse_network`, `embedded_ipv4`, `ipv6_transition` (`Ipv6Transition`), `Target` (`FromStr`), `Network` (with `is_network_or_broadcast(ip)`), `Protocol`, `PortSet` | strict parsing |
-| `Digest` (`Display`/`FromStr` as `sha256:<hex>`), `Refusal`, `RefusalCode`, `WindowState`, `Problem`, `Error` (with `code()`; `LedgerMissing` boxes a `MissingLedger`) | value types |
+| `Digest` (`Display`/`FromStr` as `sha256:<hex>`), `Refusal`, `RefusalCode`, `WindowState`, `Problem`, `Error` (with `code()`; `LedgerMissing` boxes a `MissingLedger`, `LedgerElsewhere` an `ElsewhereLedger`) | value types |
 | `stamp`, `span` | time formatting used in messages |
 | constants: `FORMAT_VERSION`, `IPV4_CAP`, `IPV6_CAP`, `IPV4_FLOOR`, `IPV6_FLOOR`, `MAX_CEILING`, `MAX_COUNTERS`, `MAX_DESTINATIONS`, `MAX_NOTE`, `MAX_PASS_BYTES` | documented limits |
 

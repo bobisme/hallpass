@@ -75,5 +75,5 @@ fn practice_runs_are_isolated_and_restart_keeps_budget() {
         .expect("binary");
     assert_eq!(output.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(json["error"]["code"], "ledger-missing");
+    assert_eq!(json["error"]["code"], "ledger-elsewhere");
 }

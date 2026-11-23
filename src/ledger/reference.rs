@@ -42,7 +42,16 @@ pub(super) struct ReferenceMatches<'a> {
 /// witnessed lines may be gone even when nothing is carried. A carried
 /// amount always stands for lines this ledger does not hold.
 fn may_have_lost_references(adoption: &Adoption) -> bool {
-    !adoption.carried.is_empty() || adoption.previous.as_ref().is_some_and(|w| w.seq > 0)
+    may_lose_references(&adoption.carried, adoption.previous.as_ref())
+}
+
+/// [`may_have_lost_references`] for an adoption not yet recorded, from what
+/// it would carry and the witness it would record as previous.
+pub(super) fn may_lose_references(
+    carried: &std::collections::BTreeMap<String, u64>,
+    previous: Option<&crate::Witnessed>,
+) -> bool {
+    !carried.is_empty() || previous.is_some_and(|w| w.seq > 0)
 }
 
 impl<'a> ReferenceMatches<'a> {

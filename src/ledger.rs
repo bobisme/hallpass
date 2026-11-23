@@ -29,7 +29,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::address::Target;
 use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
-use crate::error::{Error, MissingLedger};
+use crate::error::{ElsewhereLedger, Error, MissingLedger};
 use crate::files::{Digest, LoadedPass, WriterWait, load, open_no_follow};
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
@@ -920,16 +920,7 @@ fn compare(
     match (parsed, witness) {
         (None, None) => Ok((WitnessStatus::Fresh, None)),
         (None, Some(w)) if w.seq == 0 => Ok((WitnessStatus::Fresh, None)),
-        (None, Some(w)) => Err(Error::LedgerMissing(Box::new(MissingLedger {
-            path: ledger.to_path_buf(),
-            pass: pass_path.to_path_buf(),
-            pass_id: pass_id.to_owned(),
-            witness: witness_file,
-            seq: w.seq,
-            last_seen: w.ledger.clone(),
-            totals: w.totals.clone(),
-            updated: w.updated.clone(),
-        }))),
+        (None, Some(w)) => Err(missing_ledger(pass_path, ledger, w, witness_file, pass_id)),
         (Some(_), None) => Ok((WitnessStatus::Missing, None)),
         (Some(p), Some(w)) => {
             let here = ledger_identity(ledger);
@@ -976,6 +967,65 @@ fn compare(
             })
         }
     }
+}
+
+/// The error for a pass with no ledger beside it whose witness recorded
+/// lines: [`Error::LedgerElsewhere`] when the ledger is intact where the
+/// witness last saw it, else [`Error::LedgerMissing`].
+fn missing_ledger(
+    pass_path: &Path,
+    ledger: &Path,
+    w: &Witnessed,
+    witness_file: PathBuf,
+    pass_id: &str,
+) -> Error {
+    if let Some(live) = intact_elsewhere(ledger, w, pass_id) {
+        let live_pass = live
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".ledger"))
+            .filter(|name| !name.is_empty())
+            .map(|name| live.with_file_name(name))
+            .filter(|pass| fs::symlink_metadata(pass).is_ok_and(|m| m.file_type().is_file()));
+        return Error::LedgerElsewhere(Box::new(ElsewhereLedger {
+            path: ledger.to_path_buf(),
+            pass: pass_path.to_path_buf(),
+            pass_id: pass_id.to_owned(),
+            witness: witness_file,
+            seq: w.seq,
+            live,
+            live_pass,
+            totals: w.totals.clone(),
+            updated: w.updated.clone(),
+        }));
+    }
+    Error::LedgerMissing(Box::new(MissingLedger {
+        path: ledger.to_path_buf(),
+        pass: pass_path.to_path_buf(),
+        pass_id: pass_id.to_owned(),
+        witness: witness_file,
+        seq: w.seq,
+        last_seen: w.ledger.clone(),
+        totals: w.totals.clone(),
+        updated: w.updated.clone(),
+    }))
+}
+
+/// The ledger of `pass_id` where the witness last saw it, when that is not
+/// `ledger` and it is intact: it opens under the rules for any ledger (not a
+/// link, a regular file, private), its whole chain verifies, it belongs to
+/// `pass_id`, and its last line is exactly the one the witness recorded.
+/// Anything else, including a ledger that has grown past the witness, is
+/// `None`: the ledger is then reported missing, as before.
+fn intact_elsewhere(ledger: &Path, w: &Witnessed, pass_id: &str) -> Option<PathBuf> {
+    let seen = Path::new(&w.ledger);
+    if !seen.is_absolute() || w.ledger == ledger_identity(ledger) {
+        return None;
+    }
+    let parsed = inspect_candidate(seen, Some(w.seq))
+        .and_then(|p| p.for_pass(seen, pass_id))
+        .ok()?;
+    (parsed.seq == w.seq && parsed.prefix == Some((w.seq, w.tail))).then(|| seen.to_path_buf())
 }
 
 /// Warnings for a comparison that did not fail. `writing` is true when the
@@ -1529,8 +1579,11 @@ fn lock_for_writing_notifying(
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
     if let Some(expected) = guard {
-        let current = preview_adopt(pass_path, state)
-            .map_err(|_| Error::Usage("stale adoption preview; nothing was recorded".into()))?;
+        let current = preview_adopt(pass_path, state).map_err(|e| match e {
+            // The preview's own refusal, so that both say the same.
+            Error::LedgerElsewhere(_) => e,
+            _ => Error::Usage("stale adoption preview; nothing was recorded".into()),
+        })?;
         if current.token != expected {
             return Err(Error::Usage(
                 "stale adoption preview; nothing was recorded".into(),
@@ -1547,6 +1600,14 @@ fn lock_for_writing_notifying(
                     "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
                 ));
             };
+            // A ledger intact where the witness last saw it is not lost:
+            // adopting would start a second history for this id.
+            let witness_file = state.witness_path(&id).unwrap_or_default();
+            if let refused @ Error::LedgerElsewhere(_) =
+                missing_ledger(pass_path, &path, known, witness_file, &id)
+            {
+                return Err(refused);
+            }
             check_projected_witness_size(state, &id, &path, 1, &known.totals)?;
         } else {
             compare(pass_path, &path, None, witness.as_ref(), state, &id)?;
@@ -2055,6 +2116,29 @@ pub struct AdoptPreview {
     pub previous: Option<Witnessed>,
     /// Opaque versioned reviewed-state token.
     pub token: String,
+}
+
+impl AdoptPreview {
+    /// Whether this adoption would accept a ledger that may lack lines, and
+    /// so caller references, that hallpass had recorded. After it, every
+    /// guarded spend (`--require-new-ref`) on this ledger is refused as
+    /// `reference-inconclusive`, as for [`Adoption::makes_references_inconclusive`].
+    #[must_use]
+    pub fn makes_references_inconclusive(&self) -> bool {
+        reference::may_lose_references(&self.carried, self.previous.as_ref())
+    }
+}
+
+impl Adoption {
+    /// Whether this adoption accepted a ledger that may lack lines, and so
+    /// caller references, that hallpass had recorded: it carried an amount,
+    /// or recorded a previous witness of at least one line. From it on,
+    /// every guarded spend (`--require-new-ref`) on this ledger is refused
+    /// as `reference-inconclusive`.
+    #[must_use]
+    pub fn makes_references_inconclusive(&self) -> bool {
+        reference::may_lose_references(&self.carried, self.previous.as_ref())
+    }
 }
 
 fn carry(present: &BTreeMap<String, u64>, witness: Option<&Witnessed>) -> BTreeMap<String, u64> {
@@ -3511,9 +3595,9 @@ mod tests {
         let other = other_dir.join("test.pass.toml");
         fs::copy(&path, &other).expect("copy");
         // A second pass with the same id and no ledger: refused, naming
-        // where the ledger of that id was last seen.
+        // where the intact ledger of that id is.
         match spend_in(&other, &request("calls", 1), NOW, &state) {
-            Err(e @ Error::LedgerMissing(_)) => {
+            Err(e @ Error::LedgerElsewhere(_)) => {
                 assert!(
                     e.to_string()
                         .contains(&ledger_identity(&ledger_path(&path)))

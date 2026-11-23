@@ -112,6 +112,12 @@ pub enum Error {
     /// The ledger is gone, but the witness says spends were recorded.
     #[error("{0}")]
     LedgerMissing(Box<MissingLedger>),
+    /// The pass has no ledger beside it, but the ledger of its pass id is
+    /// intact where the witness last saw it: a second pass file with the
+    /// same id, or a pass moved without its ledger. Adopting would fork the
+    /// history, so nothing is adopted.
+    #[error("{0}")]
+    LedgerElsewhere(Box<ElsewhereLedger>),
     /// The ledger does not contain the line the witness recorded.
     #[error(
         "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {} --reason \"...\"`, which records the adoption in the ledger and never lowers a count below what the witness recorded.",
@@ -196,6 +202,11 @@ impl Error {
                     &text[..from]
                 )
             }
+            Self::LedgerElsewhere(e) => format!(
+                "{}. This command only reads and changed nothing; run `hallpass status` on the pass to see how to recover. If {} is a different approval that reused the id, give it its own id",
+                e.situation(),
+                e.pass.display()
+            ),
             Self::LedgerChanged { .. } => {
                 let from = text
                     .find("; if this ledger is the one to keep")
@@ -229,6 +240,7 @@ impl Error {
             Self::LedgerCorrupt { .. } => "ledger-corrupt",
             Self::LedgerForeign { .. } => "ledger-foreign",
             Self::LedgerMissing(_) => "ledger-missing",
+            Self::LedgerElsewhere(_) => "ledger-elsewhere",
             Self::LedgerChanged { .. } => "ledger-changed",
             Self::WitnessUnavailable { .. } => "witness-unavailable",
             Self::WitnessNotUpdated { .. } => "witness-not-updated",
@@ -289,6 +301,91 @@ impl std::fmt::Display for MissingLedger {
             self.last_seen,
             self.updated,
             self.pass.display()
+        )
+    }
+}
+
+/// The details of [`Error::LedgerElsewhere`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ElsewhereLedger {
+    /// The ledger file that would be beside this pass, and is not.
+    pub path: PathBuf,
+    /// The pass file.
+    pub pass: PathBuf,
+    /// The pass id.
+    pub pass_id: String,
+    /// The witness file.
+    pub witness: PathBuf,
+    /// The last sequence number the witness recorded, and the intact
+    /// ledger's last sequence number.
+    pub seq: u64,
+    /// The intact ledger, where the witness last saw it.
+    pub live: PathBuf,
+    /// The pass file beside the intact ledger, when there is one.
+    pub live_pass: Option<PathBuf>,
+    /// The totals the witness recorded.
+    pub totals: std::collections::BTreeMap<String, u64>,
+    /// When the witness was written.
+    pub updated: String,
+}
+
+impl ElsewhereLedger {
+    /// What was found, without advice.
+    #[must_use]
+    pub fn situation(&self) -> String {
+        let beside = self.live_pass.as_ref().map_or_else(
+            || {
+                format!(
+                    "No pass file is beside it, so {} may be that pass, moved without its ledger",
+                    self.pass.display()
+                )
+            },
+            |live_pass| {
+                format!(
+                    "The pass file beside it is {}, so {} is a second pass file with the same id",
+                    live_pass.display(),
+                    self.pass.display()
+                )
+            },
+        );
+        format!(
+            "the ledger {} for pass `{}` does not exist, but the ledger of this pass id is intact at {}, where the witness {} last saw it: it verifies and ends with the line hallpass recorded on {} ({} ledger line(s), spent: {}). {beside}",
+            self.path.display(),
+            self.pass_id,
+            self.live.display(),
+            self.witness.display(),
+            self.updated,
+            self.seq,
+            crate::witness::totals_text(&self.totals),
+        )
+    }
+}
+
+impl std::fmt::Display for ElsewhereLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let advice = self.live_pass.as_ref().map_or_else(
+            || {
+                format!(
+                    "Move {} to {} and the count carries on",
+                    self.live.display(),
+                    self.path.display()
+                )
+            },
+            |live_pass| {
+                format!(
+                    "If {pass} revises that approval, replace the content of {old} with the content of {pass} and spend from {old}: the count carries on. If {old} is being retired instead, move the ledger beside it to {path}",
+                    pass = self.pass.display(),
+                    old = live_pass.display(),
+                    path = self.path.display()
+                )
+            },
+        );
+        write!(
+            f,
+            "{}. hallpass will not count from zero. {advice}. Do not run `hallpass adopt` on {pass}: the ledger is not lost, and adopting would start a second ledger for this id, refuse the intact one as changed, and leave later guarded spends (--require-new-ref) unable to show that a reference is new. If {pass} is a different approval that reused the id, give it its own id",
+            self.situation(),
+            pass = self.pass.display(),
         )
     }
 }

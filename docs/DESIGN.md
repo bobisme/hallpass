@@ -253,9 +253,15 @@ witness catches them.
   witness follows it (warning). If the ledger was copied, the first copy
   spent from wins and the other becomes `ledger-changed`, so two copies can
   never both be spent from. Two pass files with the same id and separate
-  ledgers are noticed the same way, and a second pass reusing an id without
-  a ledger is `ledger-missing`; the message names where the other ledger
-  is and says to give one pass its own id.
+  ledgers are noticed the same way. A second pass reusing an id without a
+  ledger is `ledger-elsewhere` when the ledger where the witness last saw
+  it is intact (opened under the usual rules, fully verified, ending with
+  the witnessed line), else `ledger-missing`. The first is the common
+  case of an amended approval saved as a new file: the message names the
+  live ledger and its pass file, says to replace that file's content with
+  the revision, and `adopt` refuses, since adopting would fork the
+  history. A ledger that cannot be verified there falls back to
+  `ledger-missing`, so the path in the witness never decides a count.
 - **Order of writes**: ledger first (appended and synced), witness second
   (written aside, synced, renamed, directory synced). A crash between the
   two leaves the witness one line behind, which the rule above accepts: no

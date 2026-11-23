@@ -1243,9 +1243,14 @@ fn a_pass_moved_without_its_ledger_is_refused_and_with_it_accepted() {
     let moved = case.path("archive/p.toml");
     fs::rename(&file, &moved).expect("move pass");
     let (rc, out) = spend(&moved, "calls", NOW);
-    assert_eq!((rc, error_code(&out)), (1, Some("ledger-missing")), "{out}");
+    // The ledger is intact where the witness saw it, so it is not lost.
+    assert_eq!(
+        (rc, error_code(&out)),
+        (1, Some("ledger-elsewhere")),
+        "{out}"
+    );
     let message = out["error"]["message"].as_str().expect("m");
-    assert!(message.contains("last seen at"), "{message}");
+    assert!(message.contains("No pass file is beside it"), "{message}");
     assert!(message.contains("p.toml.ledger"), "{message}");
     fs::rename(
         case.path("p.toml.ledger"),

@@ -183,7 +183,7 @@ fn history_guide(name: &str) -> Guide {
                 "hallpass --format json adopt engagement.pass.toml --preview",
                 "hallpass --format json adopt engagement.pass.toml --reason 'restored from backup' --token \"$token\"",
             ],
-            "Use this for recovery. Inspect case, present, carry and totals in the preview. After reviewing them, supply its token and a reason to record the adoption. A stale token requires a new review. An appended adoption still counts after a witness update failure.",
+            "Use this for recovery. Inspect case, present, carry, totals and warnings in the preview: an adoption that carries totals leaves later --require-new-ref spends reference-inconclusive. After reviewing them, supply its token and a reason to record the adoption. A stale token requires a new review. An appended adoption still counts after a witness update failure. A ledger that is intact where the witness last saw it is not adopted (ledger-elsewhere): replace that pass file's content instead.",
         ),
         _ => unreachable!("missing help for {name}"),
     };

@@ -185,8 +185,10 @@ Subject: Re: Approval: web edge test
 Please finish by 12:00 UTC today, and keep the total to 60 bytes.
 ```
 
-Copy the change into the pass. Keep the ID and the reference, so the ledger
-and its totals carry on:
+Copy the change into the pass. Edit this file in place rather than save a
+second file with the same ID: that file would have no ledger beside it, and
+hallpass would refuse it as `ledger-elsewhere`. Keep the ID and the
+reference, so the ledger and its totals carry on:
 
 ```sh
 cat > engagement.pass.toml <<'PASS'

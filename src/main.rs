@@ -1739,10 +1739,21 @@ fn preview_adopt(file: &Path) -> Output {
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,")}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
+}
+
+/// The warning for an adoption after which guarded spends cannot show that
+/// a reference is new (see `reference-inconclusive`), or none.
+fn inconclusive_references(applies: bool, when: &str) -> Vec<String> {
+    applies
+        .then(|| format!(
+            "{when} guarded spends (--require-new-ref) on this ledger cannot show that a caller reference is new: the adopted ledger may lack lines hallpass had recorded, so they are refused as reference-inconclusive for the rest of this ledger. Check each reference against your run record"
+        ))
+        .into_iter()
+        .collect()
 }
 
 fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Output {
@@ -1785,6 +1796,7 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
             "carried": a.carried,
             "previous": a.previous.as_ref().map(witnessed_json),
             "totals": outcome.totals,
+            "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,"),
         }),
         text,
     }
