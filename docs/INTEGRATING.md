@@ -28,6 +28,16 @@ Match the file, pass ID, digest, ordered targets and names, ordered charges,
 and requested receipt data to the original invocation. The reference decoder
 below exercises this contract with a callback.
 
+To see the whole contract in one short file, read the [minimal
+caller](minimal-caller/minimal_caller.py). It asks `permits` first, runs one
+`spend --to ... --caller-ref ... --require-new-ref` before the work, checks
+the reply with `inspect_reply` and runs the work only on `proceed`. A refusal
+(exit 2), an unknown outcome and a possible debit (`reconcile`) each stop the
+work. It journals nothing and does not reconcile, and it pins the digest
+its own `permits` call saw, not one a reviewer approved. Use the [reference
+caller](reference-caller/README.md) for journalling, reconciling and a
+reviewed pin.
+
 `spend --to` decides the destination, the window, revocation and the
 ceiling together, under one lock, against one reading of the pass file. If
 any of them refuses, nothing is recorded. When `check` or `status` returns
@@ -339,7 +349,8 @@ unit and shows its warning.
 The reference runner also runs the [version 2 scalar fixtures](conformance/cases-v2.json).
 New integrations should use version 3 for complete request checking.
 
-For a complete caller that journals each unit, gates its callback with
+For the shortest caller that applies this check, see the [minimal
+caller](minimal-caller/minimal_caller.py). For a complete caller that journals each unit, gates its callback with
 `inspect_reply`, and reconciles interrupted units by reference without
 repeating them, see the [reference caller](reference-caller/README.md).
 Its `handoff` judges only the units in its own journal, because several

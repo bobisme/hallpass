@@ -1,5 +1,23 @@
 # A first shift, from written approval to handoff
 
+> **Build note.** This page, as written, needs a debug build (`cargo build`,
+> or a release build with `--features test-clock`). It pins the date with
+> `HALLPASS_UNSAFE_TEST_CLOCK` and passes `--rehearsal` to the reference
+> caller, and only those builds honour the clock. A default release binary
+> ignores the variable, prints "HALLPASS_UNSAFE_TEST_CLOCK is set but
+> ignored" and uses the real date. The window of 2026-11-20 is then over, so
+> the first preview is refused. To run it live with a release binary, make
+> these changes and nothing else:
+>
+> 1. Leave out the `export HALLPASS_UNSAFE_TEST_CLOCK=...` line.
+> 2. In both pass files (steps 2 and 5), set `valid_from` before now and
+>    `valid_until` after now. In the amended pass, keep `valid_until` earlier
+>    than in the first pass, as the page narrows it.
+> 3. Leave out `--rehearsal` from the three `caller.py run` commands.
+> 4. The digests change with the window. In the `retrieve` command, use the
+>    digest that `pin` printed for the first pass. The output blocks on this
+>    page then no longer match: they show the rehearsal dates and digests.
+
 This page takes one operator through one shift. It starts with the owner's
 email and ends with a handoff that the next operator can check. Each step
 uses the [reference caller](reference-caller/README.md) and the `hallpass`

@@ -5,3 +5,4 @@
 /.maw/
 /.manifold/
 /repo.git/
+__pycache__/
