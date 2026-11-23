@@ -145,23 +145,35 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
     let (code, message) = error(&out);
     assert_eq!((rc, code), (1, "ledger-elsewhere"), "{out}");
     for part in [
-        "the ledger q.toml.ledger for pass `acme-2026-11` does not exist",
-        &format!("intact at {}", live.display()),
+        "the ledger for pass `acme-2026-11` is not beside this pass file, but an intact one exists elsewhere",
+        "This pass file: q.toml.",
+        "Expected ledger: q.toml.ledger (does not exist)",
+        &format!("Live ledger: {}", live.display()),
         "(3 ledger line(s), spent: calls 3)",
         &format!(
-            "The pass file beside it is {}, so q.toml is a second pass file with the same id",
+            "Pass file beside the live ledger: {}, so this pass file is a second pass file with the same id",
             case.path("p.toml").display()
         ),
-        &format!(
-            "replace the content of {} with the content of q.toml",
-            case.path("p.toml").display()
-        ),
-        "move the ledger beside it to q.toml.ledger",
-        "Do not run `hallpass adopt` on q.toml",
+        "replace the content of the live pass file with the content of this pass file",
+        "move the live ledger to the expected ledger path",
+        "Do not run `hallpass adopt` on this pass file",
         "give it its own id",
     ] {
         assert!(message.contains(part), "{part:?} not in {message}");
     }
+    // Short and plain: every path once, and well under the old 1,400 characters.
+    for path in [
+        live.display().to_string(),
+        "q.toml.ledger".to_owned(),
+        format!("{}, so", case.path("p.toml").display()),
+    ] {
+        assert_eq!(message.matches(&*path).count(), 1, "{message}");
+    }
+    assert!(
+        message.len() < 1100,
+        "{} characters: {message}",
+        message.len()
+    );
     assert!(!message.contains("if it is really lost"), "{message}");
     assert_eq!(out["error"]["recording"], Value::Null);
 
@@ -216,7 +228,7 @@ fn read_only_commands_name_the_live_ledger_without_advising_adopt() {
         let (rc, out) = case.json(args);
         let (code, message) = error(&out);
         assert_eq!((rc, code), (1, "ledger-elsewhere"), "{args:?}: {out}");
-        assert!(message.contains("intact at"), "{args:?}: {message}");
+        assert!(message.contains("Live ledger:"), "{args:?}: {message}");
         assert!(
             message.contains("This command only reads and changed nothing"),
             "{args:?}: {message}"
@@ -261,12 +273,17 @@ fn a_pass_moved_without_its_ledger_is_told_to_move_the_ledger() {
     let (rc, out) = case.spend("archive/p.toml");
     let (code, message) = error(&out);
     assert_eq!((rc, code), (1, "ledger-elsewhere"), "{out}");
-    assert!(message.contains("No pass file is beside it"), "{message}");
     assert!(
-        message.contains(&format!(
-            "Move {} to archive/p.toml.ledger",
-            case.path("p.toml.ledger").display()
-        )),
+        message.contains("No pass file is beside the live ledger"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Move the live ledger to the expected ledger path")
+            && message.contains("Expected ledger: archive/p.toml.ledger")
+            && message.contains(&format!(
+                "Live ledger: {}",
+                case.path("p.toml.ledger").display()
+            )),
         "{message}"
     );
     let (rc, out) = case.json(&["adopt", "archive/p.toml", "--preview"]);

@@ -1250,7 +1250,10 @@ fn a_pass_moved_without_its_ledger_is_refused_and_with_it_accepted() {
         "{out}"
     );
     let message = out["error"]["message"].as_str().expect("m");
-    assert!(message.contains("No pass file is beside it"), "{message}");
+    assert!(
+        message.contains("No pass file is beside the live ledger"),
+        "{message}"
+    );
     assert!(message.contains("p.toml.ledger"), "{message}");
     fs::rename(
         case.path("p.toml.ledger"),

@@ -470,7 +470,16 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
     } else {
         error.read_only_message()
     };
-    let mut text = format!("hallpass {command}: error: {}\n", safe_message(&message));
+    // A message in several lines shows the first after the prefix and the
+    // rest indented; each line is made safe on its own, so nothing in a
+    // path can add a line.
+    let read_only = !matches!(command, "spend" | "adopt" | "status");
+    let mut lines = error.message_lines(read_only).into_iter();
+    let first = lines.next().unwrap_or_default();
+    let mut text = format!("hallpass {command}: error: {}\n", safe_message(&first));
+    for line in lines {
+        let _ = writeln!(text, "  {}", safe_message(&line));
+    }
     for p in problems {
         let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
     }

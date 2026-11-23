@@ -509,6 +509,42 @@ one at a time: at that size all callers together sustain about 16 spends a
 second. Cost grows linearly: 1,000,000 receipt lines would take about 0.6 s
 per call. Keep the ledger of one pass below about 100,000 lines and 50 MB.
 
+**Waiting for the lock.** With no `--lock-timeout-ms`, a spend that finds
+the writer lock busy takes the blocking `flock`, so the kernel queues the
+waiters and wakes them, and no waiter is starved. The notice after about 2
+seconds comes from a helper thread with a timer; it never touches the lock.
+With `--lock-timeout-ms`, a spend polls with short sleeps (50 µs to 5 ms)
+until the limit, because a blocked `flock` cannot be cancelled: a helper that
+gave up at the limit could still take the lock afterwards. Pollers are not
+queued, so under heavy contention a bounded wait is not fair, and one waiter
+can lose many races in a row. Before bn-mti the CLI always polled, even with
+no limit, because it always set the notice callback.
+
+Latency of one CLI `spend`, with 8 writer processes each making 50 spends
+against one pass (a release build, ext4, receipts-style lines; the script is
+the evaluator's `race.py`):
+
+| Ledger lines | Waiting | p50 | p99 | max | Spends a second |
+|---:|---|---:|---:|---:|---:|
+| 10,000 | polling every 20 ms (before) | 14 ms | 1,117 ms | 1,679 ms | 72 |
+| 10,000 | blocking lock (now) | 106 ms | 125 ms | 131 ms | 74 |
+| 100,000 | polling every 20 ms (before) | 61 ms | 3,742 ms | 5,767 ms | 17 |
+| 100,000 | blocking lock (now) | 497 ms | 593 ms | 602 ms | 16 |
+
+Throughput is the same: one spend at a time. What changed is who waits. With
+polling, a lucky process spent many times in a row and the others waited
+seconds. Now the waits are even, and each is about (writers x cost of one
+call): at 100,000 lines, 8 x 63 ms is about 500 ms.
+
+**Choosing `--lock-timeout-ms`.** Set it above the expected wait, which is
+(writers on this pass x cost of one call) with a margin of several times
+that. For 8 writers at 100,000 lines that wait is about 0.6 s, so 5,000 ms
+is safe. Because a bounded wait polls, its worst case is longer than the
+figure above, so a limit close to the typical wait can give a spurious
+`lock-timeout`; nothing is recorded when it does, and the caller can run the
+command again. If every writer can wait, leave the limit off: that is the
+fair path.
+
 **Batch with `--n`.** The cost depends on the number of lines, not on the
 amounts. A caller that counts every request at a high rate should spend once
 per group: `hallpass spend PASS requests --n 50` (or `--charge requests=50

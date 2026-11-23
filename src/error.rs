@@ -138,8 +138,9 @@ pub enum Error {
     /// The witness cannot be read or written, so a spend cannot be checked
     /// against it.
     #[error(
-        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it. Make that directory exist and writable by this user, then run the command again.",
-        dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string())
+        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.{}",
+        dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string()),
+        witness_advice(detail)
     )]
     WitnessUnavailable {
         /// The pass id.
@@ -202,11 +203,7 @@ impl Error {
                     &text[..from]
                 )
             }
-            Self::LedgerElsewhere(e) => format!(
-                "{}. This command only reads and changed nothing; run `hallpass status` on the pass to see how to recover. If {} is a different approval that reused the id, give it its own id",
-                e.situation(),
-                e.pass.display()
-            ),
+            Self::LedgerElsewhere(e) => e.lines(true).join(" "),
             Self::LedgerChanged { .. } => {
                 let from = text
                     .find("; if this ledger is the one to keep")
@@ -221,6 +218,19 @@ impl Error {
                 "; this command only reads and changed nothing",
             ),
             _ => text,
+        }
+    }
+
+    /// The message as separate lines, for text output: a short first line,
+    /// then the details and steps. Joined with a space, they are the
+    /// message ([`Error::to_string`], or [`Error::read_only_message`] when
+    /// `read_only`). Most errors are one line.
+    #[must_use]
+    pub fn message_lines(&self, read_only: bool) -> Vec<String> {
+        match self {
+            Self::LedgerElsewhere(e) => e.lines(read_only),
+            _ if read_only => vec![self.read_only_message()],
+            _ => vec![self.to_string()],
         }
     }
 
@@ -331,62 +341,82 @@ pub struct ElsewhereLedger {
 }
 
 impl ElsewhereLedger {
-    /// What was found, without advice.
+    /// The message as lines: what was found (each path once), then the
+    /// steps. The read-only form never mentions adopting.
     #[must_use]
-    pub fn situation(&self) -> String {
-        let beside = self.live_pass.as_ref().map_or_else(
-            || {
-                format!(
-                    "No pass file is beside it, so {} may be that pass, moved without its ledger",
-                    self.pass.display()
-                )
-            },
-            |live_pass| {
-                format!(
-                    "The pass file beside it is {}, so {} is a second pass file with the same id",
-                    live_pass.display(),
-                    self.pass.display()
-                )
-            },
-        );
-        format!(
-            "the ledger {} for pass `{}` does not exist, but the ledger of this pass id is intact at {}, where the witness {} last saw it: it verifies and ends with the line hallpass recorded on {} ({} ledger line(s), spent: {}). {beside}",
+    pub fn lines(&self, read_only: bool) -> Vec<String> {
+        let (pass, expected, live) = (
+            self.pass.display(),
             self.path.display(),
-            self.pass_id,
             self.live.display(),
-            self.witness.display(),
-            self.updated,
-            self.seq,
-            crate::witness::totals_text(&self.totals),
-        )
+        );
+        let mut out = vec![
+            format!(
+                "the ledger for pass `{}` is not beside this pass file, but an intact one exists elsewhere, and hallpass will not count from zero.",
+                self.pass_id
+            ),
+            format!("This pass file: {pass}."),
+            format!("Expected ledger: {expected} (does not exist)."),
+            format!(
+                "Live ledger: {live}, intact, as last recorded on {} ({} ledger line(s), spent: {}).",
+                self.updated,
+                self.seq,
+                crate::witness::totals_text(&self.totals),
+            ),
+        ];
+        out.push(self.live_pass.as_ref().map_or_else(
+            || "No pass file is beside the live ledger, so this pass file may be that pass, moved without its ledger.".to_owned(),
+            |lp| format!("Pass file beside the live ledger: {}, so this pass file is a second pass file with the same id.", lp.display()),
+        ));
+        if read_only {
+            out.push("This command only reads and changed nothing; run `hallpass status` on the pass to see how to recover.".to_owned());
+            out.push(
+                "If this pass file is a different approval that reused the id, give it its own id."
+                    .to_owned(),
+            );
+            return out;
+        }
+        if self.live_pass.is_some() {
+            out.push("If this pass file revises that approval, replace the content of the live pass file with the content of this pass file and spend from the live pass file: the count carries on.".to_owned());
+            out.push("If the live pass file is being retired instead, move the live ledger to the expected ledger path.".to_owned());
+        } else {
+            out.push(
+                "Move the live ledger to the expected ledger path, and the count carries on."
+                    .to_owned(),
+            );
+        }
+        out.push(
+            "If this pass file is a different approval that reused the id, give it its own id."
+                .to_owned(),
+        );
+        out.push("Do not run `hallpass adopt` on this pass file: the ledger is not lost, and adopting would fork it into a second ledger for this id.".to_owned());
+        out
     }
 }
 
 impl std::fmt::Display for ElsewhereLedger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let advice = self.live_pass.as_ref().map_or_else(
-            || {
-                format!(
-                    "Move {} to {} and the count carries on",
-                    self.live.display(),
-                    self.path.display()
-                )
-            },
-            |live_pass| {
-                format!(
-                    "If {pass} revises that approval, replace the content of {old} with the content of {pass} and spend from {old}: the count carries on. If {old} is being retired instead, move the ledger beside it to {path}",
-                    pass = self.pass.display(),
-                    old = live_pass.display(),
-                    path = self.path.display()
-                )
-            },
-        );
-        write!(
-            f,
-            "{}. hallpass will not count from zero. {advice}. Do not run `hallpass adopt` on {pass}: the ledger is not lost, and adopting would start a second ledger for this id, refuse the intact one as changed, and leave later guarded spends (--require-new-ref) unable to show that a reference is new. If {pass} is a different approval that reused the id, give it its own id",
-            self.situation(),
-            pass = self.pass.display(),
-        )
+        f.write_str(&self.lines(false).join(" "))
+    }
+}
+
+/// The next step for a `witness-unavailable` cause. A cause that names its own
+/// next step in its detail (a damaged, over-sized or world-readable witness,
+/// a state directory with the wrong mode, an adoption whose witness was not
+/// updated) gets nothing more; every other cause is a state directory that is
+/// missing, not writable or not usable, whose step is the directory.
+fn witness_advice(detail: &str) -> &'static str {
+    const OWN_STEP: [&str; 5] = [
+        "move it aside and run `hallpass adopt`",
+        "run `chmod ",
+        "ask the approval owner",
+        "run `hallpass adopt` again",
+        "was recorded in the ledger",
+    ];
+    if OWN_STEP.iter().any(|marker| detail.contains(marker)) {
+        ""
+    } else {
+        " Make that directory exist and be writable by this user, then run the command again."
     }
 }
 

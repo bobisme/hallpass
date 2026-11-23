@@ -88,9 +88,36 @@ impl WriterWait {
         io_error: impl FnOnce(&std::io::Error) -> Error,
     ) -> Result<(), Error> {
         use std::fs::TryLockError;
-        if self.limit.is_none() && self.notify.is_none() {
-            return file.lock().map_err(|e| io_error(&e));
-        }
+        let Some((start, limit)) = self.limit else {
+            // No budget: take the blocking lock, so the kernel queues and
+            // wakes waiters instead of pollers racing. A notice, when wanted,
+            // comes from a timer thread that stands down once the lock is held.
+            let Some(notify) = self.notify else {
+                return file.lock().map_err(|e| io_error(&e));
+            };
+            return std::thread::scope(|scope| {
+                let (done, timer) = std::sync::mpsc::channel::<()>();
+                scope.spawn(move || {
+                    // Only a timeout means the lock is still busy; a message
+                    // or a closed channel means the lock was taken.
+                    if timer.recv_timeout(LOCK_WAIT_NOTICE_AFTER)
+                        == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    {
+                        notify(&LockWait {
+                            path: path.to_owned(),
+                            holder_pid: lock_holder(file),
+                        });
+                    }
+                });
+                let result = file.lock().map_err(|e| io_error(&e));
+                drop(done);
+                result
+            });
+        };
+        // A bounded wait polls: a blocked `flock` cannot be cancelled, so a
+        // helper could not give up at the limit without possibly taking the
+        // lock afterwards. Pollers are not queued, so this path is not fair
+        // under heavy contention; see DESIGN.md "Cost per call".
         let began = std::time::Instant::now();
         let mut told = false;
         loop {
@@ -109,11 +136,6 @@ impl WriterWait {
                     holder_pid: lock_holder(file),
                 });
             }
-            let Some((start, limit)) = self.limit else {
-                // No budget: poll gently, so the notice can fire.
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
-            };
             let left = limit.saturating_sub(start.elapsed());
             if left.is_zero() {
                 break;

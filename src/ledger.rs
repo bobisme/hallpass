@@ -1042,7 +1042,7 @@ fn warnings(
             "there was no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); one is recorded now, so from here on a lost or rewound ledger is noticed"
         )),
         WitnessStatus::Missing => out.push(format!(
-            "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); a spend that is allowed records one (a refused or previewed spend does not), and until then a lost or rewound ledger would not be noticed"
+            "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); an allowed spend records one, and so does a spend refused by the pass itself (a ceiling, a destination, the dates); a spend that --require-new-ref refuses for want of a witness, and a --dry-run preview, record none. Until one is recorded, a lost or rewound ledger would not be noticed"
         )),
         WitnessStatus::Extended { added } => out.push(format!(
             "the ledger has {added} line(s) after the last one the witness recorded (a spend that stopped before updating the witness, or a hallpass that keeps none); they are counted"
@@ -1574,6 +1574,9 @@ fn lock_for_writing_notifying(
     on_wait: Option<fn(&crate::files::LockWait)>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
+    if let Some(token) = guard {
+        check_token_shape(token, pass_path)?;
+    }
     let id = load(pass_path)?.pass.id;
     let wait = WriterWait::new(lock_timeout).notifying(on_wait);
     let witness_lock = state.lock(&id, wait)?;
@@ -1582,12 +1585,10 @@ fn lock_for_writing_notifying(
         let current = preview_adopt(pass_path, state).map_err(|e| match e {
             // The preview's own refusal, so that both say the same.
             Error::LedgerElsewhere(_) => e,
-            _ => Error::Usage("stale adoption preview; nothing was recorded".into()),
+            _ => stale_token(pass_path),
         })?;
         if current.token != expected {
-            return Err(Error::Usage(
-                "stale adoption preview; nothing was recorded".into(),
-            ));
+            return Err(stale_token(pass_path));
         }
     }
     let path = ledger_path(pass_path);
@@ -1617,9 +1618,7 @@ fn lock_for_writing_notifying(
             if snapshot.pass.id != id
                 || expected != adoption_token(&snapshot, &path, None, witness.as_ref())
             {
-                return Err(Error::Usage(
-                    "stale adoption preview; nothing was recorded".into(),
-                ));
+                return Err(stale_token(pass_path));
             }
             guarded_missing_pass = Some(snapshot);
         }
@@ -1655,9 +1654,7 @@ fn lock_for_writing_notifying(
             expected != adoption_token(&loaded, &path, Some(&parsed), witness.as_ref())
         })
     {
-        return Err(Error::Usage(
-            "stale adoption preview; nothing was recorded".into(),
-        ));
+        return Err(stale_token(pass_path));
     }
 
     Ok(Locked {
@@ -2169,6 +2166,29 @@ fn adoption_token(
     });
     let input = serde_json::json!({"version": 1, "pass_id": loaded.pass.id, "pass_digest": loaded.digest.to_string(), "ledger": ledger_identity(path), "exists": parsed.is_some(), "seq": parsed.map_or(0, |p| p.seq), "tail": parsed.map(|p| p.tail.to_string()), "witness": w });
     format!("v1:{}", Digest::of(input.to_string().as_bytes()))
+}
+
+/// Refuse an adoption token that is not shaped like one `adopt --preview`
+/// prints (`v1:` and a digest), before any lock is taken.
+fn check_token_shape(token: &str, pass_path: &Path) -> Result<(), Error> {
+    if token
+        .strip_prefix("v1:")
+        .is_some_and(|d| d.parse::<Digest>().is_ok())
+    {
+        return Ok(());
+    }
+    Err(Error::Usage(format!(
+        "`{token}` is not an adoption token (a token looks like v1:sha256:<64 hex digits>); nothing was recorded. Run `hallpass adopt {} --preview` and use the token it prints",
+        pass_path.display()
+    )))
+}
+
+/// The refusal for a well-formed token that no longer matches.
+fn stale_token(pass_path: &Path) -> Error {
+    Error::Usage(format!(
+        "the adoption token is stale: the pass, the ledger or the witness changed since that preview; nothing was recorded. Run `hallpass adopt {} --preview` again and use the new token",
+        pass_path.display()
+    ))
 }
 
 /// Inspect an adoptable state without creating files or locks.
@@ -3699,7 +3719,7 @@ mod tests {
         let elsewhere = StateDir::new(dir.path().join("other-machine"));
         let v = view(&path, &elsewhere).expect("read");
         assert_eq!(v.witness, WitnessStatus::Missing);
-        assert!(v.warnings[0].contains("a spend that is allowed records one"));
+        assert!(v.warnings[0].contains("an allowed spend records one"));
         assert!(
             !dir.path().join("other-machine").exists(),
             "reading wrote nothing"

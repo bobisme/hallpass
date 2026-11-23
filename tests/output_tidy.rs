@@ -258,7 +258,7 @@ fn no_witness_warning_holds_for_a_refused_spend() {
     let all = out["warnings"].to_string();
     assert!(!all.contains("next spend records one"), "{all}");
     if all.contains("no witness") {
-        assert!(all.contains("a spend that is allowed records one"), "{all}");
+        assert!(all.contains("an allowed spend records one"), "{all}");
     }
 }
 
