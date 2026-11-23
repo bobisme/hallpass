@@ -95,6 +95,7 @@ impl Shift {
             .env("XDG_STATE_HOME", home.join("state"))
             .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
             .env_remove("FORMAT")
+            .env_remove("HALLPASS_FORMAT")
             .env_remove("REFERENCE_CALLER_INTERRUPT");
         if let Some(point) = interrupt {
             command.env("REFERENCE_CALLER_INTERRUPT", point);

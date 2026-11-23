@@ -123,6 +123,7 @@ fn run_walkthrough() -> (tempfile::TempDir, PathBuf) {
         .env_remove("XDG_STATE_HOME")
         .env_remove("HALLPASS_UNSAFE_TEST_CLOCK")
         .env_remove("FORMAT")
+        .env_remove("HALLPASS_FORMAT")
         .env_remove("REFERENCE_CALLER_INTERRUPT")
         .output()
         .expect("run bash");

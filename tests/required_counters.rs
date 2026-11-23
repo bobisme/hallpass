@@ -142,7 +142,7 @@ fn cli_reports_missing_costs_and_reviews_the_rule() {
     let cli = |args: &[&str]| {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_hallpass"))
             .args(args)
-            .env("FORMAT", "json")
+            .env("HALLPASS_FORMAT", "json")
             .env("HALLPASS_UNSAFE_TEST_CLOCK", "2026-11-20T09:00:00Z")
             .env("XDG_STATE_HOME", dir.path().join("cli-state"))
             .output()

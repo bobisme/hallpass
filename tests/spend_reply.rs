@@ -124,6 +124,7 @@ impl Case {
         command
             .env_remove(CLOCK)
             .env_remove("FORMAT")
+            .env_remove("HALLPASS_FORMAT")
             .env("HOME", &home)
             .env("XDG_STATE_HOME", home.join("state"))
             .args(args);

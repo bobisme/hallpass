@@ -103,6 +103,7 @@ fn hallpass() -> Command {
     command
         .env_remove(CLOCK)
         .env_remove("FORMAT")
+        .env_remove("HALLPASS_FORMAT")
         .env("HOME", &home)
         .env("XDG_STATE_HOME", home.join("state"));
     command
@@ -1502,7 +1503,7 @@ fn format_selection_covers_meta_errors_and_literal_arguments() {
         vec!["--format", "text", "version", "--json"],
     ] {
         let out = hallpass()
-            .env("FORMAT", "invalid")
+            .env("HALLPASS_FORMAT", "invalid")
             .args(args)
             .output()
             .expect("version");
@@ -1513,7 +1514,7 @@ fn format_selection_covers_meta_errors_and_literal_arguments() {
         );
     }
     let out = hallpass()
-        .env("FORMAT", "json")
+        .env("HALLPASS_FORMAT", "json")
         .args(["version", "--format=pretty"])
         .output()
         .expect("pretty");
@@ -1532,7 +1533,7 @@ fn format_selection_covers_meta_errors_and_literal_arguments() {
         vec!["--format", "--json", "spend"],
     ] {
         let out = hallpass()
-            .env("FORMAT", "json")
+            .env("HALLPASS_FORMAT", "json")
             .args(args)
             .output()
             .expect("usage");
@@ -1555,7 +1556,7 @@ fn format_selection_covers_meta_errors_and_literal_arguments() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("OK"));
     let out = hallpass()
-        .env("FORMAT", "json")
+        .env("HALLPASS_FORMAT", "json")
         .current_dir(case.dir.path())
         .args(["check", "--", "--json"])
         .output()
@@ -1596,12 +1597,12 @@ fn usage_errors_are_json_when_json_was_asked_for() {
         assert_ne!(out["error"]["message"], "", "{args:?}");
         assert_eq!(out["warnings"], serde_json::json!([]));
     }
-    // The other spelling of the option, and the text on standard error.
+    // The other spelling of the option; nothing on standard error.
     let output = run(&["--format=json", "spend"], None);
     assert_eq!(code(&output), 1);
     let out: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(out["error"]["code"], "usage");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    assert_eq!(output.stderr, b"");
     // Text mode prints nothing on standard output.
     let output = run(&["spend"], None);
     assert_eq!(output.stdout, b"");

@@ -57,6 +57,7 @@ fn run(args: &[&str], format: Option<&str>) -> (i32, String) {
     let mut command = Command::new(BIN);
     command
         .env_remove("FORMAT")
+        .env_remove("HALLPASS_FORMAT")
         .env("HOME", &home)
         .env("XDG_STATE_HOME", home.join("state"))
         .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW);

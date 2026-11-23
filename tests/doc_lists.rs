@@ -339,6 +339,15 @@ bytes = 100
     }
 
     #[test]
+    fn the_json_fields_cover_parse_errors() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parse = hallpass(dir.path(), &["spend", "p.toml", "calls", "--n", "x"]);
+        assert_eq!(parse["error"]["code"], "usage", "{parse}");
+        assert_eq!(parse["command"], "spend", "{parse}");
+        assert_documented("error", &parse);
+    }
+
+    #[test]
     fn the_json_fields_cover_real_replies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir = dir.path();

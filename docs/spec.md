@@ -572,7 +572,10 @@ hallpass version
 Use `hallpass help --format json` for the installed command directory and
 `hallpass help COMMAND --format json` for arguments, usage, examples and
 workflow. The global format option works on either side of the command,
-before the argument separator `--`. An explicit format overrides `FORMAT`.
+before the argument separator `--`. An explicit format overrides the `HALLPASS_FORMAT` environment variable
+(`text`, `pretty` or `json`); an invalid value is a usage error that names
+it. The unprefixed `FORMAT` variable is ignored, with a warning when
+`HALLPASS_FORMAT` is not set.
 With neither set, terminals select pretty and pipes select text. Operational
 commands use their established plain output in both modes. The help command
 uses a compact listing in text and the expanded listing in pretty.

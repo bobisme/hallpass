@@ -22,6 +22,9 @@ use hallpass::{
 };
 use serde_json::{Value, json};
 
+/// The environment variable that sets the default output format.
+const FORMAT_VAR: &str = "HALLPASS_FORMAT";
+
 /// The environment variable that sets the clock in tests. Honoured only by
 /// debug builds and builds with the `test-clock` feature.
 const TEST_CLOCK_VAR: &str = "HALLPASS_UNSAFE_TEST_CLOCK";
@@ -35,7 +38,7 @@ const TEST_CLOCK_VAR: &str = "HALLPASS_UNSAFE_TEST_CLOCK";
     about = "Check written approval for literal network destinations and record usage against shared limits"
 )]
 struct Cli {
-    /// Output format (flag overrides FORMAT; default is pretty on a terminal, text in a pipe).
+    /// Output format (flag overrides `HALLPASS_FORMAT`; default is pretty on a terminal, text in a pipe).
     #[arg(long, value_enum, global = true, overrides_with = "format")]
     format: Option<Format>,
     #[command(subcommand)]
@@ -1896,6 +1899,10 @@ struct Invocation {
     args: Vec<OsString>,
     json: bool,
     topic: Option<OsString>,
+    /// A `HALLPASS_FORMAT` value that is not a format.
+    env_error: Option<String>,
+    /// Set when the ignored `FORMAT` variable is present.
+    env_warning: Option<String>,
 }
 
 impl Invocation {
@@ -1927,16 +1934,40 @@ impl Invocation {
         }
         // Feed the environment default to the same value parser as an explicit
         // flag, only when neither spelling appeared on the command line.
+        let mut env_error = None;
+        let mut env_warning = None;
         if requested_format.is_none()
-            && let Some(value) = std::env::var_os("FORMAT")
+            && let Some(value) = std::env::var_os(FORMAT_VAR)
         {
-            let mut option = OsString::from("--format=");
-            option.push(&value);
-            args.insert(1, option);
-            requested_format = Some(value);
+            match value
+                .to_str()
+                .filter(|v| Format::from_str(v, false).is_ok())
+            {
+                Some(valid) => {
+                    args.insert(1, format!("--format={valid}").into());
+                    requested_format = Some(value);
+                }
+                None => {
+                    env_error = Some(format!(
+                        "{FORMAT_VAR}: invalid value `{}`; use text, pretty or json",
+                        safe_message(&value.to_string_lossy())
+                    ));
+                }
+            }
+        }
+        if std::env::var_os("FORMAT").is_some() && std::env::var_os(FORMAT_VAR).is_none() {
+            env_warning = Some(format!(
+                "the FORMAT environment variable is ignored; set {FORMAT_VAR} to choose the output format"
+            ));
         }
         let json = requested_format.as_deref() == Some(OsStr::new("json"));
-        Self { args, json, topic }
+        Self {
+            args,
+            json,
+            topic,
+            env_error,
+            env_warning,
+        }
     }
 }
 
@@ -1991,9 +2022,42 @@ fn help_advice(topic: Option<&str>) -> Value {
     json!({"level":"info","type":"command-help","message":format!("Run {} for usage and examples.", argv.join(" ")), "argv":argv})
 }
 
+/// A usage error that happened before any command ran. `command` is null when
+/// the subcommand was not recognized.
+fn parse_error(command: Option<&str>, message: &str) -> Output {
+    let mut output = error_output(
+        command.unwrap_or("hallpass"),
+        None,
+        &Error::Usage(message.to_string()),
+    );
+    output.json["command"] = command.map_or(Value::Null, Value::from);
+    output.json["error"]["recording"] = json!("not-recorded");
+    output
+}
+
+fn add_warning(output: &mut Output, warning: &str) {
+    if output.json.get("warnings").is_none() {
+        output.json["warnings"] = json!([]);
+    }
+    if let Some(list) = output.json["warnings"].as_array_mut() {
+        list.push(json!(warning));
+    }
+}
+
 fn main() -> ExitCode {
     let input = Invocation::read();
     let mut definition = cli_help::definition();
+    let topic = input
+        .topic
+        .as_deref()
+        .and_then(OsStr::to_str)
+        .and_then(|s| definition.find_subcommand(s))
+        .map(|c| c.get_name().to_string());
+    if let Some(message) = &input.env_error {
+        let mut output = parse_error(topic.as_deref(), message);
+        output.text = format!("hallpass: error: {message}\n");
+        return emit(output, Format::Text);
+    }
     let cli = definition
         .try_get_matches_from_mut(input.args)
         .and_then(|matches| Cli::from_arg_matches(&matches));
@@ -2006,7 +2070,11 @@ fn main() -> ExitCode {
                     Format::Text
                 }
             });
-            emit(run(&cli, format), format)
+            let mut output = run(&cli, format);
+            if let Some(warning) = &input.env_warning {
+                add_warning(&mut output, warning);
+            }
+            emit(output, format)
         }
         Err(e) => {
             if input.json {
@@ -2016,24 +2084,19 @@ fn main() -> ExitCode {
                     }
                     ErrorKind::DisplayVersion => cli_help::version(),
                     _ => {
-                        let _ = e.print();
-                        let topic = input
-                            .topic
-                            .and_then(|s| definition.find_subcommand(s))
-                            .map(clap::Command::get_name);
-                        Output {
-                            code: ERROR,
-                            text: String::new(),
-                            json: json!({
-                                "command":null, "file":null, "result":"error", "problems":[],
-                                "error":{"code":"usage","message":e.render().to_string().trim_end(),"line":null},
-                                "advice":[help_advice(topic)]
-                            }),
+                        let mut out =
+                            parse_error(topic.as_deref(), e.render().to_string().trim_end());
+                        if let Some(warning) = &input.env_warning {
+                            add_warning(&mut out, warning);
                         }
+                        out
                     }
                 };
                 emit(out, Format::Json)
             } else {
+                if let Some(warning) = &input.env_warning {
+                    eprintln!("hallpass: warning: {}", safe(warning));
+                }
                 let code = if e.use_stderr() { ERROR } else { OK };
                 let _ = e.print();
                 ExitCode::from(code)
