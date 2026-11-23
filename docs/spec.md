@@ -588,7 +588,11 @@ no witnessed spend has nothing to commit to. `checkpoint` then exits 2 with
 `result = "empty"`, `checkpoint = null` and empty text output. A witnessed spend
 with a missing ledger is still an error. `verify-checkpoint` validates the supplied ledger and reports `exact`
 or `extended` (exit 0), `mismatch` (exit 2), or an input/error condition (exit
-1). Verification uses the supplied checkpoint as its trust input and does not
+1). Its JSON `relation` refines `result` with the words `compare-backups` uses:
+`exact`, `extended`, `shorter` (the ledger is of the same pass but ends before
+the checkpointed line, as an older copy does; `result` is still `mismatch`),
+`foreign` (another pass) or `mismatch`. Only the length is checked for
+`shorter`: the checkpoint cannot show that the copy is a true prefix. Verification uses the supplied checkpoint as its trust input and does not
 read or create a witness. Retain checkpoints separately from the ledger.
 
 ### Archives and evidence
@@ -799,7 +803,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
   `absent`; `witnessed_seq` is null for `absent`, `exported_seq` null for
   `empty`).
-- **verify-checkpoint**: `added` (lines after the checkpoint) and
+- **verify-checkpoint**: `relation` (`exact`, `extended`, `shorter`,
+  `foreign` or `mismatch`), `added` (lines after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
   unverified), `pass_id` and `digest` when verified, `namespace`, `archive`.
@@ -819,8 +824,16 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
 `not-yet-valid`, `valid`, `expired` or `revoked`; the three `seconds_*`
-fields are null except the one that applies. Times are UTC, whole seconds,
-`YYYY-MM-DDTHH:MM:SSZ`.
+fields are null except the one that applies. Window times (`valid_from`,
+`valid_until`) are UTC, whole seconds, `YYYY-MM-DDTHH:MM:SSZ`.
+
+Recorded ledger times follow one rule in every command that reports them
+(`ledger`, `receipt`, `reconcile`, `audit-receipts`, `audit-charges`): JSON
+gives the time exactly as the ledger line records it, in UTC with its full
+fractional seconds when a real clock wrote it (for example
+`2026-11-23T16:36:15.36549262Z`), because the ledger is evidence and
+truncating a time loses the order of debits within a second. Text output may
+print whole seconds. The whole-second rule above is about window times only.
 
 ### Refusal codes
 

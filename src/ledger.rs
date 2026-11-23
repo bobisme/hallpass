@@ -1125,8 +1125,27 @@ pub enum CheckpointStatus {
     Exact,
     /// The ledger extends the committed line.
     Extended(u64),
-    /// The valid ledger is shorter than, or differs from, the commitment.
+    /// The valid ledger differs from the commitment. Exit 2.
     Mismatch,
+    /// The valid ledger is of the same pass but ends before the committed
+    /// line, as an older copy does. Still a mismatch to a caller.
+    Shorter,
+    /// The valid ledger belongs to another pass. Still a mismatch to a caller.
+    Foreign,
+}
+
+impl CheckpointStatus {
+    /// The relation word shared with `compare-backups`.
+    #[must_use]
+    pub const fn relation(&self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Extended(_) => "extended",
+            Self::Shorter => "shorter",
+            Self::Foreign => "foreign",
+            Self::Mismatch => "mismatch",
+        }
+    }
 }
 
 /// How the local witness relates to an exported checkpoint, observed under
@@ -1249,7 +1268,13 @@ pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<Checkpo
     }
     let hash = checkpoint.hash.parse::<Digest>().map_err(Error::Usage)?;
     let parsed = inspect_candidate(path, Some(checkpoint.seq))?;
-    if parsed.pass_id != checkpoint.pass_id || parsed.prefix != Some((checkpoint.seq, hash)) {
+    if parsed.pass_id != checkpoint.pass_id {
+        return Ok(CheckpointStatus::Foreign);
+    }
+    if parsed.seq < checkpoint.seq {
+        return Ok(CheckpointStatus::Shorter);
+    }
+    if parsed.prefix != Some((checkpoint.seq, hash)) {
         return Ok(CheckpointStatus::Mismatch);
     }
     if parsed.seq == checkpoint.seq {
@@ -1545,7 +1570,9 @@ fn lock_for_writing(
     })
 }
 
-fn rfc3339(now: OffsetDateTime) -> String {
+/// A recorded time exactly as the ledger writes it (UTC, full precision).
+#[must_use]
+pub fn rfc3339(now: OffsetDateTime) -> String {
     in_utc(now)
         .and_then(|utc| utc.format(&Rfc3339).ok())
         .unwrap_or_else(|| stamp(now))
@@ -2849,7 +2876,7 @@ mod tests {
         foreign.pass_id = "another-id".to_owned();
         assert_eq!(
             verify_checkpoint(&ledger, &foreign).expect("valid foreign ledger"),
-            CheckpointStatus::Mismatch
+            CheckpointStatus::Foreign
         );
         let mut bad_suffix = fs::read(&ledger).expect("read");
         bad_suffix.extend_from_slice(b"{broken}\n");

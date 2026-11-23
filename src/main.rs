@@ -1561,7 +1561,7 @@ fn spend_events_json(
                 e.seq,
                 json!({
                     "seq": e.seq,
-                    "time": stamp(e.time),
+                    "time": hallpass::rfc3339(e.time),
                     "counter": e.counter,
                     "n": e.amount,
                     "digest": e.digest.to_string(),
@@ -1574,7 +1574,7 @@ fn spend_events_json(
                 e.seq,
                 json!({
                     "seq": e.seq,
-                    "time": stamp(e.time),
+                    "time": hallpass::rfc3339(e.time),
                     "event": "debit",
                     "version": 1,
                     "charges": e.charges,
@@ -1651,7 +1651,7 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
             "entries": spend_events_json(&selected.entries, &selected.debits),
             "adoptions": selected.adoptions.iter().map(|a| json!({
                 "seq": a.seq,
-                "time": stamp(a.time),
+                "time": hallpass::rfc3339(a.time),
                 "reason": a.reason,
                 "digest": a.digest.to_string(),
                 "carried": a.carried,
@@ -1855,14 +1855,20 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
             let (name, added, code) = match status {
                 hallpass::CheckpointStatus::Exact => ("exact", 0, 0),
                 hallpass::CheckpointStatus::Extended(n) => ("extended", n, 0),
-                hallpass::CheckpointStatus::Mismatch => ("mismatch", 0, 2),
+                _ => ("mismatch", 0, 2),
+            };
+            let relation = status.relation();
+            let detail = if relation == name {
+                String::new()
+            } else {
+                format!(", relation {relation}")
             };
             Output {
                 code,
                 text: format!(
-                    "Checkpoint verification: {name} ({added} later lines). Trust input: supplied checkpoint.\n"
+                    "Checkpoint verification: {name}{detail} ({added} later lines). Trust input: supplied checkpoint.\n"
                 ),
-                json: json!({"command": "verify-checkpoint", "result": name, "added": added, "trust_input": "supplied-checkpoint"}),
+                json: json!({"command": "verify-checkpoint", "result": name, "relation": relation, "added": added, "trust_input": "supplied-checkpoint"}),
             }
         }
         Err(e) => error_output("verify-checkpoint", Some(ledger), &e),
