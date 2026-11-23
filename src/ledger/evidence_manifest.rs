@@ -38,6 +38,100 @@ pub struct ReconcileRow {
     pub candidate_count: u64,
     pub sequences: Vec<u64>,
     pub truncated: bool,
+    /// What differs between the manifest unit and each recorded candidate.
+    /// Empty when nothing differs or nothing was recorded.
+    pub differences: Vec<ReconcileDifference>,
+}
+/// One field of a manifest unit that differs from a recorded debit.
+#[derive(Serialize)]
+pub struct ReconcileDifference {
+    /// The ledger sequence of the candidate debit that the difference describes.
+    pub sequence: u64,
+    /// `digest`, `charge.<counter>`, `charges.count`, `target[<n>]`, `name[<n>]` or `targets.count`.
+    pub field: String,
+    /// The manifest value, or null when the manifest has none.
+    pub expected: Option<String>,
+    /// The ledger value, or null when the ledger has none.
+    pub recorded: Option<String>,
+}
+fn diff(
+    out: &mut Vec<ReconcileDifference>,
+    sequence: u64,
+    field: String,
+    expected: Option<String>,
+    recorded: Option<String>,
+) {
+    if expected != recorded {
+        out.push(ReconcileDifference {
+            sequence,
+            field,
+            expected,
+            recorded,
+        });
+    }
+}
+/// Compare one manifest unit with one recorded debit. Targets are compared only when both sides have them.
+fn differences(
+    unit: &Unit,
+    seq: u64,
+    digest: &Digest,
+    charges: &[debit::DebitCharge],
+    receipt: &debit::DebitReceipt,
+) -> Vec<ReconcileDifference> {
+    let mut out = Vec::new();
+    diff(
+        &mut out,
+        seq,
+        "digest".into(),
+        Some(unit.digest.clone()),
+        Some(digest.to_string()),
+    );
+    let expected: BTreeMap<_, _> = unit
+        .charges
+        .iter()
+        .map(|c| (&c.counter, c.amount))
+        .collect();
+    let actual: BTreeMap<_, _> = charges.iter().map(|c| (&c.counter, c.amount)).collect();
+    let counters: BTreeSet<_> = expected.keys().chain(actual.keys()).copied().collect();
+    for counter in counters {
+        diff(
+            &mut out,
+            seq,
+            format!("charge.{counter}"),
+            expected.get(counter).map(u64::to_string),
+            actual.get(counter).map(u64::to_string),
+        );
+    }
+    if let Some(targets) = unit
+        .targets
+        .as_ref()
+        .filter(|_| !receipt.targets.is_empty())
+    {
+        diff(
+            &mut out,
+            seq,
+            "targets.count".into(),
+            Some(targets.len().to_string()),
+            Some(receipt.targets.len().to_string()),
+        );
+        for (i, (a, b)) in targets.iter().zip(&receipt.targets).enumerate() {
+            diff(
+                &mut out,
+                seq,
+                format!("target[{}]", i + 1),
+                Some(a.target.clone()),
+                Some(b.target.clone()),
+            );
+            diff(
+                &mut out,
+                seq,
+                format!("name[{}]", i + 1),
+                a.name.clone(),
+                b.name.clone(),
+            );
+        }
+    }
+    out
 }
 #[derive(Serialize)]
 pub struct Reconciliation {
@@ -130,6 +224,7 @@ pub fn reconcile(
             candidate_count: 0,
             sequences: Vec::new(),
             truncated: false,
+            differences: Vec::new(),
         })
         .collect();
     let view = visit_view(loaded, state, false, &mut |event| {
@@ -155,34 +250,19 @@ pub fn reconcile(
         } else {
             row.truncated = true;
         }
+        let found = differences(unit, d.seq, &d.digest, &d.charges, receipt);
         if row.candidate_count > 1 {
             row.result = "ambiguous";
-            return Ok(());
-        }
-        let expected: BTreeMap<_, _> = unit
-            .charges
-            .iter()
-            .map(|c| (&c.counter, c.amount))
-            .collect();
-        let actual: BTreeMap<_, _> = d.charges.iter().map(|c| (&c.counter, c.amount)).collect();
-        row.result = if unit.digest != d.digest.to_string() || expected != actual {
-            "mismatch"
-        } else if let Some(targets) = &unit.targets {
-            if receipt.targets.is_empty() {
-                "incomplete"
-            } else if targets.len() == receipt.targets.len()
-                && targets
-                    .iter()
-                    .zip(&receipt.targets)
-                    .all(|(a, b)| a.target == b.target && a.name == b.name)
-            {
-                "match"
-            } else {
-                "mismatch"
-            }
+        } else if !found.is_empty() {
+            row.result = "mismatch";
+        } else if unit.targets.is_some() && receipt.targets.is_empty() {
+            row.result = "incomplete";
         } else {
-            "match"
-        };
+            row.result = "match";
+        }
+        if row.sequences.last() == Some(&d.seq) {
+            row.differences.extend(found);
+        }
         Ok(())
     })?;
     if let crate::WitnessStatus::NotChecked { reason } = view.witness {

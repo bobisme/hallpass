@@ -1,7 +1,8 @@
 //! Local, read-only reconciliation, receipt auditing and backup comparison.
 pub use super::evidence_charges::{ChargeAudit, ChargeMismatch, ChargeMismatches, audit_charges};
 pub use super::evidence_manifest::{
-    MAX_MANIFEST_BYTES, MAX_MANIFEST_ROWS, ReconcileRow, Reconciliation, reconcile,
+    MAX_MANIFEST_BYTES, MAX_MANIFEST_ROWS, ReconcileDifference, ReconcileRow, Reconciliation,
+    reconcile,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

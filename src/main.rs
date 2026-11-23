@@ -1211,9 +1211,28 @@ fn debit_spend(
 }
 
 fn debit_receipt_text(receipt: &hallpass::DebitReceipt) -> String {
-    // Quote and escape reliably in text mode, including labels from a pass.
-    let printable = serde_json::to_string(receipt).unwrap_or_default();
-    safe(&printable).into_owned()
+    // Quote values reliably in text mode, including labels from a pass.
+    let quoted = |text: &str| safe(&serde_json::to_string(text).unwrap_or_default()).into_owned();
+    let mut parts = Vec::new();
+    if let Some(reference) = &receipt.caller_ref {
+        parts.push(format!("ref {}", quoted(reference)));
+    }
+    if !receipt.targets.is_empty() {
+        let targets = receipt
+            .targets
+            .iter()
+            .map(|t| {
+                let name = t
+                    .name
+                    .as_deref()
+                    .map_or_else(String::new, |n| format!(" name {}", quoted(n)));
+                format!("{}{name} label {}", quoted(&t.target), quoted(&t.label))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        parts.push(format!("targets {targets}"));
+    }
+    parts.join(", ")
 }
 
 fn digest(file: &Path) -> Output {

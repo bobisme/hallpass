@@ -110,6 +110,11 @@ again before its hashes are trusted; changed or corrupt candidates produce a
 partial error. An absent witness remains inconclusive. This comparison does not
 restore a backup or prove any external work.
 
+Only candidates that extend the witness are compared. Candidates that equal or
+precede the witness never appear in `ancestry`. Empty `prefix_links` therefore
+means that no extended tip group is a prefix of another. It does not mean that
+the backups are unrelated. Text output says this in words.
+
 ### Audit historical charges
 
 ```sh
@@ -156,7 +161,13 @@ to avoid requiring endpoint evidence; supply it to require recorded targets.
 The manifest is limited to 1,048,576 bytes and 1,024 rows. Candidate sequence
 samples are capped at 64 while counts remain complete. `absent` means absent
 from available history, and adoption can preserve totals without receipts.
-A different digest, charge or target is a mismatch; missing retained targets
+A different digest, charge, target or name is a mismatch. Each row has a
+`differences` list. Each entry has `sequence` (the candidate debit it
+describes), `field`, `expected` (manifest) and `recorded` (ledger). A null
+value means that side has none. Fields are `digest`, `charge.<counter>`,
+`targets.count`, `target[n]` and `name[n]`. With several candidates, the list
+holds the differences of each candidate within the sample cap, and `sequence`
+tells them apart. Missing retained targets
 are incomplete and duplicate references are ambiguous. The result only
 reconciles recorded accounting; it does not establish external actions, retries
 or refunds. Verification failures and malformed manifests exit 1, discrepancies
