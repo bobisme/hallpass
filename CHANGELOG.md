@@ -37,7 +37,6 @@ Changes since commit d70c09f.
   network by one bit, adds the other transport, and moves each end of the
   window by one second. A suite with no survivors before can now report
   survivors and exit 2.
-
 - **The default output format comes from `HALLPASS_FORMAT`.** The
   unprefixed `FORMAT` variable is ignored, with a warning when
   `HALLPASS_FORMAT` is unset. An invalid `HALLPASS_FORMAT` is a usage error
@@ -130,6 +129,12 @@ Changes since commit d70c09f.
   about 16 ms. docs/DESIGN.md ("Cost per call") gives the measured costs,
   a practical ledger size and when to batch with `--n`.
   `tests/ledger_scale.rs` (ignored by default) measures them.
+- Ledger lines whose notes or caller references hold non-ASCII text,
+  quotation marks or backslashes are read directly instead of through
+  `serde_json`, and every line reads faster. Each call still verifies every
+  line. A call on receipt-bearing debits costs about 40% less: about 60 ms
+  instead of 100 ms at 100,000 lines (49 MB). docs/DESIGN.md ("Cost per
+  call") now gives the cost as about 1.2 ms per MB of ledger.
 - docs/spec.md and docs/INTEGRATING.md are reorganized, and the spec's
   lists of refusal codes, error codes, commands and JSON fields are
   current.
