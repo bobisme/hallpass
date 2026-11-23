@@ -129,3 +129,38 @@ fn an_invalid_hallpass_format_names_the_variable() {
         "{err}"
     );
 }
+
+#[test]
+fn the_spec_describes_parser_failures_as_they_behave() {
+    // The paragraph of docs/spec.md about parser failures, with line breaks
+    // collapsed so that wrapping does not matter.
+    let spec = include_str!("../docs/spec.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let (out, _h) = hallpass(&["--format", "json", "spend", "p.toml", "--nope"], &[]);
+    let recognized = reply(&out);
+    assert_eq!(out.stderr, b"");
+    assert_eq!(recognized["command"], "spend");
+    assert!(recognized["file"].is_null());
+    assert_eq!(recognized["error"]["recording"], "not-recorded");
+
+    let (out, _h) = hallpass(&["--format", "json", "frobnicate"], &[]);
+    let unrecognized = reply(&out);
+    assert_eq!(out.stderr, b"");
+    assert!(unrecognized["command"].is_null());
+
+    assert!(
+        spec.contains("In JSON mode a parser failure prints nothing to stderr."),
+        "docs/spec.md no longer says that a JSON parser failure prints nothing to stderr"
+    );
+    assert!(
+        spec.contains("`command` set to the subcommand when it was recognized (null otherwise)"),
+        "docs/spec.md does not describe how `command` is filled for a parser failure"
+    );
+    assert!(
+        !spec.contains("Parser failures also print"),
+        "docs/spec.md still describes parser failures as printing to stderr"
+    );
+}

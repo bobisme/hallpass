@@ -511,8 +511,9 @@ the file again.
 
 - **That the packet goes where hallpass was asked about.** hallpass decides;
   it does not send or filter. The caller must send to exactly the address
-  it asked about. playpen enforces a pass at the network level; hallpass
-  alone does not.
+  it asked about. playpen is a separate tool, an egress guard that consumes passes
+  through this library, and it enforces a pass at the network level;
+  hallpass alone does not.
 - **That the approval is real.** A pass is a file the operator wrote.
   hallpass checks that it is complete and unambiguous, not that the owner
   agreed.

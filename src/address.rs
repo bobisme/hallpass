@@ -24,7 +24,9 @@ pub enum AddressError {
     Empty,
     /// The text looks like a host name. Callers add the advice that fits
     /// them: a query and a pass file need different next steps.
-    #[error("`{0}` looks like a host name; a pass grants nothing to names.")]
+    #[error(
+        "`{0}` looks like a host name; a pass grants nothing to names: write the literal IP address instead."
+    )]
     Hostname(String),
     /// A numeric IPv4 spelling with a hexadecimal part (`0xcb007101`,
     /// `0x7f.0.0.1`). Tools such as `inet_aton` read it as an IPv4 address,
@@ -34,7 +36,9 @@ pub enum AddressError {
     )]
     NonStandardIpv4(String),
     /// The text is not an address at all.
-    #[error("`{0}` is not a literal IPv4 or IPv6 address.")]
+    #[error(
+        "`{0}` is not a literal IPv4 or IPv6 address; write a literal IPv4 or IPv6 address, for example 192.0.2.10."
+    )]
     NotAnAddress(String),
     /// An IPv4 part has a leading zero, which some tools read as octal.
     #[error(
@@ -86,17 +90,23 @@ pub enum AddressError {
     )]
     Unspecified(String),
     /// A multicast address or a network that overlaps multicast space.
-    #[error("`{0}` is or overlaps multicast space; a pass names unicast hosts only.")]
+    #[error(
+        "`{0}` is or overlaps multicast space; a pass names unicast hosts only: name a unicast address or network instead."
+    )]
     Multicast(String),
     /// The limited broadcast address.
-    #[error("`{0}` is the broadcast address; a pass names unicast hosts only.")]
+    #[error(
+        "`{0}` is the broadcast address; a pass names unicast hosts only: name a unicast address or network instead."
+    )]
     Broadcast(String),
     /// The reserved IPv4 block 240.0.0.0/4.
-    #[error("`{0}` is or overlaps the reserved block 240.0.0.0/4, which is not a unicast host.")]
+    #[error(
+        "`{0}` is or overlaps the reserved block 240.0.0.0/4, which is not a unicast host: name a unicast address or network instead."
+    )]
     Reserved(String),
     /// A link-local address or network.
     #[error(
-        "`{0}` is or overlaps link-local space (169.254.0.0/16, fe80::/10); link-local addresses are ambiguous without an interface and include cloud metadata endpoints, so a pass does not accept them."
+        "`{0}` is or overlaps link-local space (169.254.0.0/16, fe80::/10); link-local addresses are ambiguous without an interface and include cloud metadata endpoints, so a pass does not accept them: name the routable address of the host instead."
     )]
     LinkLocal(String),
     /// A network spelling with a malformed prefix length.
@@ -105,7 +115,9 @@ pub enum AddressError {
     )]
     Prefix(String),
     /// A prefix length longer than the address.
-    #[error("`{given}`: the prefix length {prefix} is longer than {max} bits.")]
+    #[error(
+        "`{given}`: the prefix length {prefix} is longer than {max} bits; write a length from 0 to {max}."
+    )]
     PrefixTooLong {
         /// What was written.
         given: String,

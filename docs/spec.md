@@ -640,9 +640,10 @@ Exit **0** indicates success, **1** indicates a usage, file or accounting
 error, and **2** indicates a policy refusal, verification mismatch, coverage
 gaps or inconclusive evidence. Text
 errors go to stderr. In JSON mode every command emits one object on stdout,
-including usage errors, help and version. Parser failures also print their
-diagnostic to stderr and return `error.code = "usage"` with null `command`
-and `file`. Help and version requests return their own command name and
+including usage errors, help and version. In JSON mode a parser failure prints
+nothing to stderr. Its object has `error.code = "usage"`, `file` null,
+`error.recording = "not-recorded"`, and `command` set to the subcommand when
+it was recognized (null otherwise). Help and version requests return their own command name and
 `result = "ok"`. Counted work requires a successful spend reply. See the
 [caller contract](INTEGRATING.md).
 
@@ -907,7 +908,7 @@ The library is Unix-only.
 
 Cargo features: `cli` (on by default) builds the `hallpass` binary and is
 the only user of clap. A program that uses only the library depends on
-hallpass with `default-features = false` (playpen does). `test-clock` is
+hallpass with `default-features = false` (playpen does). playpen is a separate tool: an egress guard that consumes passes through this library. `test-clock` is
 described under "Test clock"; it affects only the binary.
 
 ## Threat model and known limits

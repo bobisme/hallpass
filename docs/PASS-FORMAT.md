@@ -25,7 +25,7 @@ label = "sip-edge"
 address = "192.0.2.10"
 protocol = "udp"
 ports = [5060, "10000-10100"]
-hostname = "sip.example.net"   # what the owner calls it; grants nothing
+hostname = "sip.example.net"   # a DNS name the owner uses for it; grants nothing
 
 [[destination]]
 label = "web"
@@ -132,7 +132,7 @@ spend of every running tool that asks.
 | `network` | one of the two | one CIDR network (`192.0.2.0/28`, `2001:db8::/120`) |
 | `protocol` | yes | `"tcp"` or `"udp"` |
 | `ports` | yes | `443`, `[80, 443]`, `"8000-8100"`, or a list mixing ports and range strings: `[5060, "10000-10100"]` |
-| `hostname` | no | what the owner calls this destination. **Informational only: it grants nothing**, and hallpass never resolves it. A value that is an IP address is refused (put it in `address`) |
+| `hostname` | no | what the owner calls this destination. It must be a DNS host name: at most 253 characters of ASCII letters, digits, `.`, `-` and `_`, whose last dot-separated part is not a number (`10`, `0x7f`). It is not an IP address (put that in `address`). Free text such as `"ExampleCo CDN edge"` is refused. **Informational only: it grants nothing**, and hallpass never resolves it |
 | `names` | no | the only host names this destination is approved for, as a list: `names = ["app.example.com", "admin.example.com"]`. **It narrows and never grants**: see below |
 | `whole_network_approved` | no | `true` only when the written approval names this whole network; needed for a network broader than the cap. Not allowed with `address` |
 

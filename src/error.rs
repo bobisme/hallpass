@@ -128,7 +128,7 @@ pub enum Error {
     /// The witness cannot be read or written, so a spend cannot be checked
     /// against it.
     #[error(
-        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.",
+        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it. Make that directory exist and writable by this user, then run the command again.",
         dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string())
     )]
     WitnessUnavailable {
@@ -239,7 +239,9 @@ impl Error {
             std::io::ErrorKind::PermissionDenied => {
                 "permission denied; check the file's owner and mode.".to_owned()
             }
-            _ => format!("{error}."),
+            _ => format!(
+                "{error}; check the path and that this user can read or write it, then run the command again."
+            ),
         };
         Self::Io {
             path: path.to_path_buf(),
