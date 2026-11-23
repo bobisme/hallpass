@@ -209,8 +209,8 @@ pub(super) fn parse_debit(
 use std::path::Path;
 
 use super::{
-    SpendRequest, append, check_clock, decide_ceiling, decide_spend_targets, lock_for_writing,
-    prepare_witness,
+    SpendRequest, append, check_clock, decide_ceiling, decide_spend_targets,
+    lock_for_writing_notifying, prepare_witness,
     reference::{ReferenceEvidence, ReferenceMatches},
     rfc3339, validate_spend_policy, visit_preview_snapshot, warn_clock_rollback,
 };
@@ -408,12 +408,13 @@ fn spend_using(
         return preview(pass_path, request, state, clock);
     }
     let mut matches = request.reference_matches();
-    let mut locked = lock_for_writing(
+    let mut locked = lock_for_writing_notifying(
         pass_path,
         state,
         false,
         None,
         request.policy.lock_timeout,
+        request.policy.on_lock_wait,
         &mut |event| {
             matches.observe(event);
             Ok(())

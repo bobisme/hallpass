@@ -460,6 +460,10 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
                     Error::LedgerCorrupt { line, .. } => Some(*line),
                     _ => None,
                 },
+                "last_line": match error {
+                    Error::LedgerCorrupt { last, .. } => Some(*last),
+                    _ => None,
+                },
             },
             "problems": problems_json(problems),
         }),
@@ -1100,6 +1104,19 @@ struct SpendArgs<'a> {
     note: Option<&'a str>,
 }
 
+/// Tell the user, on stderr only (so JSON stdout stays one object), that a
+/// spend is still waiting for the writer lock.
+fn announce_lock_wait(wait: &hallpass::LockWait) {
+    let path = wait.path.display();
+    let who = wait.holder_pid.map_or_else(
+        || format!("held by another process; find it with `fuser {path}`"),
+        |pid| format!("held by process {pid}"),
+    );
+    eprintln!(
+        "hallpass: waiting for the writer lock on {path}, {who}. Nothing is recorded yet; press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting."
+    );
+}
+
 fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
     let file = &args.unit.file;
     let (expect_digest, targets) = match args.unit.policy_inputs() {
@@ -1108,6 +1125,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
     };
     let mut request = args.unit.policy(expect_digest, &targets);
     request.lock_timeout = args.lock_timeout_ms.map(std::time::Duration::from_millis);
+    request.on_lock_wait = Some(announce_lock_wait);
     request.note = args.note;
     if args.unit.counter.is_none() || args.caller_ref.is_some() || args.record_target {
         return debit_spend(args, request, &targets, clock);

@@ -13,13 +13,64 @@ use sha2::{Digest as _, Sha256};
 use crate::error::Error;
 use crate::pass::Pass;
 
+/// How long a spend waits for a writer lock before it reports the wait.
+pub const LOCK_WAIT_NOTICE_AFTER: Duration = Duration::from_secs(2);
+
+/// A report that a writer lock has been busy for a while. The library never
+/// prints; a caller that wants to tell its user sets
+/// [`crate::SpendRequest::on_lock_wait`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LockWait {
+    /// The lock file being waited for.
+    pub path: PathBuf,
+    /// The process holding the lock, when it could be found (Linux, from
+    /// `/proc/locks`; the id is as seen from this process's namespace).
+    pub holder_pid: Option<u32>,
+}
+
+/// The holder of the `flock` on `file`, from `/proc/locks`. None when it is
+/// not Linux, the table cannot be read, or no entry matches.
+fn lock_holder(file: &File) -> Option<u32> {
+    let meta = file.metadata().ok()?;
+    let (major, minor) = (
+        (meta.dev() >> 8) & 0xfff | (meta.dev() >> 32) & !0xfff,
+        (meta.dev() & 0xff) | ((meta.dev() >> 12) & !0xff),
+    );
+    let dev = format!("{major:02x}:{minor:02x}");
+    let table = fs::read_to_string("/proc/locks").ok()?;
+    table.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let kind = fields.nth(1)?;
+        let pid = fields.nth(2)?;
+        let id = fields.next()?;
+        let (found_dev, rest) = id.split_once(':')?;
+        let (found_minor, inode) = rest.split_once(':')?;
+        let same = kind == "FLOCK"
+            && format!("{found_dev}:{found_minor}") == dev
+            && inode.parse::<u64>().ok() == Some(meta.ino());
+        if same { pid.parse().ok() } else { None }
+    })
+}
+
 /// One monotonic budget for the witness and ledger writer locks.
 #[derive(Clone, Copy, Default)]
-pub struct WriterWait(Option<(std::time::Instant, Duration)>);
+pub struct WriterWait {
+    limit: Option<(std::time::Instant, Duration)>,
+    notify: Option<fn(&LockWait)>,
+}
 
 impl WriterWait {
     pub(crate) fn new(limit: Option<Duration>) -> Self {
-        Self(limit.map(|limit| (std::time::Instant::now(), limit)))
+        Self {
+            limit: limit.map(|limit| (std::time::Instant::now(), limit)),
+            notify: None,
+        }
+    }
+
+    pub(crate) const fn notifying(mut self, notify: Option<fn(&LockWait)>) -> Self {
+        self.notify = notify;
+        self
     }
 
     fn poll_interval(left: Duration) -> Duration {
@@ -37,18 +88,32 @@ impl WriterWait {
         io_error: impl FnOnce(&std::io::Error) -> Error,
     ) -> Result<(), Error> {
         use std::fs::TryLockError;
-        let Some((start, limit)) = self.0 else {
+        if self.limit.is_none() && self.notify.is_none() {
             return file.lock().map_err(|e| io_error(&e));
-        };
+        }
+        let began = std::time::Instant::now();
+        let mut told = false;
         loop {
-            if !limit.is_zero() && start.elapsed() >= limit {
-                break;
-            }
             match file.try_lock() {
                 Ok(()) => return Ok(()),
                 Err(TryLockError::Error(e)) => return Err(io_error(&e)),
                 Err(TryLockError::WouldBlock) => {}
             }
+            if let Some(notify) = self.notify
+                && !told
+                && began.elapsed() >= LOCK_WAIT_NOTICE_AFTER
+            {
+                told = true;
+                notify(&LockWait {
+                    path: path.to_owned(),
+                    holder_pid: lock_holder(file),
+                });
+            }
+            let Some((start, limit)) = self.limit else {
+                // No budget: poll gently, so the notice can fire.
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
             let left = limit.saturating_sub(start.elapsed());
             if left.is_zero() {
                 break;

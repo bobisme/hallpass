@@ -81,8 +81,9 @@ pub enum Error {
     },
     /// The ledger cannot be trusted.
     #[error(
-        "the ledger {} is damaged at line {line}: {detail}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed).",
-        path.display()
+        "the ledger {} is damaged at line {line}: {detail}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: {}",
+        path.display(),
+        corrupt_advice(.last)
     )]
     LedgerCorrupt {
         /// The ledger file.
@@ -91,6 +92,9 @@ pub enum Error {
         line: usize,
         /// What is wrong.
         detail: String,
+        /// True when `line` is the last line of the file. Only then can the
+        /// damage be a final line cut short.
+        last: bool,
     },
     /// The ledger belongs to a different pass id.
     #[error(
@@ -161,7 +165,7 @@ pub enum Error {
         detail: String,
     },
     /// The lock-wait budget expired before any debit was appended.
-    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit.", path.display())]
+    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit. Retry, or find and stop the process holding it (`fuser {}`). The lock is released automatically when its holder exits or crashes, so a stale lock does not need removing.", path.display(), path.display())]
     LockTimeout { path: PathBuf },
     /// The file already exists (`init` never overwrites).
     #[error("{} already exists; hallpass init never overwrites. Choose another path.", path.display())]
@@ -286,6 +290,16 @@ impl std::fmt::Display for MissingLedger {
             self.updated,
             self.pass.display()
         )
+    }
+}
+
+/// What to do about a damaged ledger, by where the damage is.
+#[allow(clippy::trivially_copy_pass_by_ref)] // thiserror passes the field by reference
+const fn corrupt_advice(last: &bool) -> &'static str {
+    if *last {
+        "compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed). If the line is not just cut short, restore the ledger from a backup instead."
+    } else {
+        "the damage is before the end of the file, so do not edit lines by hand. Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one."
     }
 }
 

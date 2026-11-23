@@ -120,6 +120,9 @@ pub struct SpendRequest<'a> {
     /// Maximum total wait for the writer locks on a real spend. Zero asks once
     /// per lock; None waits indefinitely. This excludes post-lock I/O.
     pub lock_timeout: Option<std::time::Duration>,
+    /// Called once, from the waiting thread, when a writer lock has been
+    /// busy for about two seconds. The library prints nothing itself.
+    pub on_lock_wait: Option<fn(&crate::files::LockWait)>,
     /// What is about to be touched. When set, the spend is also refused,
     /// and nothing is recorded, unless the pass permits this target now
     /// (as [`crate::Pass::permits_named`] decides, with `name` and
@@ -145,6 +148,7 @@ impl<'a> SpendRequest<'a> {
             expect_digest: None,
             needed: Duration::ZERO,
             lock_timeout: None,
+            on_lock_wait: None,
             target: None,
             name: None,
             additional_targets: &[],
@@ -634,6 +638,7 @@ fn record_checkpoint(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn scan_ledger(
     path: &Path,
     reader: impl BufRead,
@@ -642,16 +647,20 @@ fn scan_ledger(
     mut checkpoints: Option<(&std::collections::BTreeSet<u64>, &mut BTreeMap<u64, Digest>)>,
     visit: &mut Visitor<'_>,
 ) -> Result<Parsed, Error> {
+    // Whether the line being checked is the last in the file, for the advice.
+    let at_end = std::cell::Cell::new(false);
     let corrupt = |line: usize, detail: &str| Error::LedgerCorrupt {
         path: path.to_path_buf(),
         line,
         detail: detail.to_owned(),
+        last: at_end.get(),
     };
     let mut reader = reader;
     let mut first = Vec::new();
     reader
         .read_until(b'\n', &mut first)
         .map_err(|e| Error::io(path, &e))?;
+    at_end.set(reader.fill_buf().is_ok_and(<[u8]>::is_empty));
     if first.is_empty() {
         return Err(corrupt(
             1,
@@ -696,6 +705,7 @@ fn scan_ledger(
             break;
         }
         number += 1;
+        at_end.set(reader.fill_buf().is_ok_and(<[u8]>::is_empty));
         if line.pop() != Some(b'\n') {
             return Err(corrupt(number, "the last line is cut short (no line end)"));
         }
@@ -715,7 +725,10 @@ fn scan_ledger(
         if !parsed.tail().is_written_as(prev) {
             return Err(corrupt(
                 number,
-                "the line does not follow the one before it (a line was changed, removed or moved)",
+                &format!(
+                    "line {number} does not follow line {}: one of the two was changed, or a line between them was removed or moved",
+                    number - 1
+                ),
             ));
         }
         let event = match record {
@@ -1484,8 +1497,21 @@ fn lock_for_writing(
     lock_timeout: Option<std::time::Duration>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
+    lock_for_writing_notifying(pass_path, state, adopting, guard, lock_timeout, None, visit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lock_for_writing_notifying(
+    pass_path: &Path,
+    state: &StateDir,
+    adopting: bool,
+    guard: Option<&str>,
+    lock_timeout: Option<std::time::Duration>,
+    on_wait: Option<fn(&crate::files::LockWait)>,
+    visit: &mut Visitor<'_>,
+) -> Result<Locked, Error> {
     let id = load(pass_path)?.pass.id;
-    let wait = WriterWait::new(lock_timeout);
+    let wait = WriterWait::new(lock_timeout).notifying(on_wait);
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
     if let Some(expected) = guard {
@@ -1698,12 +1724,13 @@ pub fn spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
-    let mut locked = lock_for_writing(
+    let mut locked = lock_for_writing_notifying(
         pass_path,
         state,
         false,
         None,
         request.lock_timeout,
+        request.on_lock_wait,
         &mut |_| Ok(()),
     )?;
     let id = locked.loaded.pass.id.clone();

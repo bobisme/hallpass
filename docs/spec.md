@@ -302,6 +302,16 @@ guard coordinates cooperating guarded writers on the same local history.
 External execution requires a separate record. The Rust option is
 `SpendChargesRequest::require_new_ref`.
 
+#### Damaged ledger advice
+
+A chain break at line N says that line N does not follow line N-1: one of the
+two was changed, or a line between them was removed or moved. The message
+advises removing a final line that was cut short only when N is the last line
+of the file (`error.last_line` is true). When N is earlier, it advises
+restoring the ledger from a backup, finding the good copy with `hallpass
+compare-backups`, and not editing lines by hand. The error code stays
+`ledger-corrupt`.
+
 #### Lock wait
 
 On a committing spend, `--lock-timeout-ms N` gives both writer locks one
@@ -310,6 +320,21 @@ Omitting the option uses blocking locks. A timeout exits 1 with
 `error.code = "lock-timeout"` and `error.recording = "not-recorded"`.
 The budget covers lock acquisition. It places no deadline on a subsequent
 append or sync. An external process timeout can leave the outcome unknown.
+
+The locks are operating-system file locks (`flock`). The system releases one
+when its holder exits or crashes, so a stale lock never needs removing; a
+`lock-timeout` means a live process holds it. The message ends with the next
+step: retry, or find and stop that process (`fuser PATH`).
+
+A spend with no timeout waits without limit. After about two seconds of
+waiting, the CLI writes one line to **stderr** (in text and JSON mode alike;
+it is never put in `warnings`, so stdout stays one JSON object and the
+result is unchanged): `waiting for the writer lock on PATH, held by process
+PID` where the holder can be found (Linux, `/proc/locks`), otherwise
+`held by another process; find it with fuser PATH`. A spend that gets the
+lock sooner prints nothing. The library never prints: set
+`SpendRequest::on_lock_wait` to a function that receives a `LockWait`
+(`path`, `holder_pid`) to report the wait yourself.
 
 ### The witness
 
@@ -722,8 +747,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **version** returns the package version in `version`.
 
 - **error** (any command): `error` `{code, message, line, recording, seq,
-  ledger}` (`line` is the 1-based ledger line for `ledger-corrupt`, else
-  null; `recording`, `seq` and `ledger` as in "Fail-closed cases", null when
+  ledger, last_line}` (`line` is the 1-based ledger line for
+  `ledger-corrupt`, else null; `last_line` is true when that line is the last
+  in the file, so the damage may be a final line cut short, false when it is
+  earlier, and null for other errors; `recording`, `seq` and `ledger` as in "Fail-closed cases", null when
   they do not apply, and absent from parser failures), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
