@@ -415,8 +415,7 @@ fn spend_using(
         &locked.loaded,
         &request.policy,
         now,
-        locked.parsed.adoption_count > 0,
-        locked.witness.is_none() && locked.parsed.seq > 0,
+        locked.witness.is_some(),
     );
     let mut result = decide_debit(
         &locked.loaded,
@@ -607,8 +606,7 @@ fn preview(
         &loaded,
         &request.policy,
         now,
-        view.adoption_count > 0,
-        view.witness == WitnessStatus::Missing && view.tally.entries > 0,
+        view.witness != WitnessStatus::Missing,
     );
     let outcome = decide_debit(
         &loaded,

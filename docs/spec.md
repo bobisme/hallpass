@@ -268,13 +268,39 @@ containing `caller_ref`, `match_count`, the first 64 `sequences` in ledger
 order, and `truncated`. The scan verifies the rest of the chain after a
 match, including entries after the witness.
 
-An absent reference in an adopted history or a nonempty unanchored history
-exits 2 with `reference-inconclusive` and empty match details. A guarded
-refusal does not anchor an unanchored nonempty history. Missing or invalid
-caller references are usage errors. A dry run reports observed matches
-without a reservation. The guard coordinates cooperating guarded writers
-on the same local history. External execution requires a separate record.
-The Rust option is `SpendChargesRequest::require_new_ref`.
+An absent reference exits 2 with `reference-inconclusive` and empty match
+details when the ledger may lack lines that hallpass recorded:
+
+- **After an adoption that may have lost lines.** An adoption that records
+  a previous witness of at least one line, or carries any amount, accepted
+  a ledger without lines hallpass had recorded: a missing ledger started
+  anew with the witnessed totals, or a changed ledger with what the witness
+  recorded beyond it. References on those lines may be gone even when
+  nothing was carried. This lasts for the rest of the ledger, whatever is
+  adopted later. Check the reference against the caller's run record, and
+  spend without `--require-new-ref` only if that record shows the unit was
+  never submitted. The message names the adoption's sequence.
+- **Without a local witness.** A ledger with at least one line and no
+  witness may be a partial copy. A guarded refusal records no witness. If
+  the ledger is the complete history (for example it moved with the pass
+  to another machine or state directory), `hallpass adopt FILE --reason
+  TEXT` records one, and the message says so.
+
+An adoption without a witness appends to the ledger as it stands: the hash
+chain still holds every earlier line, and the adoption records no previous
+witness and carries nothing. It loses no reference, so after it the guard
+checks new references again. An adoption whose previous witness recorded
+only the header loses none either. Adopt a ledger without a witness only
+when it is the complete history: hallpass cannot tell a partial copy from
+a complete one, and neither the count nor the guard sees lines missing
+from it. Every adoption record already has the `witness` and `carried`
+fields that tell the kinds apart, so the ledger format is unchanged.
+
+Missing or invalid caller references are usage errors. A dry run applies
+the same rules and reports observed matches without a reservation. The
+guard coordinates cooperating guarded writers on the same local history.
+External execution requires a separate record. The Rust option is
+`SpendChargesRequest::require_new_ref`.
 
 #### Lock wait
 
@@ -307,7 +333,7 @@ The same evidence, by command:
 | State evidence | permits | status / ledger | spend and spend preview |
 |---|---|---|---|
 | Fresh pass, no previous spend | evaluate policy | report fresh | evaluate policy |
-| Ledger without a witness | evaluate with warning | report missing witness | evaluate; only a real spend can establish the witness |
+| Ledger without a witness | evaluate with warning | report missing witness | evaluate; a real spend without `--require-new-ref`, or `adopt`, establishes the witness |
 | Unusable witness state | evaluate with warning | report not-checked | error |
 | Missing or divergent witnessed history | error | error | error |
 
@@ -330,7 +356,10 @@ pass digest, the witness's previous record, and `carried`):
   beyond what the ledger holds;
 - no witness: `carried` is empty.
 
-Carried amounts count as spent. An adoption never lowers a count below
+The first two may have lost lines and their caller references, so later
+guarded spends refuse new references as `reference-inconclusive`; the third
+keeps every line (see "Caller references and receipts"). Carried amounts
+count as spent. An adoption never lowers a count below
 what the witness recorded; there is no reset to zero (a new budget is a
 raised ceiling in the pass, or a new pass). Then the witness records the
 new last line. The reason follows the note rules and is required. With

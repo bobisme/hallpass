@@ -189,7 +189,7 @@ fn concurrent_guards_record_only_once_and_revision_changes_keep_the_same_ref() {
 }
 
 #[test]
-fn unknown_references_remain_inconclusive_without_an_anchor_or_after_adoption() {
+fn unknown_references_remain_inconclusive_without_an_anchor_until_adopted() {
     let f = Fixture::new();
     let first = reply(&f.guarded(CALLER_REF).output().expect("first debit"), 0);
     assert_eq!(first["seq"], 1);
@@ -226,15 +226,13 @@ fn unknown_references_remain_inconclusive_without_an_anchor_or_after_adoption() 
     );
     let after = fs::read(&ledger).expect("ledger");
     assert!(witness.exists());
-    let unknown = reply(
-        &f.guarded("after-adoption").output().expect("inconclusive"),
-        2,
-    );
-    assert_eq!(unknown["refusal"]["code"], "reference-inconclusive");
-    assert_eq!(unknown["reference_evidence"]["sequences"], json!([]));
     assert_duplicate(&reply(
         &f.guarded(CALLER_REF).output().expect("known match"),
         2,
     ));
-    assert_eq!(fs::read(ledger).expect("ledger"), after);
+    assert_eq!(fs::read(&ledger).expect("ledger"), after);
+    // That adoption kept every line and carried nothing, so it lost no
+    // reference: the guard checks new ones again.
+    let new = reply(&f.guarded("after-adoption").output().expect("new"), 0);
+    assert_eq!(new["seq"], 3);
 }

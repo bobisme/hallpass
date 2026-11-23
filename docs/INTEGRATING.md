@@ -194,7 +194,10 @@ exit 0
   deleted or rolled-back ledger lives in `$XDG_STATE_HOME/hallpass` (or
   `~/.local/state/hallpass`). A caller that runs hallpass in a container or
   with a temporary home gives every run a new witness and loses that
-  protection; `spend` then says so in `warnings`.
+  protection; `spend` then says so in `warnings`. With `--require-new-ref`
+  a spend on a nonempty ledger without a witness is refused as
+  `reference-inconclusive` until `hallpass adopt` records the ledger as it
+  stands (only when it is the complete history).
 - **Keep the ledger beside the pass.** `PASS.ledger` is the count. Do not
   copy the pass elsewhere to "start fresh": the witness refuses that
   (`ledger-missing`), and `hallpass adopt` is the recorded way out.

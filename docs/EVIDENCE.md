@@ -37,12 +37,17 @@ and your execution record. If another worker submits the same guarded
 reference, the repeat exits 2 with `refusal.code=duplicate-reference` and
 `seq: null`. Read `reference_evidence.sequences` for up to 64 historical
 matches and use `receipt` to compare the recorded charges and targets. The
-repeat provides no permission to send. An absent reference in a history
-that contains an adoption or has events without a local witness returns
-`reference-inconclusive`. A dry run reports the history it observes and
-reserves nothing. Retain your own execution record to decide whether the
-external action occurred. Calls that omit the guard can reuse references
-for correlation.
+repeat provides no permission to send. An absent reference returns
+`reference-inconclusive` in a history with events but no local witness, or
+with an adoption that may have lost lines (it records a previous witness of
+at least one line, or carries totals). For a complete ledger without a
+witness, `hallpass adopt` records one and the guard checks references
+again. After an adoption that lost lines, spend without the guard only when
+your run record shows the unit was never submitted. See [the
+rule](spec.md#caller-references-and-receipts). A dry run reports the
+history it observes and reserves nothing. Retain your own execution record
+to decide whether the external action occurred. Calls that omit the guard
+can reuse references for correlation.
 
 ## Replay historical endpoint decisions
 

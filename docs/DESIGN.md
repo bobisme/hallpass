@@ -276,7 +276,10 @@ witness catches them.
   records a witness for it, even when the spend is then refused. Refusing
   would make a legitimate move impossible; the warning says that until a
   witness exists, a loss would go unnoticed. `hallpass adopt` records the
-  same acknowledgment explicitly in the ledger.
+  same acknowledgment explicitly in the ledger. A guarded spend
+  (`--require-new-ref`) on a nonempty ledger records no witness: it cannot
+  show that a reference is new in a ledger that may be a partial copy, so
+  it refuses and names `adopt`, after which it checks references again.
 - **Adoption** (`hallpass adopt FILE --reason TEXT`) is the one way past
   `ledger-missing` and `ledger-changed`. It writes an `adopt` line into the
   chain with the reason, the pass digest and the witness's previous record,
@@ -289,7 +292,13 @@ witness catches them.
   owner's, and more budget is a raised ceiling in the pass or a new pass.
   Adopting twice carries nothing the second time (the totals already
   include the first carry), so a retry after a failed witness write does
-  not double-count.
+  not double-count. A carry keeps totals, not caller references: an
+  adoption that records a previous witness of at least one line, or
+  carries anything, accepted a ledger without lines hallpass had recorded,
+  so the reference guard stays inconclusive on that ledger. An adoption
+  without a witness appends to the ledger as it stands and loses no
+  reference. The existing `witness` and `carried` fields tell the two
+  apart, so the ledger format did not change.
 - **State directory failures**: `spend` and `adopt` fail closed
   (`witness-unavailable`) when there is no state directory (neither
   `XDG_STATE_HOME` nor `HOME` is an absolute path), it cannot be created,
