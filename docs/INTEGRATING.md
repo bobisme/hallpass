@@ -316,7 +316,10 @@ A `witness-unavailable` error also has `recording = "not-recorded"`: the
 spend stopped before it appended a debit. The exception is `adopt` when the
 adoption was appended and only the witness update failed. That error has a
 null `recording`, and the adoption counts. Inspect the ledger before you run
-`adopt` again. Every other error has a null `recording`.
+`adopt` again. A `usage` error, and any error of a command that never appends
+to a ledger, has `recording = "not-recorded"`. A different error from `spend`,
+`adopt` or `status`, such as `io`, has a null `recording`: hallpass cannot say
+whether the write happened.
 
 ### Test a subprocess wrapper
 

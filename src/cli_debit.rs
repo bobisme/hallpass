@@ -164,6 +164,20 @@ impl SpendReply<'_> {
     }
 }
 
+/// Parse `--n`. Negative numbers reach this parser, so they get a clear error
+/// instead of clap's advice to pass them after `--`, which does not work.
+fn parse_amount(text: &str) -> Result<u64, String> {
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        text.parse::<u64>().map_err(|_| {
+            format!(
+                "N must be a positive integer no larger than the maximum whole number, not `{text}`"
+            )
+        })
+    } else {
+        Err(format!("N must be a positive integer, not `{text}`"))
+    }
+}
+
 #[derive(Args)]
 pub struct DebitUnit {
     /// Validated TOML pass supplying the window, scope and ceilings.
@@ -172,7 +186,13 @@ pub struct DebitUnit {
     #[arg(required_unless_present = "charges", conflicts_with = "charges")]
     pub counter: Option<String>,
     /// The amount to spend (default 1 with a positional counter).
-    #[arg(long = "n", value_name = "N", requires = "counter")]
+    #[arg(
+        long = "n",
+        value_name = "N",
+        requires = "counter",
+        allow_negative_numbers = true,
+        value_parser = parse_amount
+    )]
     amount: Option<u64>,
     /// One named cost of this unit. Repeat for each counter.
     #[arg(long = "charge", value_name = "COUNTER=N", conflicts_with_all = ["counter", "amount"])]
@@ -247,6 +267,15 @@ impl DebitUnit {
     }
 }
 
+/// The shared decision code ends a refusal with "Nothing was recorded", which
+/// is noise for `capacity`: it never records anything.
+fn without_recording_note(mut refusal: Refusal) -> Refusal {
+    if let Some(shorter) = refusal.message.strip_suffix(". Nothing was recorded") {
+        refusal.message.truncate(shorter.len());
+    }
+    refusal
+}
+
 pub fn run_capacity(unit: &DebitUnit, clock: &Clock) -> Output {
     let file = &unit.file;
     let evaluate = || {
@@ -282,7 +311,8 @@ pub fn run_capacity(unit: &DebitUnit, clock: &Clock) -> Output {
             json["limiting_counters"] = json!(budget.limiting_counters);
             json["counters"] = json!(budget.counters);
             json["targets"] = targets_json(&targets, &budget.labels);
-            json["unit_refusal"] = json!(budget.unit_refusal.as_ref().map(refusal_json));
+            let unit_refusal = budget.unit_refusal.clone().map(without_recording_note);
+            json["unit_refusal"] = json!(unit_refusal.as_ref().map(refusal_json));
             let mut text = format!(
                 "{}  {} unit(s)  limited by {}\n",
                 outcome.pass_id,
@@ -302,7 +332,8 @@ pub fn run_capacity(unit: &DebitUnit, clock: &Clock) -> Output {
                 json,
             }
         }
-        Err(refusal) => {
+        Err(mut refusal) => {
+            refusal.reason = without_recording_note(refusal.reason);
             json["result"] = json!("refused");
             json["refusal"] = refusal_json(&refusal.reason);
             json["refused_target"] = json!(refusal.index);

@@ -1510,7 +1510,7 @@ fn format_selection_covers_meta_errors_and_literal_arguments() {
         vec!["--version", "--json"],
         vec!["--json", "version"],
         vec!["version", "--json"],
-        vec!["--format", "text", "version", "--json"],
+        vec!["--format", "json", "version", "--json"],
     ] {
         let out = hallpass()
             .env("HALLPASS_FORMAT", "invalid")

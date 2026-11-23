@@ -170,7 +170,10 @@ from available history, and adoption can preserve totals without receipts.
 A different digest, charge, target or name is a mismatch. Each row has a
 `differences` list. Each entry has `sequence` (the candidate debit it
 describes), `field`, `expected` (manifest) and `recorded` (ledger). A null
-value means that side has none. Fields are `digest`, `charge.<counter>`,
+value means that side has none. Each value has the natural JSON type of its
+field: a number for `charge.<counter>` and `targets.count`, a string for
+`digest`, `target[n]` and `name[n]`. (Before this change every value was a
+string, such as `"5"`.) Fields are `digest`, `charge.<counter>`,
 `targets.count`, `target[n]` and `name[n]`. With several candidates, the list
 holds the differences of each candidate within the sample cap, and `sequence`
 tells them apart. Missing retained targets

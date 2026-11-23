@@ -115,8 +115,8 @@ RECORDED: 1 calls for 192.0.2.10:5060/udp by destination sip-edge (1 of 6 spent,
 
 $ hallpass ledger engagement.pass.toml
 Ledger of pass example-2026-11 (engagement.pass.toml.ledger)
-    seq  time                  counter                 n  digest               note
-      1  2026-11-20T09:00:00Z  calls                   1  sha256:b28f258fae01  first call
+    seq  time                  counter                 n  digest               details
+      1  2026-11-20T09:00:00Z  calls                   1  sha256:b28f258fae01  note: first call
 Totals:
   calls            1 spent of 6
 Ledger: 1 line(s) after the header, chain verified, the witness matches

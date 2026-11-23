@@ -412,6 +412,53 @@ fn problems_json(problems: &[Problem]) -> Value {
     json!(problems)
 }
 
+/// Commands that never append to a ledger, so any failure of one left it as
+/// it was.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "help",
+    "version",
+    "init",
+    "check",
+    "rehearse",
+    "capacity",
+    "permits",
+    "digest",
+    "ledger",
+    "archive",
+    "retrieve",
+    "receipt",
+    "audit-receipts",
+    "audit-charges",
+    "reconcile",
+    "compare-backups",
+    "checkpoint",
+    "verify-checkpoint",
+    "verify-approval",
+    "diff",
+    "consumer-coverage",
+];
+
+/// What a failed command left in the ledger, as `error.recording`: `recorded`
+/// or `uncertain` where the error says so, and `not-recorded` where hallpass
+/// knows nothing was appended: a usage error (arguments are checked before any
+/// write), a lock timeout, and any error of a command that never appends. It
+/// is null for another error of a command that can append, such as an `io`
+/// error from `spend`, because the write may or may not have happened.
+fn recording(command: &str, error: &Error) -> Option<&'static str> {
+    match error {
+        Error::WitnessNotUpdated { .. } => Some("recorded"),
+        Error::AppendUncertain { .. } => Some("uncertain"),
+        Error::LockTimeout { .. } | Error::Usage(_) => Some("not-recorded"),
+        Error::WitnessUnavailable { detail, .. }
+            if !detail.contains("was recorded in the ledger") =>
+        {
+            Some("not-recorded")
+        }
+        _ if READ_ONLY_COMMANDS.contains(&command) => Some("not-recorded"),
+        _ => None,
+    }
+}
+
 fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
     let problems: &[Problem] = match error {
         Error::Invalid { problems, .. } => problems,
@@ -452,7 +499,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
             "file": file.map(|f| f.display().to_string()),
             "error": {
                 "code": error.code(),
-                "recording": match error { Error::WitnessNotUpdated{..} => Some("recorded"), Error::AppendUncertain{..}=>Some("uncertain"), Error::LockTimeout{..}=>Some("not-recorded"), Error::WitnessUnavailable{detail,..} if !detail.contains("was recorded in the ledger") => Some("not-recorded"), _=>None },
+                "recording": recording(command, error),
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
                 "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
                 "message": message,
@@ -1432,16 +1479,31 @@ fn select_rows<'a>(
     }
 }
 
+/// The last `ledger` column. A receipt and a note each carry their own label.
+/// The receipt comes first, with every value in it quoted, and the note comes
+/// last and runs to the end of the line, so a note cannot pass for a receipt.
+fn details_text(note: Option<&str>, receipt: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(receipt) = receipt {
+        parts.push(format!("receipt: {receipt}"));
+    }
+    if let Some(note) = note {
+        parts.push(format!("note: {}", safe(note)));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join("  "))
+    }
+}
+
 /// One line per charge of a debit unit, in the columns of a plain spend; the
-/// first line carries the sequence, time, digest and note.
+/// first line carries the sequence, time, digest and details.
 fn debit_rows_text(e: &hallpass::LedgerDebit) -> String {
-    let note = e
-        .note
-        .as_deref()
-        .map_or_else(String::new, |n| safe(n).into_owned());
-    let receipt = e.receipt.as_ref().map_or_else(String::new, |r| {
-        format!(" receipt {}", debit_receipt_text(r))
-    });
+    let details = details_text(
+        e.note.as_deref(),
+        e.receipt.as_ref().map(debit_receipt_text).as_deref(),
+    );
     // One line per charge, in the same columns as a plain spend; the
     // first line carries the sequence, time, digest and note.
     let mut lines = Vec::new();
@@ -1451,7 +1513,7 @@ fn debit_rows_text(e: &hallpass::LedgerDebit) -> String {
                 e.seq.to_string(),
                 stamp(e.time),
                 short_digest(&e.digest),
-                format!("DEBIT of {} counter(s) {note}{receipt}", e.charges.len()),
+                format!("DEBIT of {} counter(s){details}", e.charges.len()),
             )
         } else {
             (String::new(), String::new(), String::new(), String::new())
@@ -1493,15 +1555,13 @@ fn ledger_text(
                 (
                     e.seq,
                     format!(
-                        "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  {}",
+                        "  {:>5}  {:<20}  {:<16} {:>8}  {:<19} {}",
                         e.seq,
                         stamp(e.time),
                         e.counter,
                         e.amount,
                         short_digest(&e.digest),
-                        e.note
-                            .as_deref()
-                            .map_or_else(String::new, |n| safe(n).into_owned())
+                        details_text(e.note.as_deref(), None)
                     ),
                 )
             })
@@ -1525,7 +1585,7 @@ fn ledger_text(
         } else {
             let _ = writeln!(
                 text,
-                "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  note",
+                "  {:>5}  {:<20}  {:<16} {:>8}  {:<19}  details",
                 "seq", "time", "counter", "n", "digest"
             );
         }
@@ -2085,6 +2145,8 @@ struct Invocation {
     env_error: Option<String>,
     /// Set when the ignored `FORMAT` variable is present.
     env_warning: Option<String>,
+    /// `--json` together with `--format` set to something else.
+    flag_conflict: Option<String>,
 }
 
 impl Invocation {
@@ -2094,9 +2156,18 @@ impl Invocation {
         let mut expects_format = false;
         let mut topic = None;
         let mut looking_for_command = true;
+        let mut json_flag = false;
+        let mut other_format: Option<String> = None;
         for arg in args.iter_mut().skip(1).take_while(|arg| *arg != "--") {
             if arg == "--json" {
+                json_flag = true;
                 *arg = "--format=json".into();
+            } else if let Some(value) = arg.to_str().and_then(|s| s.strip_prefix("--format=")) {
+                if value != "json" {
+                    other_format.get_or_insert_with(|| format!("--format={value}"));
+                }
+            } else if expects_format && arg != "json" {
+                other_format.get_or_insert_with(|| format!("--format {}", arg.to_string_lossy()));
             }
             if let Some(value) = arg.to_str().and_then(|s| s.strip_prefix("--format=")) {
                 requested_format = Some(OsString::from(value));
@@ -2142,13 +2213,19 @@ impl Invocation {
                 "the FORMAT environment variable is ignored; set {FORMAT_VAR} to choose the output format"
             ));
         }
-        let json = requested_format.as_deref() == Some(OsStr::new("json"));
+        let flag_conflict = other_format.filter(|_| json_flag).map(|format| {
+            format!(
+                "`{format}` conflicts with `--json`, which means `--format json`; use one of them"
+            )
+        });
+        let json = json_flag || requested_format.as_deref() == Some(OsStr::new("json"));
         Self {
             args,
             json,
             topic,
             env_error,
             env_warning,
+            flag_conflict,
         }
     }
 }
@@ -2235,6 +2312,9 @@ fn main() -> ExitCode {
         .and_then(OsStr::to_str)
         .and_then(|s| definition.find_subcommand(s))
         .map(|c| c.get_name().to_string());
+    if let Some(message) = &input.flag_conflict {
+        return emit(parse_error(topic.as_deref(), message), Format::Json);
+    }
     if let Some(message) = &input.env_error {
         let mut output = parse_error(topic.as_deref(), message);
         output.text = format!("hallpass: error: {message}\n");

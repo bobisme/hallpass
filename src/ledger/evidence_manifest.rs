@@ -50,16 +50,19 @@ pub struct ReconcileDifference {
     /// `digest`, `charge.<counter>`, `charges.count`, `target[<n>]`, `name[<n>]` or `targets.count`.
     pub field: String,
     /// The manifest value, or null when the manifest has none.
-    pub expected: Option<String>,
+    ///
+    /// The natural JSON type of the field: a number for `charge.<counter>`
+    /// and `targets.count`, a string for the others.
+    pub expected: Option<serde_json::Value>,
     /// The ledger value, or null when the ledger has none.
-    pub recorded: Option<String>,
+    pub recorded: Option<serde_json::Value>,
 }
 fn diff(
     out: &mut Vec<ReconcileDifference>,
     sequence: u64,
     field: String,
-    expected: Option<String>,
-    recorded: Option<String>,
+    expected: Option<serde_json::Value>,
+    recorded: Option<serde_json::Value>,
 ) {
     if expected != recorded {
         out.push(ReconcileDifference {
@@ -83,8 +86,8 @@ fn differences(
         &mut out,
         seq,
         "digest".into(),
-        Some(unit.digest.clone()),
-        Some(digest.to_string()),
+        Some(unit.digest.clone().into()),
+        Some(digest.to_string().into()),
     );
     let expected: BTreeMap<_, _> = unit
         .charges
@@ -98,8 +101,8 @@ fn differences(
             &mut out,
             seq,
             format!("charge.{counter}"),
-            expected.get(counter).map(u64::to_string),
-            actual.get(counter).map(u64::to_string),
+            expected.get(counter).map(|n| (*n).into()),
+            actual.get(counter).map(|n| (*n).into()),
         );
     }
     if let Some(targets) = unit
@@ -111,23 +114,23 @@ fn differences(
             &mut out,
             seq,
             "targets.count".into(),
-            Some(targets.len().to_string()),
-            Some(receipt.targets.len().to_string()),
+            Some(targets.len().into()),
+            Some(receipt.targets.len().into()),
         );
         for (i, (a, b)) in targets.iter().zip(&receipt.targets).enumerate() {
             diff(
                 &mut out,
                 seq,
                 format!("target[{}]", i + 1),
-                Some(a.target.clone()),
-                Some(b.target.clone()),
+                Some(a.target.clone().into()),
+                Some(b.target.clone().into()),
             );
             diff(
                 &mut out,
                 seq,
                 format!("name[{}]", i + 1),
-                a.name.clone(),
-                b.name.clone(),
+                a.name.clone().map(Into::into),
+                b.name.clone().map(Into::into),
             );
         }
     }

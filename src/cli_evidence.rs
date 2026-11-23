@@ -37,11 +37,7 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
             text,
             "  #{} {} {}  charges={} targets={}",
             row.seq,
-            hallpass::time::OffsetDateTime::parse(
-                &row.time,
-                &hallpass::time::format_description::well_known::Rfc3339
-            )
-            .map_or_else(|_| row.time.clone(), hallpass::stamp),
+            text_time(&row.time),
             row.digest,
             json!(row.charges),
             json!(row.targets)
@@ -61,6 +57,16 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
         json!(report),
         text,
     )
+}
+
+/// Text shows times to the whole second, as `ledger` does; JSON keeps the
+/// exact recorded instant. A value that is not RFC 3339 is shown as recorded.
+fn text_time(recorded: &str) -> String {
+    hallpass::time::OffsetDateTime::parse(
+        recorded,
+        &hallpass::time::format_description::well_known::Rfc3339,
+    )
+    .map_or_else(|_| recorded.to_owned(), hallpass::stamp)
 }
 
 fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
@@ -88,7 +94,7 @@ fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
         "#{} target {} at {} {}{name}: {verdict}",
         row.seq,
         row.index,
-        row.time,
+        text_time(&row.time),
         safe(&row.recorded.target)
     )
 }
@@ -308,9 +314,10 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
             }
         );
         for d in &row.differences {
-            let show = |v: &Option<String>| {
-                v.as_deref()
-                    .map_or_else(|| "absent".into(), |v| safe(v).into_owned())
+            let show = |v: &Option<serde_json::Value>| match v {
+                None => "absent".to_owned(),
+                Some(serde_json::Value::String(v)) => safe(v).into_owned(),
+                Some(other) => other.to_string(),
             };
             let _ = writeln!(
                 text,

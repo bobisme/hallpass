@@ -489,10 +489,16 @@ JSON error contains `seq` and `ledger`. A `ledger-append-uncertain` error
 includes the ledger path and `recording = "uncertain"`. Both exit 1. Inspect
 the ledger and reconcile before retrying. `lock-timeout` and
 `witness-unavailable` have `recording = "not-recorded"`: the attempt appended
-no entry to the ledger. The exception is an `adopt` whose adoption was appended before the
-witness update failed: its `witness-unavailable` error has a null
-`recording`, and the adoption counts. Every other error has a null
-`recording`.
+no entry to the ledger. So does every `usage` error, whether clap or hallpass
+found it, because arguments are checked before any write. So does every error
+of a command that never appends to a ledger (for example `ledger`, `check`,
+`receipt`, `reconcile`, `capacity`): an `io` error from `ledger` has
+`recording = "not-recorded"`. The exception is an `adopt` whose adoption was
+appended before the witness update failed: its `witness-unavailable` error has a
+null `recording`, and the adoption counts. `recording` is null only for an
+error of a command that can append (`spend`, `adopt`, `status`) that is not a
+usage error and not named above, such as an `io` error: hallpass cannot say
+whether the write happened.
 
 ## Budget questions
 
@@ -689,7 +695,10 @@ workflow. The global format option works on either side of the command,
 before the argument separator `--`. An explicit format overrides the `HALLPASS_FORMAT` environment variable
 (`text`, `pretty` or `json`); an invalid value is a usage error that names
 it. The unprefixed `FORMAT` variable is ignored, with a warning when
-`HALLPASS_FORMAT` is not set.
+`HALLPASS_FORMAT` is not set. `--json` means `--format json`. Repeating
+it, or giving it with `--format json`, is fine. `--json` together with
+`--format text` or `--format pretty` is a usage error that names both flags;
+its JSON object is printed because `--json` was given.
 With neither set, terminals select pretty and pipes select text. Operational
 commands use their established plain output in both modes. The help command
 uses a compact listing in text and the expanded listing in pretty.
@@ -788,7 +797,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `ledger-corrupt`, else null; `last_line` is true when that line is the last
   in the file, so the damage may be a final line cut short, false when it is
   earlier, and null for other errors; `recording`, `seq` and `ledger` as in "Fail-closed cases", null when
-  they do not apply, and absent from parser failures), `problems` (list of
+  they do not apply; parser failures carry them too, with `recording`
+  `not-recorded`), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
 - **check**: `digest`, `pass_id`, `require_target`, `problems` (empty),
@@ -871,7 +881,9 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
   result, candidate_count, sequences, truncated, differences}` in manifest
   order; each entry of `differences` is `{sequence, field, expected,
-  recorded}`).
+  recorded}`, where `expected` and `recorded` are numbers for
+  `charge.<counter>` and `targets.count`, strings for the other fields, and
+  null when that side has none).
 - **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash}`, or null
   when `result` is `empty`), `local_corroboration`, `witness` `{relation,
   witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
@@ -915,7 +927,8 @@ gives the time exactly as the ledger line records it, in UTC with its full
 fractional seconds when a real clock wrote it (for example
 `2026-11-23T16:36:15.36549262Z`), because the ledger is evidence and
 truncating a time loses the order of debits within a second. Text output may
-print whole seconds. The whole-second rule above is about window times only.
+print whole seconds, in every one of those commands (`audit-receipts` text
+included). The whole-second rule above is about window times only.
 
 ### Refusal codes
 

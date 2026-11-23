@@ -146,8 +146,8 @@ fn reconcile_names_exactly_the_field_that_differs() {
             "charge amount",
             "charge.bytes",
             Box::new(|u| u["charges"][0]["n"] = json!(5)),
-            json!("5"),
-            json!("4"),
+            json!(5),
+            json!(4),
         ),
         (
             "extra charge",
@@ -158,7 +158,7 @@ fn reconcile_names_exactly_the_field_that_differs() {
                     .expect("a")
                     .push(json!({"counter": "extra", "n": 2}));
             }),
-            json!("2"),
+            json!(2),
             Value::Null,
         ),
         (
