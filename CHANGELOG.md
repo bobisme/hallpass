@@ -100,6 +100,40 @@ Changes since commit d70c09f.
   `SpendRequest::on_lock_wait`, `rfc3339`, `span_left`, `span_until` and
   `whole_seconds_up`.
 
+- **`diff --containment` judges the whole pass.** `result` and
+  `containment.result` are now an overall verdict. A revision that keeps the
+  endpoints but loosens anything else returns the new value `widened`, with
+  exit 2, instead of `contained` with exit 0. Loosening means a later window
+  end, an earlier window start, a higher ceiling, a new ceiling on a counter
+  that is not required, a dropped required counter, `require_target_v1`
+  turned off, an un-revoke, or a changed owner or operator.
+  `containment.endpoint_result` keeps the old endpoint-only verdict. A CI
+  gate keyed on the exit code used to accept such revisions.
+- **Audits need a verified signature.** `audit-receipts` and
+  `audit-charges` return `incomplete` (exit 2) when any revision the ledger
+  used has no signature record in the archive. This includes archives
+  written only with `archive` or by older versions: run
+  `verify-approval --archive` for each signed revision. The `legacy-spend`
+  gap code is gone; plain spend lines count under `targets-unrecorded`.
+- **Pass files.** A pass whose last line does not end with a newline is
+  `invalid-pass`; add the newline. Text fields (`name`, `owner`,
+  `reference`, `operator`, `revoked_reason`) refuse Unicode line or
+  paragraph separators and bidirectional controls, as `--note` does. The
+  first read of a pass within 250 ms of a write to it waits up to 250 ms
+  (2.25 s on file systems that keep whole seconds).
+- **New pass key and ledger line.** An older hallpass refuses a pass with
+  `overlap_acknowledged` (unknown key), and reports `ledger-corrupt` on a
+  ledger with a `reconcile-references` line. Both fail closed.
+- **JSON values:** `reconcile` `differences[].expected` and `recorded` are
+  numbers for `charge.<counter>` and `targets.count` (they were strings).
+  `error.recording` is `not-recorded`, not null, for every `usage` error and
+  for every error of a command that never appends to a ledger.
+- **Usage:** `--json` together with a non-JSON `--format` is a usage error
+  (exit 1); it used to output JSON silently.
+- **Messages:** `ledger-elsewhere` is several short lines in text, with each
+  path once; JSON `error.message` holds the same lines joined. Scripts that
+  matched the old wording break.
+
 ### Added
 
 - A warning when a debit checks no destination: an allowed or previewed
@@ -151,6 +185,39 @@ Changes since commit d70c09f.
   `--all`.
 - docs/INTEGRATING.md "Cost per call and batching": when one spend per unit
   is fine, when to batch, and when to split an engagement across passes.
+
+- `diff --containment` reports `containment.loosenings` and prints
+  `Loosened:` and `Overall verdict:` lines.
+- Signature provenance in the archive. `verify-approval --archive` keeps
+  `DIGEST.sig` and a `DIGEST.approval` record (principal, namespace, trust
+  file and signature digests) beside the bytes, after reading the signature
+  and trust file before and after verification. `archive` never adds or
+  upgrades a record. Both audits gain `revisions` (each digest used, its
+  sequences and provenance) and an `approval-unverified` gap. Gaps gain
+  `digests`, endpoint details gain `provenance`, and `archive` and
+  `verify-approval` replies gain `provenance` and `approval`.
+  docs/EVIDENCE.md says what an audit proves and gives the
+  `ssh-keygen -Y verify` command for an independent check.
+- `hallpass reconcile-references FILE --adoption SEQ --references LIST
+  --reason TEXT` records the caller references that may be in lines a lossy
+  adoption lost. Guarded spends then refuse those references as
+  `duplicate-reference` (with `reference_evidence.reconciled_at`) and accept
+  new ones. Before this step they stay `reference-inconclusive`, and a later
+  lossy adoption needs its own reconciliation. `ledger` JSON gains
+  `reference_reconciliations`, `unreconciled_adoption` and
+  `adoptions[].may_have_lost_references`; `receipt` and `reconcile` rows gain
+  `reconciled_at`. The reference caller has a matching `reconcile-references`
+  subcommand, and `handoff` reports `reconciled` verdicts.
+- `overlap_acknowledged = ["LABEL"]` on a destination with `names`
+  acknowledges its overlap with one nameless destination. `status` then shows
+  a one-line note instead of the warning, and `check`, `lint` and `diff`
+  still show it in full. It never changes a decision. An acknowledgement
+  that matches no overlap gives the warning
+  `overlap-acknowledgement-unmatched`.
+- `hallpass retrieve DIR DIGEST --output FILE` writes the file with mode
+  0600, whatever the umask, and refuses an existing file or link.
+- docs/minimal-caller/minimal_caller.py, a short integrator (preflight,
+  spend before the work, strict reply check) that a test runs.
 
 ### Changed
 
@@ -216,3 +283,30 @@ Changes since commit d70c09f.
 - docs/spec.md and docs/INTEGRATING.md are reorganized, and the spec's
   lists of refusal codes, error codes, commands and JSON fields are
   current.
+- A pass that changed while hallpass read it is refused as `invalid-pass`,
+  so a save in progress (truncate, then write in pieces) can no longer be
+  read as a valid but wider prefix. A file modified in the last 250 ms is
+  read again once 250 ms have passed and must be unchanged. In the
+  evaluator's scenario, unnamed spends allowed fell from 72 of 278 to 0. A
+  writer that pauses longer than 250 ms in the middle of a save is still a
+  risk; pinning the digest closes it. The docs now say to replace a pass by
+  writing `pass.toml.new`, running `chmod 600` and moving it over the old
+  file, and the walkthrough does so.
+- With no `--lock-timeout-ms`, waiting for the writer lock uses the
+  blocking lock again, and the wait notice comes from a timer thread.
+  Polling every 20 ms had made waits unfair: with 8 writers at 100,000
+  lines, p99 falls from 3.7 s to 0.6 s at the same throughput.
+  docs/DESIGN.md gives the numbers and advice on choosing
+  `--lock-timeout-ms`.
+- Recovery messages. Each cause of `witness-unavailable` gets only its own
+  next step. The no-witness warning says correctly which spends record a
+  witness. `adopt --token` says whether the token is malformed or stale,
+  and to run `--preview` again.
+- A negative or malformed `--n` says "N must be a positive integer".
+  `capacity` refusals no longer say "Nothing was recorded". `audit-receipts`
+  text times are whole seconds. The `ledger` text's last column is
+  `details`, with labelled `receipt:` and `note:` parts.
+- docs/WALKTHROUGH.md says which build it needs and how to run it live with
+  a release binary. The docs show `--record-target` wherever audit evidence
+  is wanted. `spend --to` still records no target by default, because a
+  conforming wrapper refuses a reply that has a receipt it did not request.
