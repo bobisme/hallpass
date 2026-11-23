@@ -65,6 +65,15 @@ Changes since commit d70c09f.
   (exit 1) instead of an `archive-missing` gap (exit 2).
 - **Library:** `Error::Insecure` has a new `advice` field, and
   `AddressError` has a new `NonStandardIpv4` variant.
+- **`ledger-elsewhere`: a second pass file for a live ledger.** A pass
+  file with no ledger beside it, whose id has an intact ledger where the
+  witness last saw it (an amended approval saved as a second file, or a
+  pass moved without its ledger), is refused as `ledger-elsewhere` instead
+  of `ledger-missing`. The message names the live ledger and its pass file
+  and says to replace that file's content with the revision. `adopt` and
+  `adopt --preview` refuse, because adopting would fork the history. A
+  last-seen ledger that cannot be read or verified, or disagrees with the
+  witness, is still `ledger-missing`. The exit code (1) is unchanged.
 - **`ledger --json` times keep their fractional seconds.** Entry, debit and
   adoption `time` values are now exactly as recorded (for example
   `2026-11-23T16:36:15.36549262Z`), as `receipt` and `audit-receipts`
@@ -132,6 +141,10 @@ Changes since commit d70c09f.
   `untrusted-key`, `wrong-principal` or `unknown`) and `next_step`. The
   result and exit code are unchanged.
 - A `ledger-corrupt` error has `error.last_line`.
+- `adopt --preview` and `adopt` warn when the adoption makes later
+  `--require-new-ref` spends `reference-inconclusive`. Library:
+  `Error::LedgerElsewhere`, `ElsewhereLedger` and
+  `makes_references_inconclusive()` on `AdoptPreview` and `Adoption`.
 - A relative `XDG_STATE_HOME`, which is ignored, gives a warning that names
   the directory used instead.
 - The reference caller's `handoff` takes `--ref-prefix`, `--since` and
