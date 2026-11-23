@@ -519,10 +519,6 @@ fn check(file: &Path) -> Output {
             let overlaps = hallpass::review::name_overlap_warnings(&loaded.pass);
             let mut warnings = hallpass::review::breadth_warnings(&breadth);
             warnings.extend(overlaps.iter().map(|w| w.message.clone()));
-            let mut overlap_text = String::new();
-            for w in &overlaps {
-                let _ = writeln!(overlap_text, "WARNING: {}", w.message);
-            }
             Output {
                 code: OK,
                 json: json!({
@@ -538,7 +534,7 @@ fn check(file: &Path) -> Output {
                     "name_restriction_overlaps": overlaps,
                 }),
                 text: format!(
-                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}{overlap_text}",
+                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}",
                     file.display(),
                     loaded.pass.id,
                     loaded.pass.destinations.len(),
@@ -945,9 +941,6 @@ fn status_with_clock(
     let overlaps = hallpass::review::name_overlap_warnings(pass);
     warnings.extend(overlaps.iter().map(|w| w.message.clone()));
     let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
-    for w in &overlaps {
-        let _ = writeln!(text, "WARNING: {}", w.message);
-    }
     let _ = writeln!(
         text,
         "Declared breadth: IPv4 {}, IPv6 {}.",

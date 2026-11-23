@@ -35,10 +35,12 @@ impl Case {
             .env("XDG_STATE_HOME", self.dir.path().join("state"))
             .output()
             .expect("run");
-        (
-            out.status.code().expect("exit"),
-            String::from_utf8(out.stdout).expect("utf8"),
-        )
+        // Text-mode warnings go to standard error, so return both streams.
+        let mut text = String::from_utf8(out.stdout).expect("utf8");
+        if !json {
+            text.push_str(&String::from_utf8(out.stderr).expect("utf8"));
+        }
+        (out.status.code().expect("exit"), text)
     }
 }
 
@@ -183,7 +185,7 @@ fn check_and_status_warn_when_another_destination_defeats_names() {
         let (code, text) = case.run(false, &[command, &overlap]);
         assert_eq!(code, 0, "{text}");
         assert!(
-            text.contains("WARNING: destination `app` restricts names"),
+            text.contains("hallpass: warning: destination `app` restricts names"),
             "{text}"
         );
         assert!(
