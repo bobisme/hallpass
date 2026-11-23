@@ -284,3 +284,29 @@
 1795399009674829	hallpass-dev	itc:AQ		item.create	bn-1if	{"description":"In an independent evaluation on 2026-11-22, a pass had two destinations labeled \"a\". The second also had `network = \"10.0.0.0/7\"`. check reported only the /7 breadth problem. The duplicate label appeared only after the network was fixed. check promises to list every problem at once.\n\nCheck label uniqueness over the raw destination list, separately from whether each destination is otherwise valid.\n\nAcceptance: a check test on that fixture lists both problems.","kind":"bug","labels":["cli"],"size":"xs","title":"Report duplicate labels even when a destination has other errors"}	blake3:9q6U6KGSU3xivdXqi2JS_oQrtW4cY9L9SqBhqr5H-Oo
 1795399009821001	hallpass-dev	itc:AQ		item.create	bn-3he	{"description":"An independent evaluation on 2026-11-22 found several small inconsistencies. Each is cheap to fix:\n\n- witness-unavailable errors carry `recording: null`, while lock-timeout says `\"not-recorded\"`. Use the same value whenever the outcome is known.\n- `diff --containment --at now` fails with \"the 'year' component could not be parsed\". Accept `now` as other commands do, or say that it is not accepted.\n- init errors end with \"Nothing was permitted.\", which makes no sense for init. Drop the suffix for commands that never permit anything.\n- receipt text shows nanosecond timestamps, while ledger shows whole seconds. Use one style in text output.\n\nAcceptance: a CLI test for each item.","kind":"task","labels":["cli"],"size":"s","title":"Smooth small CLI inconsistencies found in evaluation"}	blake3:dUY_UYwPEgp2ZDkfliRIVcZixzPpeb_GPyYZQycObiU
 1795399009852082	hallpass-dev	itc:AQ		item.comment	bn-3hs	{"body":"An independent evaluation on 2026-11-22 reproduced this: after one spend, status reports a matching witness, and checkpoint --format json still warns \"The witness corroborates a prefix and may lag the exported tail.\" The evaluation also found a related case. checkpoint on a valid pass with no ledger yet returns {\"error\":{\"code\":\"io\",\"message\":\"c.toml.ledger: no such file; check the path\"}}. It should report an empty history (seq 0), or a clear \"nothing recorded yet\" result, instead of an I/O error. Cover that case together with the matching, lagging, absent and contradictory cases."}	blake3:LGBrZXjfJxpmWDVLWMxpdh4RVfO6zY7wy20IOFUEppQ
+1795402874851740	hallpass-dev	itc:AQ		item.move	bn-1gc	{"state":"doing"}	blake3:ilTh33OKxjViQ53eFGt0gyNoMgo7JSHQp2koDHeR2jI
+1795402874856803	hallpass-dev	itc:AQ		item.assign	bn-1gc	{"action":"assign","agent":"hallpass-dev"}	blake3:Nt7fZWO-gkYGsIVNoqEoInEX9kz6TzxHPycP95z5i6M
+1795402874868327	hallpass-dev	itc:AQ		item.move	bn-3nd	{"state":"doing"}	blake3:2Sa4Q63WFkvxYmMJFLC6YUyWdskVZOazB27tPyheosk
+1795402874872630	hallpass-dev	itc:AQ		item.assign	bn-3nd	{"action":"assign","agent":"hallpass-dev"}	blake3:E-6vU0Dh-fPUVeB4oSDTWlCIyfLOuz4mhiRGet0BE98
+1795402874883139	hallpass-dev	itc:AQ		item.move	bn-yum	{"state":"doing"}	blake3:PRO0FzrCrPYvYbegcM1TD7Q8TgPNGNuqkCxWrc1rYjc
+1795402874886259	hallpass-dev	itc:AQ		item.assign	bn-yum	{"action":"assign","agent":"hallpass-dev"}	blake3:WnD4RKPgJDnCWx1m8Q9_XrOTNsarE8OQgz0VWtBn9lI
+1795402874896714	hallpass-dev	itc:AQ		item.move	bn-2ca	{"state":"doing"}	blake3:mKRXo3NU3MSZjC32-5ySOE_q4G_hmjIGjKRwqn4D738
+1795402874900397	hallpass-dev	itc:AQ		item.assign	bn-2ca	{"action":"assign","agent":"hallpass-dev"}	blake3:nHcNA_qjx-SSiWVmArT8C0wt-kOq1IzOrmGftsAncqU
+1795402874909814	hallpass-dev	itc:AQ		item.move	bn-1j6	{"state":"doing"}	blake3:H9cSpw47K_hnPN8ClAwITiUFhaRHkw2lM7dOqEYd9iE
+1795402874912979	hallpass-dev	itc:AQ		item.assign	bn-1j6	{"action":"assign","agent":"hallpass-dev"}	blake3:F6EDV4exJaMm8tu66QyBILxVukPt3DHMkwmSOsX6rwY
+1795402874923683	hallpass-dev	itc:AQ		item.move	bn-207	{"state":"doing"}	blake3:VXviL9uAFbwkWGb_p7axfd9OJ8a-ws0fzwP6wbdFQQI
+1795402874928170	hallpass-dev	itc:AQ		item.assign	bn-207	{"action":"assign","agent":"hallpass-dev"}	blake3:FQ0rVJZjgqCHVedIPwKNAV7TDbkYDQYjol6btI31C1U
+1795402874938948	hallpass-dev	itc:AQ		item.move	bn-30s	{"state":"doing"}	blake3:hGfnUiCEl1PKss4aN_ccHUdqcc1KquSyI_zLjWWh1fY
+1795402874942307	hallpass-dev	itc:AQ		item.assign	bn-30s	{"action":"assign","agent":"hallpass-dev"}	blake3:Xq4xtgfSGhFC6OCg_AmRJeTQad3_zAUnyrQb4_o58Q0
+1795402874952887	hallpass-dev	itc:AQ		item.move	bn-rhc	{"state":"doing"}	blake3:SITBYfUbxLh3IBURVotK1ssBLMjJ_hRKZnJ3guJlvUo
+1795402874956460	hallpass-dev	itc:AQ		item.assign	bn-rhc	{"action":"assign","agent":"hallpass-dev"}	blake3:WCg0Gsk18MECrHjHj88TfRVOJ-nyaZRL4x1G9UnaZbE
+1795402874966823	hallpass-dev	itc:AQ		item.move	bn-3fd	{"state":"doing"}	blake3:OpymeiWTtEmd-DrDjvB5-55HYIS-ukwv7LUPcs1yvtQ
+1795402874969775	hallpass-dev	itc:AQ		item.assign	bn-3fd	{"action":"assign","agent":"hallpass-dev"}	blake3:taGVSm3dar6pO1uzqYCb3nSrQpghHNgKCsLkd8Wk3lw
+1795402874979777	hallpass-dev	itc:AQ		item.move	bn-1if	{"state":"doing"}	blake3:KPnGvEWIYNeepTQvPGiiPygFO8cJ9zvjhdN7458UdaI
+1795402874983353	hallpass-dev	itc:AQ		item.assign	bn-1if	{"action":"assign","agent":"hallpass-dev"}	blake3:lKtZveBSmVJ-JvFWrFKW1zrh1oIWIPY9d2cDsiEP2t0
+1795402874994140	hallpass-dev	itc:AQ		item.move	bn-3he	{"state":"doing"}	blake3:-hnPhSDF0dByEzq2orzG8HbVZElY93ti8XIYr1pJGfM
+1795402874998259	hallpass-dev	itc:AQ		item.assign	bn-3he	{"action":"assign","agent":"hallpass-dev"}	blake3:kkOEAJdGZ0a6NchOg9t682dqFvZ1-f7lSW8ONYhhMb8
+1795402875009613	hallpass-dev	itc:AQ		item.move	bn-3hs	{"state":"doing"}	blake3:muN5ZoJOz3UepWR-9xrJ7qxtR--TFKhRuQpquZjx1dA
+1795402875013200	hallpass-dev	itc:AQ		item.assign	bn-3hs	{"action":"assign","agent":"hallpass-dev"}	blake3:PnA4Rnw8jGYPeBx4mYyKd0e8F01AKxhn8JAbWccBSJo
+1795402875024615	hallpass-dev	itc:AQ		item.move	bn-2n0	{"state":"doing"}	blake3:dSmoGvpOUi0LHhPjLmdtsbbbnOerg5pzT0W150h1N_o
+1795402875027863	hallpass-dev	itc:AQ		item.assign	bn-2n0	{"action":"assign","agent":"hallpass-dev"}	blake3:rTreOFOvSX4C2fL0mp-gCO-Ko5UvVLpgxBAL28xI8Wk

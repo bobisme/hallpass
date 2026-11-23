@@ -148,7 +148,7 @@ mod tests {
         let pass = Pass::parse(&filled).expect("valid");
         assert_eq!(pass.ceilings.get("calls"), Some(&6));
         assert!(!pass.require_target);
-        assert!(pass.required_counters.is_empty());
+        assert_eq!(pass.required_counters, Vec::<String>::new());
 
         let metered = filled
             .replace("# require_target_v1 =", "require_target_v1 =")
