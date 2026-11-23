@@ -676,7 +676,17 @@ point) go to standard error as
 the whole chain, compares it with the witness, and lists each entry
 (sequence number, time, counter, amount, the pass digest it was made
 under, note) and each adoption (with what it carried and its reason), then
-the total per counter. `--counter NAME` shows one counter. A pass without a ledger says
+the total per counter. `--counter NAME` shows one counter.
+`--tail N` shows only the last N entries and `--since SEQ` only entries with
+sequence number >= SEQ. Both are applied to the output only: the whole chain
+is verified and compared with the witness first (a damaged earlier line still
+fails), and the totals and balances cover the whole ledger. Given together,
+they select the intersection: first entries with seq >= SEQ, then the last N
+of those. Both apply after `--counter` (adoptions always count as entries).
+`--tail 0` shows no entries but still verifies and prints the totals; a
+`--since` beyond the last entry shows none. A slice is marked: text output
+has a line `Showing entries A to B of T in the ledger (...)`, and JSON has
+`shown`. A pass without a ledger says
 so and exits 0. In text output every operator-supplied string (notes, and
 pass text in `status`) is shown with control characters, line separators
 and bidirectional controls escaped as `\u{...}` and a backslash as `\\`,
@@ -754,7 +764,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **digest**: `digest`, `pass_id`.
 - **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
   pass now), `counter` (the `--counter` filter or null), `verified` (always
-  `true` on success: a chain that does not verify is an error), `entries`
+  `true` on success: a chain that does not verify is an error), `shown`
+  (null without `--tail` or `--since`, else `{from, to, of}`: the first and
+  last sequence number shown, null when none is, and `of`, the number of
+  entries, adoptions included, in the whole ledger), `entries`
   (list of `{seq, time, counter, n, digest, note}` for a scalar spend, or
   `{seq, time, event, version, charges, digest, note, receipt}` with
   `event` `debit` for a versioned debit; `digest` is the pass

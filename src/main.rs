@@ -147,6 +147,12 @@ enum Command {
         /// Show only this counter.
         #[arg(long, value_name = "NAME")]
         counter: Option<String>,
+        /// Show only the last N entries (after --counter and --since). The whole chain is still verified.
+        #[arg(long, value_name = "N")]
+        tail: Option<usize>,
+        /// Show only entries with sequence number >= SEQ (before --tail). The whole chain is still verified.
+        #[arg(long, value_name = "SEQ")]
+        since: Option<u64>,
     },
     /// Retain the exact validated pass bytes in a private archive directory.
     Archive {
@@ -1299,14 +1305,105 @@ fn short_digest(digest: &Digest) -> String {
 /// Counter name, amount spent, and the pass's total for it.
 type Total<'a> = (&'a str, u64, Option<u64>);
 
+/// What `--tail` and `--since` left of the ledger.
+struct Slice {
+    tail: Option<usize>,
+    since: Option<u64>,
+    from: Option<u64>,
+    to: Option<u64>,
+    of: usize,
+}
+
+impl Slice {
+    fn json(&self) -> Value {
+        json!({"from": self.from, "to": self.to, "of": self.of})
+    }
+
+    fn text(&self) -> String {
+        let mut by = Vec::new();
+        if let Some(since) = self.since {
+            by.push(format!("--since {since}"));
+        }
+        if let Some(tail) = self.tail {
+            by.push(format!("--tail {tail}"));
+        }
+        let which = match (self.from, self.to) {
+            (Some(from), Some(to)) => format!("entries {from} to {to}"),
+            _ => "no entries".to_owned(),
+        };
+        format!(
+            "Showing {which} of {} in the ledger ({}); totals cover the whole ledger.",
+            self.of,
+            by.join(", ")
+        )
+    }
+}
+
+/// The ledger events to print, after `--counter`, `--since` and `--tail`.
+struct Selected<'a> {
+    entries: Vec<&'a hallpass::LedgerEntry>,
+    debits: Vec<&'a hallpass::LedgerDebit>,
+    adoptions: Vec<&'a hallpass::Adoption>,
+    slice: Option<Slice>,
+}
+
+fn select_rows<'a>(
+    view: &'a hallpass::LedgerView,
+    counter: Option<&str>,
+    tail: Option<usize>,
+    since: Option<u64>,
+) -> Selected<'a> {
+    let wanted = |name: &str| counter.is_none_or(|c| c == name);
+    let mut entries: Vec<&hallpass::LedgerEntry> =
+        view.entries.iter().filter(|e| wanted(&e.counter)).collect();
+    let mut debits: Vec<&hallpass::LedgerDebit> = view
+        .debits
+        .iter()
+        .filter(|e| e.charges.iter().any(|charge| wanted(&charge.counter)))
+        .collect();
+    let mut adoptions: Vec<&hallpass::Adoption> = view.adoptions.iter().collect();
+    let slice = if tail.is_some() || since.is_some() {
+        let mut seqs: Vec<u64> = entries
+            .iter()
+            .map(|e| e.seq)
+            .chain(debits.iter().map(|e| e.seq))
+            .chain(adoptions.iter().map(|a| a.seq))
+            .filter(|seq| since.is_none_or(|s| *seq >= s))
+            .collect();
+        seqs.sort_unstable();
+        if let Some(n) = tail {
+            seqs.drain(..seqs.len().saturating_sub(n));
+        }
+        let keep: std::collections::HashSet<u64> = seqs.iter().copied().collect();
+        entries.retain(|e| keep.contains(&e.seq));
+        debits.retain(|e| keep.contains(&e.seq));
+        adoptions.retain(|a| keep.contains(&a.seq));
+        Some(Slice {
+            tail,
+            since,
+            from: seqs.first().copied(),
+            to: seqs.last().copied(),
+            of: view.entries.len() + view.debits.len() + view.adoptions.len(),
+        })
+    } else {
+        None
+    };
+    Selected {
+        entries,
+        debits,
+        adoptions,
+        slice,
+    }
+}
+
 fn ledger_text(
     loaded: &LoadedPass,
     view: &hallpass::LedgerView,
-    entries: &[&hallpass::LedgerEntry],
-    debits: &[&hallpass::LedgerDebit],
+    selected: &Selected<'_>,
     totals: &[Total<'_>],
     counter: Option<&str>,
 ) -> String {
+    let (entries, debits, adoptions) = (&selected.entries, &selected.debits, &selected.adoptions);
     let pass = &loaded.pass;
     let mut text = String::new();
     let ledger_shown = safe(&view.path.display().to_string()).into_owned();
@@ -1314,6 +1411,9 @@ fn ledger_text(
         let _ = writeln!(text, "Ledger of pass {} ({ledger_shown})", pass.id);
         if let Some(c) = counter {
             let _ = writeln!(text, "Only counter {c} (adoptions are always shown).");
+        }
+        if let Some(slice) = &selected.slice {
+            let _ = writeln!(text, "{}", slice.text());
         }
         let mut rows: Vec<(u64, String)> = entries
             .iter()
@@ -1358,7 +1458,7 @@ fn ledger_text(
                 ),
             )
         }));
-        rows.extend(view.adoptions.iter().map(|a| {
+        rows.extend(adoptions.iter().map(|a| {
             (
                 a.seq,
                 format!(
@@ -1490,7 +1590,7 @@ fn spend_events_json(
     events.into_iter().map(|(_, entry)| entry).collect()
 }
 
-fn ledger(file: &Path, counter: Option<&str>) -> Output {
+fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option<u64>) -> Output {
     if let Some(name) = counter
         && !hallpass::is_counter_name(name)
     {
@@ -1513,13 +1613,7 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
     };
     let pass = &loaded.pass;
     let wanted = |name: &str| counter.is_none_or(|c| c == name);
-    let entries: Vec<&hallpass::LedgerEntry> =
-        view.entries.iter().filter(|e| wanted(&e.counter)).collect();
-    let debits: Vec<&hallpass::LedgerDebit> = view
-        .debits
-        .iter()
-        .filter(|e| e.charges.iter().any(|charge| wanted(&charge.counter)))
-        .collect();
+    let selected = select_rows(&view, counter, tail, since);
     let mut names: Vec<&str> = pass
         .ceilings
         .keys()
@@ -1537,7 +1631,7 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
         .map(|n| (*n, view.tally.spent(n), pass.ceilings.get(*n).copied()))
         .collect();
 
-    let text = ledger_text(&loaded, &view, &entries, &debits, &totals, counter);
+    let text = ledger_text(&loaded, &view, &selected, &totals, counter);
 
     Output {
         code: OK,
@@ -1550,11 +1644,12 @@ fn ledger(file: &Path, counter: Option<&str>) -> Output {
             "pass_id": pass.id,
             "digest": loaded.digest.to_string(),
             "counter": counter,
+            "shown": selected.slice.as_ref().map(Slice::json),
             "verified": true,
             "witness": view.witness.as_str(),
             "moved_from": view.moved_from,
-            "entries": spend_events_json(&entries, &debits),
-            "adoptions": view.adoptions.iter().map(|a| json!({
+            "entries": spend_events_json(&selected.entries, &selected.debits),
+            "adoptions": selected.adoptions.iter().map(|a| json!({
                 "seq": a.seq,
                 "time": stamp(a.time),
                 "reason": a.reason,
@@ -1844,7 +1939,12 @@ fn run(cli: &Cli, format: Format) -> Output {
             &clock,
         ),
         Command::Digest { file } => digest(file),
-        Command::Ledger { file, counter } => ledger(file, counter.as_deref()),
+        Command::Ledger {
+            file,
+            counter,
+            tail,
+            since,
+        } => ledger(file, counter.as_deref(), *tail, *since),
         Command::Archive { file, directory } => archive(file, directory),
         Command::Retrieve { directory, digest } => retrieve(directory, digest),
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),

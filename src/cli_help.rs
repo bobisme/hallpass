@@ -76,8 +76,11 @@ fn guide(name: &str) -> Guide {
             "Read digest from the reviewed bytes and supply that exact value to permits --digest or spend --digest. A changed pass requires fresh review.",
         ),
         "ledger" => (
-            &["hallpass --format json ledger engagement.pass.toml --counter calls"],
-            "Use the pass path. Read the verified events, sequences, totals and witness status. Reconcile an uncertain spend with your run record before considering a retry.",
+            &[
+                "hallpass --format json ledger engagement.pass.toml --counter calls",
+                "hallpass --format json ledger engagement.pass.toml --tail 20",
+            ],
+            "Use the pass path. --tail N shows the last N entries and --since SEQ shows entries with seq >= SEQ; together they give the intersection (since first, then the last N of those), and both apply after --counter. The whole chain is verified first, a tampered earlier line still fails, and totals stay for the whole ledger. A slice sets shown to {from, to, of} (null when unsliced); --tail 0 and a --since past the end show no entries. Read the verified events, sequences, totals and witness status. Reconcile an uncertain spend with your run record before considering a retry.",
         ),
         "archive" => (
             &[
