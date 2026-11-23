@@ -465,7 +465,7 @@ fn an_interrupted_unit_is_reconciled_by_reference_and_never_repeated() {
         .output()
         .expect("spend by hand");
     assert_eq!(by_hand.status.code(), Some(0));
-    let handoff = shift.handoff("shift.jsonl");
+    let handoff = shift.handoff_with("shift.jsonl", &["--ref-prefix", "by-"]);
     assert!(line(&handoff, "by-hand").ends_with(
         "no record    debit seq 3  ATTENTION: no journal record; find the run record of this debit"
     ));
@@ -483,4 +483,104 @@ fn an_interrupted_unit_is_reconciled_by_reference_and_never_repeated() {
     for line in shown.lines() {
         assert!(printed.contains(&line), "{line:?} not in {printed:#?}");
     }
+}
+
+impl Shift {
+    /// A debit made straight with hallpass, not by the caller: no journal records it.
+    fn foreign_debit(&self, reference: &str) {
+        let home = self.dir.path().join("home");
+        let output = Command::new(BIN)
+            .args([
+                "--format",
+                "json",
+                "spend",
+                "--to",
+                TO,
+                "--caller-ref",
+                reference,
+            ])
+            .args([
+                "--charge",
+                "requests=1",
+                "--charge",
+                "bytes=1",
+                "--",
+                PASSFILE,
+            ])
+            .current_dir(self.dir.path())
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", home.join("state"))
+            .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
+            .output()
+            .expect("spend");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+    }
+
+    fn handoff_with(&self, journal: &str, extra: &[&str]) -> Run {
+        let mut args = vec!["handoff", journal, PASSFILE];
+        args.extend_from_slice(extra);
+        self.caller(&args, None)
+    }
+}
+
+#[test]
+fn two_callers_on_one_ledger_each_judge_only_their_own_units() {
+    let shift = Shift::new();
+    shift.pin("a.jsonl");
+    shift.pin("b.jsonl");
+    assert_eq!(shift.unit("a.jsonl", "a-1", 1, None).code, Some(0));
+    assert_eq!(shift.unit("b.jsonl", "b-1", 1, None).code, Some(0));
+    shift.foreign_debit("other-1");
+
+    let a = shift.handoff("a.jsonl");
+    assert_eq!(a.code, Some(0), "{}", a.stdout);
+    assert!(line(&a, "a-1").ends_with("ok: debited and sent"));
+    assert!(!a.stdout.contains("b-1") && !a.stdout.contains("other-1"));
+    assert!(
+        a.stdout.contains(
+            "2 other debits by other callers or without a reference, not judged; use --all"
+        )
+    );
+    assert!(a.stdout.ends_with("Nothing needs attention.\n"));
+
+    let b = shift.handoff("b.jsonl");
+    assert_eq!(b.code, Some(0), "{}", b.stdout);
+    assert!(!b.stdout.contains("a-1"));
+
+    let all = shift.handoff_with("a.jsonl", &["--all"]);
+    assert_eq!(all.code, Some(0), "{}", all.stdout);
+    assert!(line(&all, "b-1").ends_with("other: not judged"));
+    assert!(line(&all, "other-1").ends_with("other: not judged"));
+    assert!(
+        all.stdout
+            .contains("2 other debits by other callers or without a reference, not judged.")
+    );
+
+    // --since bounds the report to later debits; the journal's own units stay judged.
+    let since = shift.handoff_with("a.jsonl", &["--since", "3"]);
+    assert_eq!(since.code, Some(0), "{}", since.stdout);
+    assert!(since.stdout.contains("1 other debits"));
+    assert!(line(&since, "a-1").ends_with("ok: debited and sent"));
+}
+
+#[test]
+fn a_debit_with_this_callers_prefix_and_no_journal_record_needs_attention() {
+    let shift = Shift::new();
+    shift.pin("a.jsonl");
+    assert_eq!(shift.unit("a.jsonl", "shift-a-1", 1, None).code, Some(0));
+    shift.foreign_debit("shift-b-1");
+    shift.foreign_debit("shift-a-lost");
+
+    let plain = shift.handoff("a.jsonl");
+    assert_eq!(plain.code, Some(0), "{}", plain.stdout);
+
+    let owned = shift.handoff_with("a.jsonl", &["--ref-prefix", "shift-a-"]);
+    assert_eq!(owned.code, Some(2), "{}", owned.stdout);
+    assert!(line(&owned, "shift-a-lost").contains("ATTENTION: no journal record"));
+    assert!(!owned.stdout.contains("shift-b-1"));
+    assert!(owned.stdout.contains("1 other debits"));
+    assert!(owned.stdout.ends_with("1 need attention.\n"));
+
+    let empty = shift.handoff_with("a.jsonl", &["--ref-prefix", ""]);
+    assert_eq!(empty.code, Some(1));
 }

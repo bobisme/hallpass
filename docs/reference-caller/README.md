@@ -20,14 +20,14 @@ authority for what the caller did. Neither one can stand in for the other.
 caller.py pin     JOURNAL PASS ARCHIVE
 caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                   [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
-caller.py handoff JOURNAL PASS
+caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
 ```
 
 | Command | What it does | Exit |
 |---|---|---|
 | `pin` | Archives the reviewed pass with `hallpass archive` and journals its ID and digest. Later units pin this digest. | 0 pinned, 1 error |
 | `run` | Performs one unit: see below. | 0 sent, 2 refused, 1 unknown or usage error |
-| `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`, and lists ledger debits that the journal does not explain. | 0 nothing needs attention, 2 something does, 1 error |
+| `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
 
 Use the same `PASS` spelling for every command: the journal and the spend
 reply compare it as written.
@@ -67,7 +67,34 @@ did, what the ledger holds for that reference, and a verdict.
 | `not sent` or `unknown`: no `callback-start` | debit | attention: the debit stands and nothing was sent |
 | `unknown` | no debit | attention: nothing was debited or sent |
 | `refused CODE` | debit | attention: another run used this reference |
-| no record | debit | attention: the journal does not explain this debit |
+| no record | debit with your `--ref-prefix` | attention: the journal does not explain this debit |
+
+### A ledger that other callers share
+
+Several workers often spend from one pass, each with its own journal.
+`handoff` judges only the units in the journal it is given. It never gives a
+verdict on a debit that the journal does not mention, and it does not set the
+exit code for one. It prints one line instead, for example `333 other debits
+by other callers or without a reference, not judged; use --all to list them.`
+
+- `--ref-prefix PREFIX`: the references this caller owns (for example
+  `shift-17-`). A debit with that prefix and no journal record is a lost or
+  stray unit of this caller, so it is an `ATTENTION` row (`no record`) and
+  sets exit 2. Give every worker a prefix of its own and always pass it.
+  Without it, a debit that carries your reference but is missing from your
+  journal is not flagged. The prefix must not be empty.
+- `--since SEQ`: look only at ledger debits from sequence number `SEQ` on
+  (it uses `hallpass ledger --since`). It bounds the other-debit count and
+  the prefix check. Units in the journal are always judged, whatever their
+  sequence number.
+- `--all`: list the other debits, as `other: not judged` rows.
+
+## Cost
+
+Every `hallpass` call verifies the whole ledger, and this caller makes one
+spend per unit, so it is meant for units that are not very frequent. For
+many small units, spend once for a group of them, and when to split an
+engagement across passes, read [Cost per call and batching](../INTEGRATING.md#cost-per-call-and-batching).
 
 The caller never repeats a callback by itself, and `handoff` changes
 nothing. To do the work of an interrupted unit, decide by hand, then run a

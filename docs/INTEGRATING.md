@@ -14,7 +14,9 @@ New operators can start with the runnable [first-shift walkthrough](WALKTHROUGH.
 
 ## The one call
 
-Before each unit of work (one call, one request), ask and count in one step:
+Before each unit of work (one call, one request), ask and count in one step.
+Each call verifies the whole ledger: for many small units, see [Cost per call
+and batching](#cost-per-call-and-batching).
 
 ```text
 hallpass --format json spend --to ADDRESS:PORT/PROTOCOL [--name HOSTNAME] [--n N] [--duration SECONDS] [--digest DIGEST] [--note TEXT] -- PASS COUNTER
@@ -163,6 +165,34 @@ exit 0
 {"result": "ok", "counters": [{"name": "calls", "total": 2, "spent": 2, "remaining": 0}], "ledger": {"entries": 2, "witness": "matches"}}
 ```
 
+## Cost per call and batching
+
+Every call (`permits`, `status`, `spend`, a preview) verifies the whole ledger
+before it answers, so a call costs more as the ledger grows: about 1.2 ms per
+MB, plus about 0.7 ms to start the process. Spends on one pass also run one at
+a time, so more workers do not add throughput. The numbers are in
+[DESIGN.md, Cost per call](DESIGN.md#cost-per-call). Eight writers, for
+example, fell from about 2,400 spends a second on a small ledger to about 44
+a second at 42,000 lines.
+
+- **One spend per unit is fine** when units are not frequent (a few a second
+  at most) and the pass will hold fewer than about 10,000 lines for the
+  engagement: each call takes a few milliseconds. This is what the reference
+  caller does.
+- **Batch** when units are small and many, or when the ledger would pass about
+  100,000 lines or 50 MB. Spend once for a group: `--n 50`, or a larger
+  `--charge COUNTER=N` for the group, immediately before the first send of
+  the group. Size the groups so that the whole engagement stays below about
+  100,000 lines.
+- **The trade-off:** a spend reserves the budget before the work, and
+  hallpass never returns it. A group that stops early still counts its unsent
+  part, so batching can count more than was sent, never less. Keep groups
+  small enough that this overcount is acceptable against the ceiling.
+- **Split an engagement across passes** when one ledger would still pass
+  those limits after batching, or when separate workers need separate
+  budgets. Each pass has its own ledger and cost, and its own ceilings, so
+  the ceilings must add up to what the owner approved.
+
 ## Rules for a command-line caller
 
 - **Judge by `result`, then by the exit code; require both.** `--help` or
@@ -306,6 +336,12 @@ New integrations should use version 3 for complete request checking.
 For a complete caller that journals each unit, gates its callback with
 `inspect_reply`, and reconciles interrupted units by reference without
 repeating them, see the [reference caller](reference-caller/README.md).
+Its `handoff` judges only the units in its own journal, because several
+callers can share a ledger. It counts other debits without judging them.
+Give each caller its own reference prefix and pass it as `--ref-prefix`, and a
+debit with that prefix and no journal record is flagged (exit 2). See
+[a ledger that other callers
+share](reference-caller/README.md#a-ledger-that-other-callers-share).
 
 ## Charge all known costs at the first send
 

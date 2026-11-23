@@ -302,7 +302,7 @@ shift-1/unit-3: debit seq 2 verified, unit sent, completion recorded
 
 The handoff puts each caller reference beside the ledger. It runs
 `hallpass reconcile` with a manifest built from the journal's intents, and
-lists any ledger debit that the journal does not explain. It exits 0 when
+counts the other debits on the ledger without judging them. It exits 0 when
 nothing needs attention and 2 when something does.
 
 ```sh
@@ -371,8 +371,10 @@ by-hand        no record    debit seq 3  ATTENTION: no journal record; find the 
 - `unconfirmed`: `callback-start` is in the journal and `callback-done` is
   not. The unit may have run. Check the target's own records. The caller
   never repeats the callback by itself.
-- `no record`: the ledger has a debit that this journal does not explain.
-  Find the run record that made it.
+- `no record`: the ledger has a debit with a reference that this caller owns
+  (the `--ref-prefix` given to `handoff`) and this journal does not explain
+  it. Find the run record that made it. Debits by other callers on the same
+  ledger are only counted, not judged.
 
 `tests/reference_caller.rs` produces each of these lines by interrupting
 the caller. Run `handoff` after any interruption, before more units. For the

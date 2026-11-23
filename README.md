@@ -16,6 +16,8 @@ format: [docs/PASS-FORMAT.md](docs/PASS-FORMAT.md). Why it is built this
 way: [docs/DESIGN.md](docs/DESIGN.md). Calling hallpass from another tool:
 [docs/INTEGRATING.md](docs/INTEGRATING.md).
 A first shift, from written approval to handoff: [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md).
+Every call verifies the whole ledger, so for many small units read
+[Cost per call and batching](docs/INTEGRATING.md#cost-per-call-and-batching).
 
 ## Build
 

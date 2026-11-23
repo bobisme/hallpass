@@ -4,7 +4,7 @@
     caller.py pin     JOURNAL PASS ARCHIVE
     caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                       [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
-    caller.py handoff JOURNAL PASS
+    caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
 
 The hallpass ledger is the authority for debits. The journal is the authority
 for what this caller did. Python 3 standard library only. See README.md.
@@ -248,9 +248,17 @@ VERDICTS = {
 
 
 def handoff(a):
-    """Every unit of this pass by reference: the caller's record beside the ledger's."""
+    """Every unit in this journal by reference: the caller's record beside the ledger's.
+
+    Other debits on a shared ledger are not this caller's to judge. They are counted,
+    listed with --all, and never set the exit code, except a debit whose reference
+    starts with --ref-prefix: this caller owns that prefix, so one without a journal
+    record is an ATTENTION item. --since SEQ looks only at debits from SEQ on."""
+    if a.ref_prefix == "":
+        fail("--ref-prefix must not be empty: it would claim every reference")
     mine = units(read_journal(a.journal), a.pass_file)
-    code, out = hallpass("ledger", "--", a.pass_file)
+    since = ["--since", str(a.since)] if a.since else []
+    code, out = hallpass("ledger", *since, "--", a.pass_file)
     ledger = decode(out)
     if code != 0 or ledger.get("verified") is not True:
         fail(f"the ledger could not be verified: {message(ledger)}")
@@ -269,10 +277,16 @@ def handoff(a):
         rows = {row["caller_ref"]: (row["result"], row["sequences"]) for row in reply["rows"]}
 
     table = [(ref, caller_record(rs), *rows[ref]) for ref, rs in mine.items()]
+    others = []
     for entry in ledger["entries"]:
         ref = (entry.get("receipt") or {}).get("caller_ref")
-        if ref not in mine:
-            table.append((ref or "(no reference)", "no record", "match", [entry["seq"]]))
+        if ref in mine:
+            continue
+        if a.ref_prefix and ref and ref.startswith(a.ref_prefix):
+            table.append((ref, "no record", "match", [entry["seq"]]))
+        else:
+            others.append((ref or "(no reference)", "not this journal", f"debit seq {entry['seq']}",
+                           "other: not judged"))
     print(f"Handoff for {ledger['pass_id']} ({a.pass_file}) from {a.journal}")
     lines = []
     for ref, did, result, seqs in table:
@@ -281,12 +295,20 @@ def handoff(a):
         state = "refused" if did.startswith("refused ") else did
         verdict = VERDICTS.get((state, result), "ATTENTION: journal and ledger disagree; reconcile by hand")
         lines.append((ref, did, found, verdict))
+    attention = sum(line[3].startswith("ATTENTION") for line in lines)
+    if a.all:
+        lines += others
     widths = [max(len(line[i]) for line in lines) for i in range(3)] if lines else []
     for line in lines:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths)) + "  " + line[3])
     spent = ", ".join(f"{t['name']} {t['spent']} of {t['total']}" for t in ledger["totals"])
-    print(f"Ledger: {len(ledger['entries'])} debits, witness {ledger['witness']}. Spent: {spent}.")
-    attention = sum(line[3].startswith("ATTENTION") for line in lines)
+    shown = ledger.get("shown")
+    scope = f"{len(ledger['entries'])} debits" if not shown else (
+        f"{len(ledger['entries'])} debits from seq {a.since} (of {shown['of']})")
+    print(f"Ledger: {scope}, witness {ledger['witness']}. Spent: {spent}.")
+    if others:
+        print(f"{len(others)} other debits by other callers or without a reference, not judged"
+              + ("." if a.all else "; use --all to list them."))
     print(f"{attention} need attention." if attention else "Nothing needs attention.")
     return 2 if attention else 0
 
@@ -296,12 +318,17 @@ def main():
     commands = parser.add_subparsers(required=True)
     pin_command = commands.add_parser("pin", help="archive the reviewed pass and pin its digest")
     run_command = commands.add_parser("run", help="perform one unit of work")
-    handoff_command = commands.add_parser("handoff", help="report every unit by reference")
+    handoff_command = commands.add_parser("handoff", help="report every unit in the journal by reference")
     for command, action in [(pin_command, pin), (run_command, run), (handoff_command, handoff)]:
         command.set_defaults(action=action)
         command.add_argument("journal")
         command.add_argument("pass_file", metavar="pass")
     pin_command.add_argument("archive")
+    handoff_command.add_argument("--ref-prefix", default=None, metavar="PREFIX",
+                                 help="references this caller owns: a debit with it and no journal record needs attention")
+    handoff_command.add_argument("--since", type=int, default=0, metavar="SEQ",
+                                 help="look at ledger debits from this sequence number on")
+    handoff_command.add_argument("--all", action="store_true", help="list the debits that are not this journal's")
     run_command.add_argument("ref")
     run_command.add_argument("--to", action="append", required=True, type=target,
                              metavar="ADDR:PORT/PROTO[@NAME]", help="a literal endpoint; repeat for each")
