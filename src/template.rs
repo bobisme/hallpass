@@ -26,6 +26,14 @@ id = ""
 # A short human name.
 name = ""
 
+# If every debit must check a destination, uncomment the next line.
+# Without it, spend can charge a counter without a target.
+# require_target_v1 = true
+
+# If every debit must charge specific counters, list them here and set each
+# total under [ceilings]. A ceiling alone only limits that counter when charged.
+# required_counters_v1 = ["requests", "bytes"]
+
 [approval]
 # Who approved (the owner of the destinations), and where the written
 # approval is (for example "email of 2026-11-18 from the owner").
@@ -72,6 +80,7 @@ revoked = false
 # beside this file, across every process.
 # calls = 6
 # requests = 500
+# bytes = 1000000
 "#;
 
 /// Write the template to `path`, mode 0600. Never overwrites.
@@ -138,5 +147,16 @@ mod tests {
             .replace("# calls", "calls");
         let pass = Pass::parse(&filled).expect("valid");
         assert_eq!(pass.ceilings.get("calls"), Some(&6));
+        assert!(!pass.require_target);
+        assert!(pass.required_counters.is_empty());
+
+        let metered = filled
+            .replace("# require_target_v1 =", "require_target_v1 =")
+            .replace("# required_counters_v1 =", "required_counters_v1 =")
+            .replace("# requests =", "requests =")
+            .replace("# bytes =", "bytes =");
+        let pass = Pass::parse(&metered).expect("uncommented debit requirements validate");
+        assert!(pass.require_target);
+        assert_eq!(pass.required_counters, ["bytes", "requests"]);
     }
 }

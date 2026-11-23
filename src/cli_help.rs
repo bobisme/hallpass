@@ -35,7 +35,7 @@ fn guide(name: &str) -> Guide {
         ),
         "init" => (
             &["hallpass init engagement.pass.toml"],
-            "Choose a new file. Fill in the owner's written approval, then run hallpass check on that file. The private template grants nothing.",
+            "Choose a new file and fill in the owner's written approval. If each debit must include a destination or specific counters, uncomment require_target_v1 or required_counters_v1 in the template. Set the approved totals under [ceilings], then run hallpass check on the filled pass.",
         ),
         "check" => (
             &["hallpass --format json check engagement.pass.toml"],
