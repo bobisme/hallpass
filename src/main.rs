@@ -125,7 +125,7 @@ enum Command {
         /// Refuse a caller reference already present in the local ledger, or whose absence is inconclusive.
         #[arg(long, requires = "caller_ref")]
         require_new_ref: bool,
-        /// Retain the checked literal target, request name and matched destination label.
+        /// Retain the checked literal target, request name and matched destination label (the endpoint evidence that audit-receipts replays).
         #[arg(long, requires = "to")]
         record_target: bool,
         /// Assess what would fit without recording anything or reserving budget.
@@ -1929,13 +1929,29 @@ fn safe_message(text: &str) -> String {
         .collect()
 }
 
+/// `archive` stores bytes only. It never writes a signature record, so it
+/// cannot upgrade a digest's provenance, and a record already there stays.
 fn archive(file: &Path, directory: &Path) -> Output {
-    match hallpass::archive_pass(file, directory) {
-        Ok(digest) => Output {
-            code: 0,
-            text: format!("Archived: {digest}\n"),
-            json: json!({"command": "archive", "result": "ok", "digest": digest.to_string()}),
-        },
+    let archived = hallpass::archive_pass(file, directory).and_then(|digest| {
+        hallpass::archive_provenance(directory, digest).map(|provenance| (digest, provenance))
+    });
+    match archived {
+        Ok((digest, provenance)) => {
+            let how = provenance.approval().map_or_else(
+                || " without a signature record (verify-approval --archive records one)".to_owned(),
+                |approval| {
+                    format!(
+                        "; its verified signature record for principal {} is kept",
+                        safe(&format!("{:?}", approval.principal))
+                    )
+                },
+            );
+            Output {
+                code: 0,
+                text: format!("Archived: {digest}{how}\n"),
+                json: json!({"command": "archive", "result": "ok", "digest": digest.to_string(), "provenance": provenance.as_str(), "approval": provenance.approval()}),
+            }
+        }
         Err(e) => error_output("archive", Some(file), &e),
     }
 }

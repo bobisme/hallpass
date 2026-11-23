@@ -650,7 +650,9 @@ are `endpoints`, `names`, `live-window`, `target-on-every-debit` and
 `verify-approval` uses OpenSSH detached signatures under the fixed namespace
 `hallpass-approval-v1`. A verified result includes the expected principal,
 pass ID and digest of the exact bytes supplied to the verifier. The operator
-provisions the trust file and selects the principal. See the signing and
+provisions the trust file and selects the principal. With `--archive`, the
+verified bytes, the signature and a record of the verification are retained
+(see "Archives and evidence"). See the signing and
 digest-pinning workflow in the [integration guide](INTEGRATING.md#signing-and-verifying-an-approval).
 
 ### Case suites
@@ -701,9 +703,18 @@ or a link, a dangling link included) and removes a file it could not finish
 writing. Redirecting the output with `>` gives the file the shell's umask
 mode, 0664 under the common `umask 002`, which `diff` and `archive` refuse
 because the group could change it.
+`verify-approval --archive DIR` retains them too, after the owner's signature
+verified, and keeps the signature (`DIGEST.sig`) and a record of the
+verification (`DIGEST.approval`) beside them. Each archived digest therefore
+has a provenance: `signature-verified`, `unsigned` (archived without a
+signature record, as by `archive` or an older version) or `missing`. Archive
+files are created once and never replaced, so `archive` never upgrades or
+downgrades a digest; only `verify-approval --archive` adds a record.
 `receipt`, `audit-receipts`, `audit-charges`, `reconcile` and
 `compare-backups` read the ledger under shared locks and report historical
-evidence. None of these commands writes the ledger or the witness.
+evidence. None of these commands writes the ledger or the witness. Both
+audits report every revision the ledger used with its provenance, and are
+`complete` only when a verified signature approved each one.
 [EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
 
 ## Command line
@@ -760,8 +771,8 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
 | `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
-| `audit-receipts` | `complete` | `incomplete`, `mismatch` | unusable ledger or archive entry |
-| `audit-charges` | `complete` | `incomplete`, `mismatch`, `empty` | unusable ledger or archive entry |
+| `audit-receipts` | `complete`: and every revision used is signature-verified | `incomplete`, `mismatch` | unusable ledger, archive entry or signature record |
+| `audit-charges` | `complete`: and every revision used is signature-verified | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry or signature record |
 | `reconcile` | `match` | `discrepancy` | invalid manifest, pass or history |
 | `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass |
 | `checkpoint` | exported | `empty`: nothing recorded yet | invalid pass, ledger error (as `status`) |
@@ -903,9 +914,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   counter name to amount), `previous` (as in `ledger`, or null). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
   `totals`, `previous` and `token`.
-- **archive**: `digest`. **retrieve**: `digest` and `bytes` (the exact
-  pass text); with `--output FILE`, `digest`, `output` (the path), `mode`
-  (`0600`) and `length` (bytes written) instead of `bytes`.
+- **archive**: `digest`, `provenance` (`signature-verified` or
+  `unsigned`) and `approval` (the kept signature record `{principal,
+  namespace, allowed_signers, signature}`, or null). **retrieve**: `digest`
+  and `bytes` (the exact pass text); with `--output FILE`, `digest`, `output`
+  (the path), `mode` (`0600`) and `length` (bytes written) instead of `bytes`.
 - **receipt**, **audit-receipts**, **audit-charges**, **reconcile**,
   **compare-backups**: see [EVIDENCE.md](EVIDENCE.md). **reconcile** has
   `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
@@ -923,7 +936,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `foreign` or `mismatch`), `added` (lines after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
-  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `archive`.
+  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `archive`, `provenance`
+  (`signature-verified` when verified with `--archive`, else null) and
+  `approval` (the signature record now in the archive, as in `archive`, or
+  null; when an earlier, different record was kept, a warning says so).
 - **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,
   `new_digest`, `approval_id_changed`, `changes` (list of `{field, before,
   after, review_required}`; `before` and `after` are a JSON string, number
@@ -1005,6 +1021,7 @@ Crate `hallpass` (re-exports `time`):
 | `read_summary` | the tally and witness status without the entries |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |
+| `archive_provenance` (`Provenance`, `SignedApproval`), `archive_verified_signature` (`ArchivedSignature`), `APPROVAL_NAMESPACE`, `MAX_SIGNATURE_BYTES` | signature records beside archived bytes; recording one does not verify anything |
 | modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |
 | `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |

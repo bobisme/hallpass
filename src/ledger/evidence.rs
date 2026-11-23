@@ -5,7 +5,7 @@ pub use super::evidence_manifest::{
     reconcile,
 };
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 
@@ -14,8 +14,8 @@ use super::{
     exists, inspect_candidate, inspect_candidate_checkpoints, rfc3339, visit_view,
 };
 use crate::{
-    Decision, Digest, Error, HostName, LoadedPass, Pass, StateDir, Target, retrieve_pass,
-    time::Duration,
+    Decision, Digest, Error, HostName, LoadedPass, Pass, Provenance, SignedApproval, StateDir,
+    Target, archive_provenance, retrieve_pass, time::Duration,
 };
 use std::path::{Path, PathBuf};
 
@@ -131,6 +131,9 @@ pub struct AuditEndpoint {
     pub recorded: RecordedTarget,
     pub matched_label: Option<String>,
     pub refusal_code: Option<&'static str>,
+    /// How the revision it was replayed against was archived:
+    /// `signature-verified` or `unsigned`.
+    pub provenance: &'static str,
 }
 
 #[derive(Default, Debug, Serialize)]
@@ -145,6 +148,50 @@ pub struct EvidenceGap {
     pub count: u64,
     pub sequences: Vec<u64>,
     pub truncated: bool,
+    /// For a gap about a pass revision (`archive-missing`,
+    /// `approval-unverified`), each digest with its own sequences, in order of
+    /// first use. Empty for the other reasons.
+    pub digests: Vec<GapDigest>,
+    /// More digests than [`DETAIL_LIMIT`] had this gap; `count` still covers them.
+    pub digests_truncated: bool,
+}
+
+/// The lines of one gap that were decided under one pass revision.
+#[derive(Debug, Serialize)]
+pub struct GapDigest {
+    pub digest: String,
+    pub count: u64,
+    pub sequences: Vec<u64>,
+    pub truncated: bool,
+    #[serde(skip)]
+    key: Digest,
+}
+
+/// One pass revision that ledger debits were decided under.
+#[derive(Debug, Serialize)]
+pub struct RevisionUse {
+    pub digest: String,
+    /// The first and last ledger sequence decided under it.
+    pub first_seq: u64,
+    pub last_seq: u64,
+    /// How many spend and debit lines were decided under it.
+    pub lines: u64,
+    /// `signature-verified`, `unsigned` (archived without a signature
+    /// record) or `missing` (not in the archive).
+    pub provenance: &'static str,
+    /// The retained signature record, for `signature-verified`.
+    pub approval: Option<SignedApproval>,
+}
+
+/// The revisions the ledger's debits used, in order of first use.
+#[derive(Default, Debug, Serialize)]
+pub struct RevisionGroup {
+    /// Distinct digests.
+    pub count: u64,
+    pub details: Vec<RevisionUse>,
+    pub truncated: bool,
+    /// How many distinct digests are not `signature-verified`.
+    pub unverified: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +201,7 @@ pub struct ReceiptAudit {
     pub corroborated: EndpointGroup,
     pub mismatches: EndpointGroup,
     pub gaps: BTreeMap<&'static str, EvidenceGap>,
+    pub revisions: RevisionGroup,
     pub witness: &'static str,
     pub warnings: Vec<String>,
 }
@@ -169,6 +217,121 @@ pub(super) fn record_gap(
         group.sequences.push(seq);
     } else {
         group.truncated = true;
+    }
+}
+
+/// Record a gap about the revision `digest`, also under that digest.
+pub(super) fn record_revision_gap(
+    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    reason: &'static str,
+    seq: u64,
+    digest: Digest,
+) {
+    record_gap(gaps, reason, seq);
+    let group = gaps.entry(reason).or_default();
+    // Consecutive lines usually share a revision, so look from the end.
+    let i = if let Some(i) = group.digests.iter().rposition(|d| d.key == digest) {
+        i
+    } else if group.digests.len() < DETAIL_LIMIT {
+        group.digests.push(GapDigest {
+            digest: digest.to_string(),
+            count: 0,
+            sequences: Vec::new(),
+            truncated: false,
+            key: digest,
+        });
+        group.digests.len() - 1
+    } else {
+        group.digests_truncated = true;
+        return;
+    };
+    let entry = &mut group.digests[i];
+    entry.count += 1;
+    if entry.sequences.len() < DETAIL_LIMIT {
+        entry.sequences.push(seq);
+    } else {
+        entry.truncated = true;
+    }
+}
+
+struct Used {
+    digest: Digest,
+    first_seq: u64,
+    last_seq: u64,
+    lines: u64,
+    provenance: Provenance,
+}
+
+/// The provenance of every revision the ledger used, looked up once per digest.
+pub(super) struct RevisionTracker<'a> {
+    directory: &'a Path,
+    index: HashMap<Digest, usize>,
+    used: Vec<Used>,
+}
+
+impl<'a> RevisionTracker<'a> {
+    pub(super) fn new(directory: &'a Path) -> Self {
+        Self {
+            directory,
+            index: HashMap::new(),
+            used: Vec::new(),
+        }
+    }
+
+    /// Note that line `seq` was decided under `digest`, record an
+    /// `approval-unverified` gap unless a verified signature approved that
+    /// revision, and return its provenance word.
+    pub(super) fn note(
+        &mut self,
+        digest: Digest,
+        seq: u64,
+        gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    ) -> Result<&'static str, Error> {
+        let i = if let Some(&i) = self.index.get(&digest) {
+            i
+        } else {
+            self.used.push(Used {
+                digest,
+                first_seq: seq,
+                last_seq: seq,
+                lines: 0,
+                provenance: archive_provenance(self.directory, digest)?,
+            });
+            self.index.insert(digest, self.used.len() - 1);
+            self.used.len() - 1
+        };
+        let entry = &mut self.used[i];
+        entry.last_seq = seq;
+        entry.lines += 1;
+        if !matches!(entry.provenance, Provenance::SignatureVerified(_)) {
+            record_revision_gap(gaps, "approval-unverified", seq, digest);
+        }
+        Ok(entry.provenance.as_str())
+    }
+
+    pub(super) fn report(self) -> RevisionGroup {
+        let mut group = RevisionGroup {
+            count: self.used.len() as u64,
+            ..RevisionGroup::default()
+        };
+        for used in self.used {
+            if !matches!(used.provenance, Provenance::SignatureVerified(_)) {
+                group.unverified += 1;
+            }
+            if group.details.len() < DETAIL_LIMIT {
+                group.details.push(RevisionUse {
+                    digest: used.digest.to_string(),
+                    first_seq: used.first_seq,
+                    last_seq: used.last_seq,
+                    lines: used.lines,
+                    provenance: used.provenance.as_str(),
+                    approval: used.provenance.approval().cloned(),
+                });
+            } else {
+                group.truncated = true;
+            }
+        }
+        group
     }
 }
 
@@ -212,15 +375,21 @@ pub fn audit_receipts(
     let mut corroborated = EndpointGroup::default();
     let mut mismatches = EndpointGroup::default();
     let mut gaps = BTreeMap::new();
+    let mut revisions = RevisionTracker::new(directory);
     let mut cached: Option<(Digest, Option<Pass>)> = None;
     let view = visit_view(loaded, state, false, &mut |event| {
         match event {
-            VerifiedEvent::Spend(s) => record_gap(&mut gaps, "legacy-spend", s.seq),
+            // A scalar spend line has no field for a target.
+            VerifiedEvent::Spend(s) => {
+                revisions.note(s.digest, s.seq, &mut gaps)?;
+                record_gap(&mut gaps, "targets-unrecorded", s.seq);
+            }
             VerifiedEvent::Adopt(a) if !a.carried.is_empty() => {
                 record_gap(&mut gaps, "adoption-carry", a.seq);
             }
             VerifiedEvent::Adopt(_) => (),
             VerifiedEvent::Debit(d) => {
+                let provenance = revisions.note(d.digest, d.seq, &mut gaps)?;
                 let Some(receipt) = d.receipt.as_ref().filter(|r| !r.targets.is_empty()) else {
                     record_gap(&mut gaps, "targets-unrecorded", d.seq);
                     return Ok(());
@@ -232,7 +401,7 @@ pub fn audit_receipts(
                     ));
                 }
                 let Some(pass) = cached.as_ref().and_then(|(_, p)| p.as_ref()) else {
-                    record_gap(&mut gaps, "archive-missing", d.seq);
+                    record_revision_gap(&mut gaps, "archive-missing", d.seq, d.digest);
                     return Ok(());
                 };
                 for (index, t) in receipt.targets.iter().enumerate() {
@@ -261,6 +430,7 @@ pub fn audit_receipts(
                             recorded: t.clone(),
                             matched_label,
                             refusal_code,
+                            provenance,
                         });
                     } else {
                         group.truncated = true;
@@ -270,9 +440,11 @@ pub fn audit_receipts(
         }
         Ok(())
     })?;
+    let revisions = revisions.report();
+    // `complete` needs a verified signature over every revision used.
     let result = if mismatches.count > 0 {
         "mismatch"
-    } else if corroborated.count == 0 || !gaps.is_empty() {
+    } else if corroborated.count == 0 || !gaps.is_empty() || revisions.unverified > 0 {
         "incomplete"
     } else {
         "complete"
@@ -283,6 +455,7 @@ pub fn audit_receipts(
         corroborated,
         mismatches,
         gaps,
+        revisions,
         witness: view.witness.as_str(),
         warnings: view.warnings,
     })

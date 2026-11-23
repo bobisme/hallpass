@@ -19,7 +19,7 @@ Each call verifies the whole ledger: for many small units, see [Cost per call
 and batching](#cost-per-call-and-batching).
 
 ```text
-hallpass --format json spend --to ADDRESS:PORT/PROTOCOL [--name HOSTNAME] [--n N] [--duration SECONDS] [--digest DIGEST] [--note TEXT] -- PASS COUNTER
+hallpass --format json spend --to ADDRESS:PORT/PROTOCOL [--name HOSTNAME] [--n N] [--duration SECONDS] [--digest DIGEST] [--note TEXT] [--record-target] -- PASS COUNTER
 ```
 
 Before sending, require exit 0 and a production `spend` response with
@@ -46,6 +46,16 @@ that permits targetless accounting, the caller must have asked `permits`
 for every destination itself before a targetless debit. Such a debit, and
 its `--dry-run`, has a warning in `warnings` that no destination was
 checked.
+
+`spend --to` checks the target but does not keep it. When the endpoints will
+be audited later, add `--record-target`: the debit then keeps each checked
+target, its request name and the matched destination label, and
+`audit-receipts` can replay them. Without it, the audit can only report the
+debit as a `targets-unrecorded` gap
+([Replay historical endpoint decisions](EVIDENCE.md#replay-historical-endpoint-decisions)).
+The kept targets are readable by anyone who can read the ledger and its
+copies. With `--record-target` the reply's `receipt` holds the targets, so
+record the flag with the request when your wrapper checks the reply.
 
 | Exit | `result` | Meaning | What the caller does |
 |---|---|---|---|
@@ -661,10 +671,16 @@ hallpass --format json verify-approval engagement.pass.toml \
 The successful JSON response includes `digest` and the requested `archive`
 destination. Pin that digest for the live check. If someone edits the working
 pass later, retrieve the originally verified bytes with
-`hallpass --format text retrieve approval-archive "$digest"`. The archive
-stores pass bytes only. Keep the detached signature, the trusted allowed
-signers file and the expected principal separately; those are needed to
-verify the archived bytes again. A failed signature check publishes nothing.
+`hallpass --format text retrieve approval-archive "$digest"`. Beside the bytes,
+the archive keeps the signature that verified (`DIGEST.sig`) and a record of
+the principal, namespace and trusted signers file digest (`DIGEST.approval`).
+The response gives that record as `approval`, with `provenance` set to
+`signature-verified`. `audit-receipts` and `audit-charges` read these records
+to tell revisions the owner signed from revisions stored by plain `archive`
+([what the audits prove](EVIDENCE.md#what-an-audit-proves)). Keep the trusted
+signers file and the expected principal separately: the audits do not verify
+the signature again, and an auditor needs both to do so. A failed signature
+check publishes nothing.
 
 ## Review and case suites
 

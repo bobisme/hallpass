@@ -235,7 +235,20 @@ fn other_advanced_commands_print_readable_text() {
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).expect("chmod");
     let p = case.file("pass", &approval());
     let file = s(&p);
-    assert_eq!(json(&["archive", file, s(&archive)]).0, 0);
+    let (code, archived) = json(&["archive", file, s(&archive)]);
+    assert_eq!(code, 0);
+    // As `verify-approval --archive` records it; the audits do not verify it again.
+    hallpass::archive_verified_signature(
+        &archive,
+        archived["digest"]
+            .as_str()
+            .and_then(|d| d.parse().ok())
+            .expect("digest"),
+        b"signature",
+        "owner@example.org",
+        hallpass::Digest::of(b"trusted signers"),
+    )
+    .expect("signature record");
     debit(file, "anchor");
     let anchor_witness = fs::read(case.witness()).expect("witness");
     debit(file, "tip");

@@ -284,7 +284,8 @@ fn archive_is_published_only_after_success_and_checks_private_content_addressing
     assert_eq!(second.status.code(), Some(0));
     let second: Value = serde_json::from_slice(&second.stdout).expect("json");
     assert_eq!(second["digest"], digest);
-    assert_eq!(fs::read_dir(&archive).expect("one entry").count(), 1);
+    // The bytes, the signature and its record.
+    assert_eq!(fs::read_dir(&archive).expect("one revision").count(), 3);
 
     let insecure = dir.join("insecure");
     fs::create_dir(&insecure).expect("insecure archive");

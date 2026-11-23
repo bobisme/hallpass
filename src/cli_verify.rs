@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::{OK, Output, REFUSED, error_output, safe};
-use hallpass::Error;
+use hallpass::{APPROVAL_NAMESPACE as NAMESPACE, ArchivedSignature, Digest, Error};
 use serde_json::json;
 
-const NAMESPACE: &str = "hallpass-approval-v1";
+/// The largest trusted signers file `verify-approval --archive` digests.
+const MAX_TRUST_BYTES: u64 = 16 * 1024 * 1024;
 
 fn input_path(path: &Path) -> Result<PathBuf, Error> {
     // An absolute name also keeps a literal "-" from acquiring stdin semantics.
@@ -26,6 +27,68 @@ fn input_path(path: &Path) -> Result<PathBuf, Error> {
         )));
     }
     Ok(full)
+}
+
+/// The bytes of a signature or trust file, read once through the same path
+/// that the verifier is given.
+fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
+    let full = input_path(path)?;
+    let io = |e: &io::Error| Error::Io {
+        path: full.clone(),
+        message: e.to_string(),
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(&full)
+        .map_err(|e| io(&e))?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io(&e))?;
+    if bytes.len() as u64 > limit {
+        return Err(Error::TooLarge { path: full, limit });
+    }
+    Ok(bytes)
+}
+
+/// The signature and trust file as they were before and after verification.
+/// A change in between means the record could name bytes ssh-keygen never saw.
+struct Inputs {
+    signature: Vec<u8>,
+    trust: Vec<u8>,
+}
+
+impl Inputs {
+    fn read(signature: &Path, trust: &Path) -> Result<Self, Error> {
+        Ok(Self {
+            signature: read_input(signature, hallpass::MAX_SIGNATURE_BYTES)?,
+            trust: read_input(trust, MAX_TRUST_BYTES)?,
+        })
+    }
+}
+
+/// Retain the verified bytes and the signature that verified over them.
+fn retain(
+    bytes: &[u8],
+    before: &Inputs,
+    signature: &Path,
+    trust: &Path,
+    principal: &str,
+    directory: &Path,
+) -> Result<(Digest, ArchivedSignature), Error> {
+    let after = Inputs::read(signature, trust)?;
+    if after.signature != before.signature || after.trust != before.trust {
+        return Err(Error::Usage(
+            "the signature or trusted signers file changed while it was verified; nothing was recorded for it. Run verify-approval again".into(),
+        ));
+    }
+    let digest = hallpass::archive_pass_bytes(bytes, directory)?;
+    let record = hallpass::archive_verified_signature(
+        directory,
+        digest,
+        &before.signature,
+        principal,
+        Digest::of(&before.trust),
+    )?;
+    Ok((digest, record))
 }
 
 /// Why a signature did not verify, as far as ssh-keygen's output shows.
@@ -193,16 +256,30 @@ pub fn verify_approval(
         Ok(value) => value,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
+    // With --archive, read the inputs before ssh-keygen does, to record them.
+    let before = match archive.map(|_| Inputs::read(signature, trust)).transpose() {
+        Ok(inputs) => inputs,
+        Err(e) => return error_output("verify-approval", Some(path), &e),
+    };
     match verified(&bytes, signature, trust, principal) {
         Ok(Ok(())) => {
-            let digest = if let Some(directory) = archive {
-                match hallpass::archive_pass_bytes(&bytes, directory) {
-                    Ok(digest) => digest,
-                    Err(e) => return error_output("verify-approval", Some(path), &e),
+            let (digest, record) = match (archive, &before) {
+                (Some(directory), Some(before)) => {
+                    match retain(&bytes, before, signature, trust, principal, directory) {
+                        Ok((digest, record)) => (digest, Some(record)),
+                        Err(e) => return error_output("verify-approval", Some(path), &e),
+                    }
                 }
-            } else {
-                loaded.digest
+                _ => (loaded.digest, None),
             };
+            let mut warnings = Vec::new();
+            if let Some(ArchivedSignature::KeptEarlier(kept)) = &record {
+                warnings.push(format!(
+                    "the archive already held a different verified signature record for these bytes (principal {:?}); it was kept, and this signature was not stored",
+                    kept.principal
+                ));
+            }
+            let approval = record.as_ref().map(ArchivedSignature::approval);
             Output {
                 code: OK,
                 text: format!(
@@ -211,11 +288,11 @@ pub fn verify_approval(
                     loaded.pass.id,
                     digest,
                     archive.map_or(String::new(), |dir| format!(
-                        " Retained exact bytes in {}.",
+                        " Retained the exact bytes and a signature record in {}.",
                         safe(&dir.display().to_string())
                     ))
                 ),
-                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string())}),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-verified"),"approval":approval,"warnings":warnings}),
             }
         }
         Ok(Err(why)) => Output {
@@ -225,7 +302,7 @@ pub fn verify_approval(
                 safe(principal),
                 why.advice()
             ),
-            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string())}),
+            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),
         },
         Err(e) => error_output("verify-approval", Some(path), &e),
     }

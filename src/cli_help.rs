@@ -69,7 +69,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json spend docs/required-counters.toml --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp@app.example.org --dry-run",
                 "hallpass --format json spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --caller-ref batch-42 --require-new-ref --digest \"$digest\"",
             ],
-            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Read require_target from check or status. When true, supply --to for every debit. A targetless request returns refusal.code=target-required. When false, a debit without --to checks no destination and has a warning that says so. Retain a checked target only with --record-target. Preview with --dry-run, then submit with the reviewed digest and required targets and charges. Use --caller-ref with --require-new-ref to deny duplicates under the writer locks. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. On duplicate-reference, reconcile reference_evidence.sequences with your run record and receipt. After a lost reply, uncertain error or reference-inconclusive refusal, reconcile with the ledger and your run record before retrying.",
+            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Read require_target from check or status. When true, supply --to for every debit. A targetless request returns refusal.code=target-required. When false, a debit without --to checks no destination and has a warning that says so. Retain a checked target only with --record-target; audit-receipts can replay only retained targets. Preview with --dry-run, then submit with the reviewed digest and required targets and charges. Use --caller-ref with --require-new-ref to deny duplicates under the writer locks. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. On duplicate-reference, reconcile reference_evidence.sequences with your run record and receipt. After a lost reply, uncertain error or reference-inconclusive refusal, reconcile with the ledger and your run record before retrying.",
         ),
         "digest" => (
             &["hallpass --format json digest engagement.pass.toml"],
@@ -87,7 +87,7 @@ fn guide(name: &str) -> Guide {
                 "mkdir -m 700 approval-archive",
                 "hallpass --format json archive engagement.pass.toml approval-archive",
             ],
-            "Create a private directory once. Archive each reviewed revision there and save its digest. Use retrieve with that digest to recover the exact approved text.",
+            "Create a private directory once. Archive each reviewed revision there and save its digest. Use retrieve with that digest to recover the exact approved text. archive stores bytes only and reports provenance: unsigned, or signature-verified when verify-approval --archive already recorded a signature for these bytes (that record is kept). The audits are complete only for revisions with a verified signature record.",
         ),
         "retrieve" => (
             &["hallpass --format json retrieve approval-archive \"$digest\""],
@@ -98,7 +98,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org",
                 "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive",
             ],
-            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. With --archive, the exact verified bytes are retained after signature success; keep the detached signature, trust file and expected principal separately to verify them again. Those live operations check current policy.",
+            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. With --archive, the exact verified bytes, the signature and a record of the principal and trust file digest are retained after signature success, and the reply's provenance is signature-verified. An earlier, different record for the same bytes is kept, with a warning. Keep the trust file and expected principal separately to verify the signature again. Those live operations check current policy.",
         ),
         "diff" => (
             &[
@@ -145,14 +145,14 @@ fn history_guide(name: &str) -> Guide {
         ),
         "audit-receipts" => (
             &["hallpass --format json audit-receipts engagement.pass.toml approval-archive"],
-            "Archive each reviewed revision before spending with --record-target. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps and the independent witness status. Complete exits 0. Incomplete or mismatch exits 2. A damaged input exits 1.",
+            "Archive each reviewed revision with verify-approval --archive before spending with --record-target. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps, revisions and the independent witness status. Complete exits 0 only when a verified signature approved every revision used; approval-unverified gaps name the others with their sequences. Incomplete or mismatch exits 2. A damaged input exits 1.",
         ),
         "audit-charges" => (
             &[
                 "hallpass audit-charges engagement.pass.toml approval-archive",
                 "hallpass --format json audit-charges engagement.pass.toml approval-archive",
             ],
-            "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. The witness is reported separately. This checks accounting, not external work or endpoints.",
+            "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. Inspect revisions for each digest used, with its first and last sequence and provenance; complete needs a verified signature over every one. The witness is reported separately. This checks accounting, not external work or endpoints.",
         ),
         "reconcile" => (
             &[

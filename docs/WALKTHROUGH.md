@@ -353,18 +353,35 @@ the archived revision it was spent under:
 
 ```sh
 hallpass receipt engagement.pass.toml --caller-ref shift-1/unit-3
-hallpass audit-receipts engagement.pass.toml approval-archive
+hallpass audit-receipts engagement.pass.toml approval-archive || echo "exit $?"
 ```
 
 ```text
 Receipt found for "shift-1/unit-3". 1 matches. Witness matches. Adoptions 0.
   #2 2026-11-20T09:00:00Z sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb  charges=[{"counter":"requests","n":1},{"counter":"bytes","n":24}] targets=[{"label":"web","name":"app.example.org","target":"192.0.2.10:443/tcp"}]
-Receipt audit complete. Witness matches.
+Receipt audit incomplete. Witness matches.
 corroborated 2
-  #1 target 1 at 2026-11-20T09:00:00Z 192.0.2.10:443/tcp name app.example.org: recorded label web confirmed
-  #2 target 1 at 2026-11-20T09:00:00Z 192.0.2.10:443/tcp name app.example.org: recorded label web confirmed
+  #1 target 1 at 2026-11-20T09:00:00Z 192.0.2.10:443/tcp name app.example.org: recorded label web matches the archived revision, which no verified signature approved
+  #2 target 1 at 2026-11-20T09:00:00Z 192.0.2.10:443/tcp name app.example.org: recorded label web matches the archived revision, which no verified signature approved
 mismatches 0
+Gap approval-unverified 2: decided under a revision that no verified signature approved in this archive; if the owner signed it, record the signature with verify-approval --archive. Sequences [1, 2]
+  sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07cd33fc80a63ce3f6faf0 1 line(s). Sequences [1]
+  sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb 1 line(s). Sequences [2]
+Revisions used 2, 2 without a verified signature
+  sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07cd33fc80a63ce3f6faf0 sequences 1 to 1, 1 line(s): archived with no signature record
+  sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb sequences 2 to 2, 1 line(s): archived with no signature record
+exit 2
 ```
+
+Both recorded targets match the revisions they were spent under, but the
+audit is `incomplete`, not `complete`. This rehearsal archived each revision
+with `pin`, which runs `hallpass archive`, and the owner's emails carry no
+signature. So nothing in the archive shows that the owner approved those exact
+bytes, and the audit names both digests. On a live engagement, have the owner
+sign each revision and archive it with `verify-approval --archive`
+([Signing and verifying an approval](INTEGRATING.md#signing-and-verifying-an-approval)).
+The audit then says `confirmed` for each endpoint and `complete`. What each
+word proves is in [What an audit proves](EVIDENCE.md#what-an-audit-proves).
 
 The journal holds four records for a completed unit. Times are the caller's
 own clock:

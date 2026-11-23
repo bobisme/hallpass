@@ -45,6 +45,25 @@ fn bytes(path: &Path) -> Vec<u8> {
     fs::read(path).expect("fixture bytes")
 }
 
+/// Record a signature over an archived revision, as `verify-approval
+/// --archive` does after ssh-keygen accepts it. The audits read this record;
+/// they do not verify the signature again, so these tests need no keys.
+fn approve(archive: &Path, archived: &Value) {
+    let digest = archived["digest"]
+        .as_str()
+        .expect("archived digest")
+        .parse()
+        .expect("digest");
+    hallpass::archive_verified_signature(
+        archive,
+        digest,
+        b"signature",
+        "owner@example.org",
+        hallpass::Digest::of(b"trusted signers"),
+    )
+    .expect("signature record");
+}
+
 fn archive(case: &Case) -> PathBuf {
     let path = case.path("archive");
     fs::create_dir(&path).expect("archive");
@@ -119,13 +138,13 @@ fn exact_reference_across_revisions_ambiguous_lost_and_fresh_are_distinct() {
     let charge_audit = checked(&["audit-charges", file, s(&a)], 2);
     assert_eq!(charge_audit["gaps"]["adoption-carry"]["sequences"][0], 3);
     let incomplete = checked(&["audit-receipts", file, s(&a)], 2);
-    for (seq, reason) in [
-        (1, "legacy-spend"),
-        (2, "targets-unrecorded"),
-        (3, "adoption-carry"),
+    // A scalar spend line and a debit without targets both keep no target.
+    for (sequences, reason) in [
+        (serde_json::json!([1, 2]), "targets-unrecorded"),
+        (serde_json::json!([3]), "adoption-carry"),
     ] {
         assert_eq!(
-            incomplete["gaps"][reason]["sequences"][0], seq,
+            incomplete["gaps"][reason]["sequences"], sequences,
             "{incomplete}"
         );
     }
@@ -141,11 +160,12 @@ fn audit_historical_revisions_exact_instant_mismatch_precedence_and_archive_inte
     let file = s(&p);
     let cmd = ["audit-receipts", file, s(&a)];
     let saved = checked(&["archive", file, s(&a)], 0);
+    approve(&a, &saved);
     debit(file, "one");
     let old_witness = bytes(&witness(&case));
     let revised = old.replace("label = \"web\"", "label = \"other\"");
     fs::write(&p, &revised).expect("edit label");
-    checked(&["archive", file, s(&a)], 0);
+    approve(&a, &checked(&["archive", file, s(&a)], 0));
     checked(
         &[
             "spend",
@@ -295,7 +315,7 @@ fn count_all_matches_and_endpoints_after_detail_limit() {
     let a = archive(&case);
     let p = case.pass("pass", &approval());
     let file = s(&p);
-    checked(&["archive", file, s(&a)], 0);
+    approve(&a, &checked(&["archive", file, s(&a)], 0));
     let limit = hallpass::evidence::DETAIL_LIMIT;
     for _ in 0..=limit {
         debit(file, REFERENCE);
@@ -335,6 +355,7 @@ fn audit_rejects_wrong_pass_id_and_reports_uncorroborated_history_independently(
     let file = s(&p);
     let cmd = ["audit-receipts", file, s(&a)];
     let revision = checked(&["archive", file, s(&a)], 0);
+    approve(&a, &revision);
     debit(file, REFERENCE);
     let w = witness(&case);
     fs::remove_file(&w).expect("unwitnessed history");
@@ -456,6 +477,7 @@ fn charge_audit_uses_each_revision_and_advances_across_missing_archive() {
     let p = case.pass("pass", &old);
     let file = s(&p);
     let first = checked(&["archive", file, s(&a)], 0);
+    approve(&a, &first);
     assert_eq!(
         checked(&["audit-charges", file, s(&a)], 2)["result"],
         "empty"
@@ -463,9 +485,9 @@ fn charge_audit_uses_each_revision_and_advances_across_missing_archive() {
     checked(&["spend", file, "requests", "--n", "8"], 0);
     let first_witness = bytes(&witness(&case));
     fs::write(&p, old.replace("requests=10", "requests=5")).expect("lower");
-    checked(&["archive", file, s(&a)], 0);
+    approve(&a, &checked(&["archive", file, s(&a)], 0));
     fs::write(&p, old.replace("requests=10", "requests=12")).expect("raise");
-    checked(&["archive", file, s(&a)], 0);
+    approve(&a, &checked(&["archive", file, s(&a)], 0));
     checked(&["spend", file, "--charge", "requests=4"], 0);
     let cmd = ["audit-charges", file, s(&a)];
     let complete = checked(&cmd, 0);

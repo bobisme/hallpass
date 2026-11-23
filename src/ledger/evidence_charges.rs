@@ -1,5 +1,8 @@
 //! Replay numerical and mandatory charge terms against archived revisions.
-use super::evidence::{DETAIL_LIMIT, EvidenceGap, archive_revision, record_gap};
+use super::evidence::{
+    DETAIL_LIMIT, EvidenceGap, RevisionGroup, RevisionTracker, archive_revision, record_gap,
+    record_revision_gap,
+};
 use super::{VerifiedEvent, add, check_required_charges, decide_ceiling, visit_view};
 use crate::{Digest, Error, LoadedPass, Pass, StateDir};
 use serde::Serialize;
@@ -25,6 +28,7 @@ pub struct ChargeAudit {
     pub checked_debits: u64,
     pub mismatches: ChargeMismatches,
     pub gaps: BTreeMap<&'static str, EvidenceGap>,
+    pub revisions: RevisionGroup,
     pub witness: &'static str,
     pub warnings: Vec<String>,
 }
@@ -54,6 +58,7 @@ pub fn audit_charges(
     let mut cache: Option<(Digest, Option<Pass>)> = None;
     let mut mismatches = ChargeMismatches::default();
     let mut gaps = BTreeMap::new();
+    let mut revisions = RevisionTracker::new(directory);
     let mut checked = 0;
     let mut debits = 0;
     let view = visit_view(loaded, state, false, &mut |event| {
@@ -78,6 +83,7 @@ pub fn audit_charges(
             ),
         };
         debits += 1;
+        revisions.note(digest, seq, &mut gaps)?;
         if cache.as_ref().is_none_or(|(key, _)| *key != digest) {
             cache = Some((
                 digest,
@@ -101,18 +107,20 @@ pub fn audit_charges(
                 }
             }
         } else {
-            record_gap(&mut gaps, "archive-missing", seq);
+            record_revision_gap(&mut gaps, "archive-missing", seq, digest);
         }
         for (counter, amount) in charges {
             let _ = add(&mut totals, counter, amount);
         }
         Ok(())
     })?;
+    let revisions = revisions.report();
+    // `complete` needs a verified signature over every revision used.
     let result = if mismatches.count > 0 {
         "mismatch"
     } else if debits == 0 && gaps.is_empty() {
         "empty"
-    } else if !gaps.is_empty() {
+    } else if !gaps.is_empty() || revisions.unverified > 0 {
         "incomplete"
     } else {
         "complete"
@@ -123,6 +131,7 @@ pub fn audit_charges(
         checked_debits: checked,
         mismatches,
         gaps,
+        revisions,
         witness: view.witness.as_str(),
         warnings: view.warnings,
     })

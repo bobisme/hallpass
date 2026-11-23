@@ -1,15 +1,36 @@
-//! Explicit retention and retrieval of the exact approved pass bytes.
+//! Explicit retention and retrieval of the exact approved pass bytes, and of
+//! the owner signatures that `verify-approval --archive` verified over them.
+//!
+//! An archive directory holds, per pass digest `D`:
+//!
+//! - `D`: the exact pass bytes (`archive` and `verify-approval --archive`);
+//! - `D.sig`: the detached signature that verified over them, and
+//!   `D.approval`: a one-line JSON record of that verification (only
+//!   `verify-approval --archive` writes these two).
+//!
+//! Every file is created once and never replaced, so a later `archive` of the
+//! same bytes cannot remove or downgrade a signature record.
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize, Serializer};
+
 use crate::error::Error;
 use crate::files::{Digest, MAX_PASS_BYTES, open_no_follow, read_pass_bytes};
 use crate::pass::Pass;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// The SSH signature namespace of an owner's approval of a pass.
+pub const APPROVAL_NAMESPACE: &str = "hallpass-approval-v1";
+
+/// The largest detached signature or signature record the archive keeps.
+pub const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
+
+const RECORD_VERSION: u32 = 1;
 
 fn directory(dir: &Path) -> Result<fs::File, Error> {
     let meta = fs::symlink_metadata(dir).map_err(|e| Error::io(dir, &e))?;
@@ -51,6 +72,49 @@ fn destination(dir: &Path, digest: Digest) -> PathBuf {
     dir.join(digest.to_string())
 }
 
+fn signature_path(dir: &Path, digest: Digest) -> PathBuf {
+    dir.join(format!("{digest}.sig"))
+}
+
+fn record_path(dir: &Path, digest: Digest) -> PathBuf {
+    dir.join(format!("{digest}.approval"))
+}
+
+fn present(path: &Path) -> Result<bool, Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::io(path, &e)),
+    }
+}
+
+/// Read a private regular archive file of at most `limit` bytes, without
+/// following a link.
+fn read_private(path: &Path, limit: u64, advice: &'static str) -> Result<Vec<u8>, Error> {
+    let file = open_no_follow(path, OpenOptions::new().read(true))?;
+    let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
+    if meta.mode() & 0o077 != 0 {
+        return Err(Error::Insecure {
+            path: path.to_path_buf(),
+            mode: meta.mode() & 0o7777,
+            who: "other users can read or change archived approvals",
+            fix: "600",
+            advice,
+        });
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::io(path, &e))?;
+    if bytes.len() as u64 > limit {
+        return Err(Error::TooLarge {
+            path: path.to_path_buf(),
+            limit,
+        });
+    }
+    Ok(bytes)
+}
+
 /// Archive one validated byte snapshot in an existing private directory.
 /// Existing entries are accepted only when their exact bytes agree.
 ///
@@ -89,9 +153,27 @@ pub fn archive_pass_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
 }
 
 fn publish_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
-    let directory_file = directory(dir)?;
     let digest = Digest::of(bytes);
-    let target = destination(dir, digest);
+    if publish(dir, &destination(dir, digest), bytes, || {
+        retrieve_pass(dir, digest)
+    })? {
+        Ok(digest)
+    } else {
+        Err(Error::Usage(
+            "archive entry conflicts with this snapshot".into(),
+        ))
+    }
+}
+
+/// Create `target` with exactly `bytes`, once. Returns false, and leaves the
+/// file alone, when it already holds other bytes (as `existing` reads them).
+fn publish(
+    dir: &Path,
+    target: &Path,
+    bytes: &[u8],
+    existing: impl FnOnce() -> Result<Vec<u8>, Error>,
+) -> Result<bool, Error> {
+    let directory_file = directory(dir)?;
     let temp = dir.join(format!(
         ".hallpass-{}-{}",
         std::process::id(),
@@ -106,24 +188,18 @@ fn publish_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
     let result = (|| {
         file.write_all(bytes).map_err(|e| Error::io(&temp, &e))?;
         file.sync_all().map_err(|e| Error::io(&temp, &e))?;
-        match fs::hard_link(&temp, &target) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if retrieve_pass(dir, digest)? == bytes {
-                    Ok(())
-                } else {
-                    Err(Error::Usage(
-                        "archive entry conflicts with this snapshot".into(),
-                    ))
-                }
-            }
-            Err(e) => Err(Error::io(&target, &e)),
+        match fs::hard_link(&temp, target) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(existing()? == bytes),
+            Err(e) => Err(Error::io(target, &e)),
         }
     })();
     let _ = fs::remove_file(&temp);
-    result?;
-    directory_file.sync_all().map_err(|e| Error::io(dir, &e))?;
-    Ok(digest)
+    let same = result?;
+    if same {
+        directory_file.sync_all().map_err(|e| Error::io(dir, &e))?;
+    }
+    Ok(same)
 }
 
 /// Return archived bytes only after checking their full digest and file mode.
@@ -133,27 +209,11 @@ fn publish_bytes(bytes: &[u8], dir: &Path) -> Result<Digest, Error> {
 pub fn retrieve_pass(dir: &Path, digest: Digest) -> Result<Vec<u8>, Error> {
     let _directory_file = directory(dir)?;
     let path = destination(dir, digest);
-    let file = open_no_follow(&path, OpenOptions::new().read(true))?;
-    let meta = file.metadata().map_err(|e| Error::io(&path, &e))?;
-    if meta.mode() & 0o077 != 0 {
-        return Err(Error::Insecure {
-            path,
-            mode: meta.mode() & 0o7777,
-            who: "other users can read or change archived approvals",
-            fix: "600",
-            advice: "check that its content is the approved pass it was archived from",
-        });
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_PASS_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| Error::io(&path, &e))?;
-    if bytes.len() as u64 > MAX_PASS_BYTES {
-        return Err(Error::TooLarge {
-            path,
-            limit: MAX_PASS_BYTES,
-        });
-    }
+    let bytes = read_private(
+        &path,
+        MAX_PASS_BYTES,
+        "check that its content is the approved pass it was archived from",
+    )?;
     if Digest::of(&bytes) != digest {
         return Err(Error::Usage(format!(
             "archive entry {} does not match its digest",
@@ -161,6 +221,258 @@ pub fn retrieve_pass(dir: &Path, digest: Digest) -> Result<Vec<u8>, Error> {
         )));
     }
     Ok(bytes)
+}
+
+fn digest_text<S: Serializer>(digest: &Digest, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(digest)
+}
+
+/// What `verify-approval --archive` recorded when an owner's detached SSH
+/// signature verified over archived pass bytes.
+///
+/// The record says that the installed `ssh-keygen -Y verify` accepted
+/// `signature` over those bytes for `principal`, under `namespace`, with the
+/// trusted signers file whose digest is `allowed_signers`. Reading it does not
+/// verify the signature again: anyone who can write the archive can write a
+/// record. To check it independently, verify `DIGEST.sig` over the archived
+/// bytes with a trusted signers file of your own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SignedApproval {
+    /// The signer identity that was expected and verified.
+    pub principal: String,
+    /// The signature namespace, always [`APPROVAL_NAMESPACE`].
+    pub namespace: String,
+    /// The digest of the trusted signers file the signature verified against.
+    #[serde(serialize_with = "digest_text")]
+    pub allowed_signers: Digest,
+    /// The digest of the detached signature, kept as `DIGEST.sig`.
+    #[serde(serialize_with = "digest_text")]
+    pub signature: Digest,
+}
+
+/// The on-disk form of [`SignedApproval`], one JSON line.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordFile {
+    version: u32,
+    digest: String,
+    namespace: String,
+    principal: String,
+    allowed_signers: String,
+    signature: String,
+}
+
+/// How the archived bytes of one pass digest got there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    /// The archive holds no bytes for this digest.
+    Missing,
+    /// The bytes are archived without a signature record: `archive` stored
+    /// them, or `verify-approval --archive` stopped before it recorded the
+    /// signature.
+    Unsigned,
+    /// `verify-approval --archive` verified an owner's signature over the bytes
+    /// and kept it beside them.
+    SignatureVerified(SignedApproval),
+}
+
+impl Provenance {
+    /// `missing`, `unsigned` or `signature-verified`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unsigned => "unsigned",
+            Self::SignatureVerified(_) => "signature-verified",
+        }
+    }
+
+    /// The signature record, for [`Provenance::SignatureVerified`].
+    #[must_use]
+    pub const fn approval(&self) -> Option<&SignedApproval> {
+        match self {
+            Self::SignatureVerified(approval) => Some(approval),
+            Self::Missing | Self::Unsigned => None,
+        }
+    }
+}
+
+fn valid_principal(principal: &str) -> bool {
+    !principal.trim().is_empty() && !principal.chars().any(char::is_control)
+}
+
+fn damaged_record(path: &Path, why: &str) -> Error {
+    Error::Usage(format!(
+        "signature record {} is damaged ({why}); restore it from a copy, or remove it and its .sig and run verify-approval --archive again",
+        path.display()
+    ))
+}
+
+/// How the archived bytes of `digest` were retained, after checking the bytes
+/// against their digest and any signature record against its signature file.
+///
+/// # Errors
+/// If the directory, the bytes, the record or the signature file is unusable,
+/// insecure or damaged.
+pub fn archive_provenance(dir: &Path, digest: Digest) -> Result<Provenance, Error> {
+    let _directory_file = directory(dir)?;
+    if !present(&destination(dir, digest))? {
+        return Ok(Provenance::Missing);
+    }
+    retrieve_pass(dir, digest)?;
+    let path = record_path(dir, digest);
+    if !present(&path)? {
+        return Ok(Provenance::Unsigned);
+    }
+    let advice = "check that verify-approval wrote this signature record";
+    let raw = read_private(&path, MAX_SIGNATURE_BYTES, advice)?;
+    let record: RecordFile =
+        serde_json::from_slice(&raw).map_err(|e| damaged_record(&path, &e.to_string()))?;
+    let digest_field = |text: &str, name: &str| {
+        text.parse::<Digest>()
+            .map_err(|_| damaged_record(&path, &format!("`{name}` is not a digest")))
+    };
+    if record.version != RECORD_VERSION {
+        return Err(damaged_record(
+            &path,
+            &format!("unknown version {}", record.version),
+        ));
+    }
+    if digest_field(&record.digest, "digest")? != digest {
+        return Err(damaged_record(&path, "it names another digest"));
+    }
+    if record.namespace != APPROVAL_NAMESPACE {
+        return Err(damaged_record(&path, "unknown namespace"));
+    }
+    if !valid_principal(&record.principal) {
+        return Err(damaged_record(&path, "blank or multi-line principal"));
+    }
+    let approval = SignedApproval {
+        allowed_signers: digest_field(&record.allowed_signers, "allowed_signers")?,
+        signature: digest_field(&record.signature, "signature")?,
+        principal: record.principal,
+        namespace: record.namespace,
+    };
+    let signature = read_private(&signature_path(dir, digest), MAX_SIGNATURE_BYTES, advice)?;
+    if Digest::of(&signature) != approval.signature {
+        return Err(damaged_record(
+            &path,
+            "the .sig file beside it is not the signature it records",
+        ));
+    }
+    Ok(Provenance::SignatureVerified(approval))
+}
+
+/// What [`archive_verified_signature`] left in the archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArchivedSignature {
+    /// This verification is recorded (now, or by an identical earlier run).
+    Recorded(SignedApproval),
+    /// An earlier, different signature record for the same bytes was kept
+    /// unchanged, and this one was not stored. The bytes stay signature-verified.
+    KeptEarlier(SignedApproval),
+}
+
+impl ArchivedSignature {
+    /// The record now in the archive.
+    #[must_use]
+    pub const fn approval(&self) -> &SignedApproval {
+        match self {
+            Self::Recorded(approval) | Self::KeptEarlier(approval) => approval,
+        }
+    }
+}
+
+/// Record that `signature` verified over the archived bytes of `digest` for
+/// `principal`, with the trusted signers file whose digest is
+/// `allowed_signers`. The bytes must already be archived.
+///
+/// This function does not verify anything: call it only after the signature
+/// verified over exactly those bytes, as `verify-approval --archive` does. A
+/// record is never replaced, so the first verified signature of a digest stays.
+///
+/// # Errors
+/// If the bytes are not archived, an input is unusable, the archive is
+/// insecure or damaged, or an earlier run left a different signature without
+/// a record.
+pub fn archive_verified_signature(
+    dir: &Path,
+    digest: Digest,
+    signature: &[u8],
+    principal: &str,
+    allowed_signers: Digest,
+) -> Result<ArchivedSignature, Error> {
+    if !valid_principal(principal) {
+        return Err(Error::Usage(
+            "provide a nonblank single-line signer principal".into(),
+        ));
+    }
+    if signature.len() as u64 > MAX_SIGNATURE_BYTES {
+        return Err(Error::TooLarge {
+            path: "<signature>".into(),
+            limit: MAX_SIGNATURE_BYTES,
+        });
+    }
+    let approval = SignedApproval {
+        principal: principal.to_owned(),
+        namespace: APPROVAL_NAMESPACE.to_owned(),
+        allowed_signers,
+        signature: Digest::of(signature),
+    };
+    let kept = |existing: SignedApproval| {
+        if existing == approval {
+            ArchivedSignature::Recorded(existing)
+        } else {
+            ArchivedSignature::KeptEarlier(existing)
+        }
+    };
+    match archive_provenance(dir, digest)? {
+        Provenance::Missing => {
+            return Err(Error::Usage(format!(
+                "archive the bytes of {digest} before recording their signature"
+            )));
+        }
+        Provenance::SignatureVerified(existing) => return Ok(kept(existing)),
+        Provenance::Unsigned => (),
+    }
+    let advice = "check that verify-approval wrote this signature";
+    let sig = signature_path(dir, digest);
+    if !publish(dir, &sig, signature, || {
+        read_private(&sig, MAX_SIGNATURE_BYTES, advice)
+    })? {
+        return Err(Error::Usage(format!(
+            "{} holds another signature without a record: an earlier verification stopped before it finished. Check that file, remove it, then run verify-approval --archive again",
+            sig.display()
+        )));
+    }
+    let mut line = serde_json::to_vec(&RecordFile {
+        version: RECORD_VERSION,
+        digest: digest.to_string(),
+        namespace: approval.namespace.clone(),
+        principal: approval.principal.clone(),
+        allowed_signers: approval.allowed_signers.to_string(),
+        signature: approval.signature.to_string(),
+    })
+    .map_err(|e| Error::Usage(format!("cannot encode the signature record: {e}")))?;
+    line.push(b'\n');
+    if line.len() as u64 > MAX_SIGNATURE_BYTES {
+        return Err(Error::TooLarge {
+            path: "<signature record>".into(),
+            limit: MAX_SIGNATURE_BYTES,
+        });
+    }
+    let path = record_path(dir, digest);
+    if publish(dir, &path, &line, || {
+        read_private(&path, MAX_SIGNATURE_BYTES, advice)
+    })? {
+        return Ok(ArchivedSignature::Recorded(approval));
+    }
+    // Another run recorded the same signature with another principal or trust
+    // file first. Keep its record.
+    match archive_provenance(dir, digest)? {
+        Provenance::SignatureVerified(existing) => Ok(kept(existing)),
+        Provenance::Missing | Provenance::Unsigned => Err(damaged_record(&path, "unreadable")),
+    }
 }
 
 #[cfg(test)]

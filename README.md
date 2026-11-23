@@ -125,6 +125,9 @@ Current pass digest: sha256:…
 
 `spend --to` checks the destination, the approval window, revocation and the
 requested charges under the writer locks. A policy refusal adds no debit.
+The ledger keeps the checked destination only with `--record-target`. Add it
+when an audit should replay the endpoint later; see
+[Retaining and checking history](#retaining-and-checking-history).
 With `require_target_v1 = true`, omitting `--to` refuses the debit.
 Other passes allow a targetless debit, and `spend` then warns that no
 destination was checked. An owner can use
@@ -249,11 +252,15 @@ temporary directory, so the suite never touches your real witnesses.
 
 For lost spend replies, historical endpoint audits and ledger backup comparison, see [Reading accounting evidence](docs/EVIDENCE.md).
 
-Create a private archive directory, then retain the exact approved pass bytes:
+Create a private archive directory, then retain the exact approved pass bytes
+with the owner's signature, and keep the checked target with each spend:
 
 ```sh
 mkdir -m 700 approval-archive
-hallpass archive engagement.pass.toml approval-archive
+hallpass verify-approval engagement.pass.toml --signature engagement.pass.toml.sig \
+  --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive
+hallpass spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --record-target
+hallpass audit-receipts engagement.pass.toml approval-archive
 hallpass --format json ledger engagement.pass.toml
 hallpass retrieve approval-archive "$reviewed_digest" --output reviewed-pass.toml
 hallpass --format json checkpoint engagement.pass.toml > checkpoint.json
@@ -267,6 +274,11 @@ mode instead emits metadata and a JSON string. The archive is user-owned and
 may contain sensitive approval text. Its directory must be private and its
 entries private regular files. Archive retention is opt-in and ordinary spends
 do not depend on it. A matching digest identifies bytes, not who approved them.
+`hallpass archive engagement.pass.toml approval-archive` stores the bytes
+without a signature: an audit then puts every debit decided under them in an
+`approval-unverified` gap and is not `complete`. Signing is in
+[Signing and verifying an approval](docs/INTEGRATING.md#signing-and-verifying-an-approval),
+and what an audit proves is in [EVIDENCE.md](docs/EVIDENCE.md#what-an-audit-proves).
 
 In a separate account, verify a ledger without creating a witness:
 

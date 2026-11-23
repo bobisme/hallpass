@@ -67,7 +67,11 @@ pub use address::{
     AddressError, Ipv6Transition, Network, Protocol, Target, embedded_ipv4, ipv6_transition,
     parse_address, parse_network,
 };
-pub use archive::{archive_pass, archive_pass_bytes, retrieve_pass};
+pub use archive::{
+    APPROVAL_NAMESPACE, ArchivedSignature, MAX_SIGNATURE_BYTES, Provenance, SignedApproval,
+    archive_pass, archive_pass_bytes, archive_provenance, archive_verified_signature,
+    retrieve_pass,
+};
 pub use decision::{
     Decision, Refusal, RefusalCode, WindowState, span, span_left, span_until, stamp,
     whole_seconds_up,

@@ -19,7 +19,7 @@ If the result is `found`, compare the receipt's digest, charge names and amounts
 | `ambiguous` | 2 | Multiple debits shared the reference. Preserve all candidate sequences for reconciliation. |
 | `error` | 1 | The reference, pass, ledger or witness could not be checked. |
 
-A reference is case-sensitive. Legacy scalar spends and reference-free debits supply no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
+A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
 
 Use `--require-new-ref` with `--caller-ref` so cooperating workers on the same
 local history submit a given reference at most once. Record the intended unit
@@ -51,23 +51,120 @@ can reuse references for correlation.
 
 ## Replay historical endpoint decisions
 
+Retain each revision the owner approves together with the signature that
+approves it, and keep the checked target with each debit:
+
 ```sh
 mkdir -m 700 approval-archive
-hallpass --json archive engagement.toml approval-archive
-# Archive each reviewed revision before spending under it.
+hallpass --json verify-approval engagement.toml --signature engagement.toml.sig \
+  --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive
+hallpass --json spend engagement.toml --charge requests=1 \
+  --to 192.0.2.10:443/tcp@app.example.com --record-target
 hallpass --json audit-receipts engagement.toml approval-archive
 ```
 
-For each debit that retained targets, the audit reads the archived bytes for its digest, checks the pass ID and evaluates each ordered literal endpoint and optional request name at the stored instant with zero duration. Corroboration requires an allowed decision with the same destination label. Each detail has a ledger sequence and a one-based endpoint index. The current revision can have different labels, windows or revocation status.
+A plain `spend --to` checks its target but does not keep it, so the audit can
+only count that debit as a `targets-unrecorded` gap. Add `--record-target` to
+every spend whose endpoint you want to audit. It is not the default: a
+wrapper that checks replies expects no `receipt` from a spend that did not ask
+for one, a debit line with a target is longer than a scalar spend line and
+every call verifies the whole ledger, and the kept endpoints and request names
+can be read by anyone who can read the ledger and its copies.
+
+For each debit that retained targets, the audit reads the archived bytes for its digest, checks the pass ID and evaluates each ordered literal endpoint and optional request name at the stored instant with zero duration. Corroboration requires an allowed decision with the same destination label. Each detail has a ledger sequence, a one-based endpoint index and the `provenance` of the revision it was replayed against. The current revision can have different labels, windows or revocation status.
 
 | Result | Exit | Meaning |
 | --- | --- | --- |
-| `complete` | 0 | At least one endpoint was corroborated, and all available evidence was replayable without mismatch. |
-| `incomplete` | 2 | No corroborated endpoints, or evidence gaps and no policy mismatch. |
+| `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and a verified signature approved every revision the ledger used. |
+| `incomplete` | 2 | No corroborated endpoints, or evidence gaps (a revision without a verified signature is one) and no policy mismatch. |
 | `mismatch` | 2 | At least one refusal or changed matched label. Other gaps are still listed. |
-| `error` | 1 | Unusable input, such as a corrupt ledger or a digest-invalid archive entry. |
+| `error` | 1 | Unusable input, such as a corrupt ledger, a digest-invalid archive entry or a damaged signature record. |
 
-The `gaps` object groups affected sequences by reason. A legacy spend, debit without targets, adoption with carried balances or missing archived revision leaves a gap. Counts include every endpoint or affected record. The report retains the first 64 endpoint details per outcome and the first 64 sequences per gap reason. Each group marks its own truncation. The reader caches one parsed revision at a time. Review the independently reported witness status and warnings when interpreting the history. Replay establishes only the scope of recorded endpoints at the recorded instant. The requested duration, unrecorded endpoints, actual traffic and execution outcomes require other evidence.
+A CI gate should require exit 0 and `result = "complete"`. An engagement
+whose revisions were stored by `archive` alone is never `complete`: even when
+the replay finds no mismatch, it is `incomplete` with an `approval-unverified`
+gap. That gap means the archive holds no evidence that the owner approved
+those bytes; it is not a pass.
+
+The `gaps` object groups affected lines by reason. Counts include every endpoint or affected record. The report retains the first 64 endpoint details per outcome and the first 64 sequences per gap reason. Each group marks its own truncation.
+
+| Gap | Lines | To close it next time |
+| --- | --- | --- |
+| `targets-unrecorded` | A spend or debit line that kept no target: a scalar spend line, which has no field for one, or a debit without `--record-target`. | Spend with `--to` and `--record-target`. |
+| `archive-missing` | A debit with targets whose revision is not in the archive. | Archive each revision before spending under it. |
+| `approval-unverified` | A spend or debit line decided under a revision that is not `signature-verified` in the archive. | Have the owner sign that revision, and record it with `verify-approval --archive`. |
+| `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
+
+`targets-unrecorded` replaces the `legacy-spend` reason that earlier versions
+gave a scalar spend line. Both gaps about a revision, `archive-missing` and
+`approval-unverified`, also name the revision: `digests` lists each digest
+with its own `count`, first 64 `sequences` and `truncated`, in order of first
+use, up to 64 digests (`digests_truncated` marks more). Text output prints
+them under the gap. For the other reasons `digests` is empty.
+
+The reader caches one parsed revision at a time. Review the independently reported witness status and warnings when interpreting the history. Replay establishes only the scope of recorded endpoints at the recorded instant. The requested duration, unrecorded endpoints, actual traffic and execution outcomes require other evidence.
+
+### What an audit proves
+
+Text output says an endpoint is `confirmed` when the revision its debit was
+decided under allows it at the recorded instant, by the destination label the
+debit recorded, and that revision is `signature-verified`. Confirmed proves
+that the recorded endpoint was in the scope of exact pass bytes for which the
+archive holds a verified signature record. It does not prove that traffic went
+there or only there, that the work ran, or that the record itself is genuine:
+the audits read the record and do not run `ssh-keygen` again. An endpoint
+under an `unsigned` revision is never confirmed. Text says that it matches the
+archived revision, which no verified signature approved, and its JSON detail
+has `provenance = "unsigned"`. `corroborated` counts both kinds; read each
+detail's `provenance`.
+
+### Revisions and their provenance
+
+`archive` stores the exact pass bytes and nothing else.
+`verify-approval --archive` stores them only after `ssh-keygen -Y verify`
+accepted the owner's signature over exactly those bytes, and keeps two files
+beside them: `DIGEST.sig`, the signature, and `DIGEST.approval`, one JSON line
+with `version`, `digest`, `namespace`, `principal`, `allowed_signers` (the
+digest of the trusted signers file it verified against) and `signature` (the
+digest of `DIGEST.sig`). Every archive file is created once and never
+replaced. Each digest has one provenance:
+
+| `provenance` | Meaning |
+| --- | --- |
+| `signature-verified` | `verify-approval --archive` verified a signature over these bytes and recorded it. |
+| `unsigned` | The bytes are archived without a signature record: `archive` stored them, or an older version wrote the archive. |
+| `missing` | The archive does not hold these bytes. |
+
+`archive` never upgrades a digest. Archiving bytes that already have a record
+keeps the record, and `archive` then reports `signature-verified` with the
+record as `approval`. Only `verify-approval --archive` adds a record, so
+running it later over the bytes of an `unsigned` digest upgrades that digest.
+A record is never replaced: a second, different verified signature over the
+same bytes is not stored, and `verify-approval` says so in `warnings`.
+Archives written by earlier versions hold no records, so every digest in them
+reads `unsigned` until `verify-approval --archive` records its signature. A
+record that does not parse, names another digest, or does not match its
+`.sig` file is an error (exit 1).
+
+Both audits list the digests the ledger's spend and debit lines used, in
+`revisions`, in order of first use. Each entry has `digest`, `first_seq` and
+`last_seq`, `lines` (how many lines used it), `provenance`, and `approval`
+(the record, or null). `count` is the number of distinct digests and
+`unverified` how many are not `signature-verified`. The first 64 are listed
+and `truncated` marks more. Text output prints them after the gaps. To list
+only the revisions:
+
+```sh
+hallpass --json audit-charges engagement.toml approval-archive | jq '.revisions'
+```
+
+To check a signature independently, verify the archived signature over the
+archived bytes with a trusted signers file you hold:
+
+```sh
+ssh-keygen -Y verify -n hallpass-approval-v1 -I owner@example.org -f trusted_signers \
+  -s "approval-archive/$digest.sig" < "approval-archive/$digest"
+```
 
 ## Compare ledger backups before restoring one
 
@@ -129,11 +226,16 @@ hallpass --json audit-charges engagement.toml approval-archive
 ```
 
 Each scalar or atomic debit is checked against the exact archived revision and
-pre-debit totals. Missing revisions leave gaps while recorded arithmetic still
-advances. A report may contain both `archive-missing` gaps and confirmed
-`mismatches`; mismatches take precedence in the result. Adoption carry advances
-totals but is not a verified original debit. `empty` means no debit or carry was
-available; `incomplete` means evidence is missing. The witness is reported
+pre-debit totals. Missing revisions leave `archive-missing` gaps, which name
+each missing digest with its sequences, while recorded arithmetic still
+advances. A report may contain both gaps and found `mismatches`; mismatches
+take precedence in the result. Adoption carry advances totals but is not a
+verified original debit. Like `audit-receipts`, the charge audit reports
+`revisions` and an `approval-unverified` gap for every debit decided under a
+revision that is not `signature-verified`. `complete` (exit 0) means every
+debit was checked without a mismatch and a verified signature approved every
+revision used. `empty` means no debit or carry was available; `incomplete`
+means evidence is missing, approval evidence included. The witness is reported
 separately. This numerical audit does not establish endpoints or external work.
 
 ### Reconcile a run manifest

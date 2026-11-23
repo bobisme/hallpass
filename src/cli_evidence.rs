@@ -76,9 +76,14 @@ fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
         .as_deref()
         .map_or_else(String::new, |n| format!(" name {}", safe(n)));
     let verdict = match (&row.matched_label, row.refusal_code) {
-        (Some(label), _) if *label == row.recorded.label => {
+        // Only a revision a verified signature approved can confirm.
+        (Some(label), _) if *label == row.recorded.label && row.provenance == SIGNED => {
             format!("recorded label {} confirmed", safe(label))
         }
+        (Some(label), _) if *label == row.recorded.label => format!(
+            "recorded label {} matches the archived revision, which no verified signature approved",
+            safe(label)
+        ),
         (Some(label), _) => format!(
             "recorded label {} but the revision matches label {}",
             safe(&row.recorded.label),
@@ -99,6 +104,33 @@ fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
     )
 }
 
+const SIGNED: &str = "signature-verified";
+
+/// What a gap reason means, and what would close it next time.
+fn gap_meaning(reason: &str) -> &'static str {
+    match reason {
+        "adoption-carry" => "an adoption carried totals, which are not original debits",
+        "approval-unverified" => {
+            "decided under a revision that no verified signature approved in this archive; if the owner signed it, record the signature with verify-approval --archive"
+        }
+        "archive-missing" => {
+            "the revision is not in the archive; archive each revision before spending under it"
+        }
+        "targets-unrecorded" => {
+            "the line keeps no target; spend with --to and --record-target to keep endpoint evidence"
+        }
+        _ => "",
+    }
+}
+
+fn omitted(truncated: bool, what: &str) -> String {
+    if truncated {
+        format!(" (additional {what} omitted)")
+    } else {
+        String::new()
+    }
+}
+
 fn gaps_text(
     text: &mut String,
     gaps: &std::collections::BTreeMap<&'static str, evidence::EvidenceGap>,
@@ -106,15 +138,56 @@ fn gaps_text(
     for (reason, gap) in gaps {
         let _ = writeln!(
             text,
-            "Gap {reason} {}. Sequences {:?}{}",
+            "Gap {reason} {}: {}. Sequences {:?}{}",
             gap.count,
+            gap_meaning(reason),
             gap.sequences,
-            if gap.truncated {
-                " (additional sequences omitted)"
-            } else {
-                ""
-            }
+            omitted(gap.truncated, "sequences")
         );
+        for row in &gap.digests {
+            let _ = writeln!(
+                text,
+                "  {} {} line(s). Sequences {:?}{}",
+                row.digest,
+                row.count,
+                row.sequences,
+                omitted(row.truncated, "sequences")
+            );
+        }
+        if gap.digests_truncated {
+            text.push_str("  Additional digests omitted.\n");
+        }
+    }
+}
+
+fn revisions_text(text: &mut String, revisions: &evidence::RevisionGroup) {
+    let _ = writeln!(
+        text,
+        "Revisions used {}, {} without a verified signature",
+        revisions.count, revisions.unverified
+    );
+    for row in &revisions.details {
+        let how = row.approval.as_ref().map_or_else(
+            || match row.provenance {
+                "unsigned" => "archived with no signature record".to_owned(),
+                _ => "not in the archive".to_owned(),
+            },
+            |a| {
+                format!(
+                    "signature-verified for principal {} with trusted signers {}",
+                    safe(&format!("{:?}", a.principal)),
+                    a.allowed_signers
+                )
+            },
+        );
+        let _ = writeln!(
+            text,
+            "  {} sequences {} to {}, {} line(s): {how}",
+            row.digest, row.first_seq, row.last_seq, row.lines
+        );
+    }
+    if revisions.truncated {
+        text.push_str("  Additional revisions omitted.\n");
     }
 }
 
@@ -151,6 +224,7 @@ pub fn audit(file: &Path, directory: &Path) -> Output {
         }
     }
     gaps_text(&mut text, &report.gaps);
+    revisions_text(&mut text, &report.revisions);
     output(
         "audit-receipts",
         file,
@@ -267,6 +341,7 @@ pub fn audit_charges(file: &Path, directory: &Path) -> Output {
         text.push_str("Gaps none\n");
     }
     gaps_text(&mut text, &report.gaps);
+    revisions_text(&mut text, &report.revisions);
     for warning in &report.warnings {
         let _ = writeln!(text, "Warning: {}", safe(warning));
     }
