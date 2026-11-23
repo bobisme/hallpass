@@ -40,8 +40,55 @@ pub struct DiffReport {
     pub changes: Vec<FieldChange>,
     pub introduced: Vec<String>,
     pub removed: Vec<String>,
+    /// What each introduced destination grants, in label order.
+    pub introduced_grants: Vec<DestinationGrant>,
+    /// What each removed destination granted, in label order.
+    pub removed_grants: Vec<DestinationGrant>,
+    /// Name-restriction overlaps in the new pass that involve an introduced
+    /// destination and were not already in the old pass.
+    pub name_overlap_warnings: Vec<NameOverlapWarning>,
     pub order_changed: bool,
     pub review_required: bool,
+}
+
+/// The full grant of one destination, as plain values.
+#[derive(Clone, Debug, Serialize)]
+pub struct DestinationGrant {
+    pub label: String,
+    /// `address` for a single host, `network` otherwise.
+    pub scope: &'static str,
+    /// The literal address or the CIDR network.
+    pub network: String,
+    pub protocol: String,
+    /// Normalized ranges, such as `443, 8000-8010`.
+    pub ports: String,
+    /// The approved host names; empty means any name.
+    pub names: Vec<String>,
+    pub hostname: Option<String>,
+    pub whole_network_approved: bool,
+}
+
+fn grant(d: &crate::Destination) -> DestinationGrant {
+    let mut names = d
+        .names
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    DestinationGrant {
+        label: d.label.clone(),
+        scope: if d.network.is_host() {
+            "address"
+        } else {
+            "network"
+        },
+        network: d.network.to_string(),
+        protocol: d.protocol.to_string(),
+        ports: ports_text(&d.ports.normalized_ranges()),
+        names,
+        hostname: d.hostname.clone(),
+        whole_network_approved: d.whole_network_approved,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -255,6 +302,26 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
             .iter()
             .map(|d| &d.label)
             .filter(|l| old_labels.contains(*l)));
+    let grants = |pass: &Pass, labels: &[String]| {
+        labels
+            .iter()
+            .filter_map(|l| pass.destinations.iter().find(|d| d.label == *l))
+            .map(grant)
+            .collect::<Vec<_>>()
+    };
+    let introduced_grants = grants(b, &introduced);
+    let removed_grants = grants(a, &removed);
+    let old_overlaps = name_overlap_warnings(a)
+        .into_iter()
+        .map(|w| (w.named_label, w.unnamed_label))
+        .collect::<BTreeSet<_>>();
+    let name_overlap_warnings = name_overlap_warnings(b)
+        .into_iter()
+        .filter(|w| {
+            (introduced.contains(&w.named_label) || introduced.contains(&w.unnamed_label))
+                && !old_overlaps.contains(&(w.named_label.clone(), w.unnamed_label.clone()))
+        })
+        .collect();
     let approval_changed = a.id != b.id;
     let review_required = approval_changed
         || order_changed
@@ -270,6 +337,9 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
         changes,
         introduced,
         removed,
+        introduced_grants,
+        removed_grants,
+        name_overlap_warnings,
         order_changed,
         review_required,
     }

@@ -288,18 +288,36 @@ fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
             }
         );
     }
-    for l in &report.introduced {
-        let _ = writeln!(text, "introduced destination: {l}");
+    for (kind, grants) in [
+        ("introduced", &report.introduced_grants),
+        ("removed", &report.removed_grants),
+    ] {
+        for g in grants {
+            let names = if g.names.is_empty() {
+                "any name".to_owned()
+            } else {
+                format!("names {}", g.names.join(", "))
+            };
+            let _ = writeln!(
+                text,
+                "{kind} destination: {} grants {} {} {} ports {}, {names} [review required]",
+                safe(&g.label),
+                g.scope,
+                g.network,
+                g.protocol,
+                g.ports
+            );
+        }
     }
-    for l in &report.removed {
-        let _ = writeln!(text, "removed destination: {l}");
+    for w in &report.name_overlap_warnings {
+        let _ = writeln!(text, "WARNING: {}", safe(&w.message));
     }
     if report.order_changed {
         text.push_str("WARNING: common destination order changed; returned label may change.\n");
     }
     Output {
         code: OK,
-        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":[]}),
+        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"introduced_grants":report.introduced_grants,"removed_grants":report.removed_grants,"name_restriction_overlaps":report.name_overlap_warnings,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":report.name_overlap_warnings.iter().map(|w| w.message.as_str()).collect::<Vec<_>>()}),
         text,
     }
 }

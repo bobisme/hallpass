@@ -493,6 +493,15 @@ or null (absent); text prints absent values as `none`. A network change is
 named `destination[LABEL].network`, or `.address` when both sides are single
 hosts.
 
+An introduced or removed destination prints its full grant on one line,
+`introduced destination: LABEL grants address|network VALUE PROTOCOL ports
+PORTS, any name|names LIST [review required]`, and the JSON carries the same
+values in `introduced_grants` and `removed_grants`. When a new destination
+lets another destination's `names` list have no effect (the `check`
+name-restriction overlap), text adds a `WARNING:` line and JSON lists it in
+`name_restriction_overlaps` and `warnings`, as `check` does; overlaps
+already present in OLD are not repeated.
+
 `diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
 destination decisions using the ordinary evaluator at the supplied offset
 timestamp. The report retains the field diff and review flags. Each
@@ -811,8 +820,13 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,
   `new_digest`, `approval_id_changed`, `changes` (list of `{field, before,
   after, review_required}`; `before` and `after` are a JSON string, number
-  or null), `introduced` and `removed` (labels), `order_changed`,
-  `review_required`; `examples`, `budget_impact` or `containment` when
+  or null), `introduced` and `removed` (labels), `introduced_grants` and
+  `removed_grants` (one `{label, scope, network, protocol, ports, names,
+  hostname, whole_network_approved}` per introduced or removed destination;
+  `scope` is `address` or `network`; empty `names` means any name),
+  `name_restriction_overlaps` (as in `check`, limited to overlaps that
+  NEW introduces; their messages are also in `warnings`),
+  `order_changed`, `review_required`; `examples`, `budget_impact` or `containment` when
   requested.
 - **consumer-coverage**: `pass_id`, `digest`, `declared`,
   `require_target`, `findings` (each with its `code`).
