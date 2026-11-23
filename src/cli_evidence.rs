@@ -32,6 +32,18 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
         report.witness,
         report.adoption_count
     );
+    if !report.reconciled_at.is_empty() {
+        let _ = writeln!(
+            text,
+            "  Listed in the reference reconciliation(s) at sequence {}.",
+            report
+                .reconciled_at
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     for row in &report.matches {
         let _ = writeln!(
             text,
@@ -388,6 +400,17 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
                 ),
             }
         );
+        if !row.reconciled_at.is_empty() {
+            let _ = writeln!(
+                text,
+                "      listed in the reference reconciliation(s) at sequence {}",
+                row.reconciled_at
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         for d in &row.differences {
             let show = |v: &Option<serde_json::Value>| match v {
                 None => "absent".to_owned(),

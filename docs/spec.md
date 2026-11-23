@@ -52,7 +52,7 @@ the same questions.
 - **Debit**: the record of one unit of work in the ledger. It charges one
   or more counters, each by a positive amount.
 - **Ledger**: the append-only file beside the pass that records every
-  spend (and every adoption).
+  spend (and every adoption and reference reconciliation).
 - **Witness**: a small record per pass id in the user's state directory,
   outside the pass directory: the ledger's last sequence number, the hash
   of its last line, the totals, and where the ledger was. It lets hallpass
@@ -62,6 +62,8 @@ the same questions.
   not an absolute path. A relative `XDG_STATE_HOME` is ignored with a warning that names it and the directory used instead. Created mode 0700; witness and lock files 0600.
 - **Adoption**: an operator's recorded acknowledgment, with a reason, of a
   ledger that was lost, changed outside hallpass, or had no witness.
+- **Reference reconciliation**: an operator's recorded statement, with a
+  reason, of which caller references may be in the lines an adoption lost.
 - **Digest**: `sha256:` plus the SHA-256 of the pass file's exact bytes.
 
 ## The pass file (summary)
@@ -271,7 +273,11 @@ ID. Digest and window refusals take precedence. A duplicate exits 2 with
 `refusal.code=duplicate-reference`, `seq: null`, and `reference_evidence`
 containing `caller_ref`, `match_count`, the first 64 `sequences` in ledger
 order, and `truncated`. The scan verifies the rest of the chain after a
-match, including entries after the witness.
+match, including entries after the witness. A reference that a reference
+reconciliation lists (see `reconcile-references` below) is a duplicate too,
+also when no debit in the ledger carries it: `reference_evidence` then adds
+`reconciled_at`, the first 64 sequences of the reconciliations that list
+it, and the message names the first one and its adoption.
 
 An absent reference exits 2 with `reference-inconclusive` and empty match
 details when the ledger may lack lines that hallpass recorded:
@@ -281,10 +287,13 @@ details when the ledger may lack lines that hallpass recorded:
   a ledger without lines hallpass had recorded: a missing ledger started
   anew with the witnessed totals, or a changed ledger with what the witness
   recorded beyond it. References on those lines may be gone even when
-  nothing was carried. This lasts for the rest of the ledger, whatever is
-  adopted later. Check the reference against the caller's run record, and
-  spend without `--require-new-ref` only if that record shows the unit was
-  never submitted. The message names the adoption's sequence.
+  nothing was carried. This lasts until a reference reconciliation follows
+  the latest such adoption (see `reconcile-references` below); an adoption
+  that loses nothing does not end it. Check the reference against the
+  caller's run record, and spend without `--require-new-ref` only if that
+  record shows the unit was never submitted. The message names the latest
+  such adoption and the `hallpass reconcile-references` command that ends
+  this.
 - **Without a local witness.** A ledger with at least one line and no
   witness may be a partial copy. A guarded refusal records no witness. If
   the ledger is the complete history (for example it moved with the pass
@@ -299,7 +308,7 @@ only the header loses none either. Adopt a ledger without a witness only
 when it is the complete history: hallpass cannot tell a partial copy from
 a complete one, and neither the count nor the guard sees lines missing
 from it. Every adoption record already has the `witness` and `carried`
-fields that tell the kinds apart, so the ledger format is unchanged.
+fields that tell the kinds apart, so the adoption line is unchanged.
 
 Missing or invalid caller references are usage errors. A dry run applies
 the same rules and reports observed matches without a reservation. The
@@ -343,10 +352,11 @@ lock sooner prints nothing. The library never prints: set
 
 ### The witness
 
-After every recorded spend or adoption the witness for the pass id holds
-the ledger's last sequence number, the SHA-256 of its last line, the totals
-per counter, the ledger's resolved path and the time. Every command that
-reads the ledger (`status`, `permits`, `spend`, `ledger`, `adopt`) compares:
+After every recorded spend, adoption or reference reconciliation the
+witness for the pass id holds the ledger's last sequence number, the
+SHA-256 of its last line, the totals per counter, the ledger's resolved
+path and the time. Every command that reads the ledger (`status`,
+`permits`, `spend`, `ledger`, `adopt`, `reconcile-references`) compares:
 
 | Ledger | Witness | Result |
 |---|---|---|
@@ -406,7 +416,8 @@ pass digest, the witness's previous record, and `carried`):
 
 The first two may have lost lines and their caller references, so later
 guarded spends refuse new references as `reference-inconclusive`; the third
-keeps every line (see "Caller references and receipts"). Carried amounts
+keeps every line (see "Caller references and receipts"). A reference
+reconciliation (`reconcile-references`, below) ends that refusal. Carried amounts
 count as spent. An adoption never lowers a count below
 what the witness recorded; there is no reset to zero (a new budget is a
 raised ceiling in the pass, or a new pass). Then the witness records the
@@ -424,8 +435,9 @@ abandoned, move it away from the path the witness names; the case is then
 When the adoption would carry an amount or record a previous witness of
 at least one line, `adopt --preview` warns in `warnings` that every later
 guarded spend (`--require-new-ref`) on this ledger is refused as
-`reference-inconclusive`. `adopt` repeats the warning when it records the
-adoption.
+`reference-inconclusive` until the references that may be in the lost lines
+are reconciled with `hallpass reconcile-references`. `adopt` repeats the
+warning when it records the adoption.
 
 `adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
 case, present totals, carry and projected totals, prior witness and a versioned
@@ -440,6 +452,102 @@ The guard coordinates hallpass writers through their locks. Programs that edit
 pass or ledger files without taking those locks can change them after a reviewed
 snapshot; the missing-ledger decision uses the validated pass snapshot held at
 publication time.
+
+### `reconcile-references(pass, adoption, references, reason, now)`
+
+After an adoption that may have lost lines, every guarded spend is
+`reference-inconclusive` (see "Caller references and receipts"). Putting
+the old ledger back is `ledger-changed`, so the way back is a statement
+from the operator, recorded in the ledger:
+
+```text
+hallpass reconcile-references FILE --adoption SEQ --references LIST --reason TEXT
+```
+
+`LIST` is a JSON file, at most 8 MiB:
+`{"version": 1, "pass_id": "ID", "references": ["REF", ...]}`. It names
+every caller reference that may be in the lines the adoption lost: in
+practice, every reference that the run records of every caller on this pass
+used. Each reference follows the caller reference rules, each appears once,
+and a list holds at most 10,000. An empty list states that no reference was
+lost. `--adoption` names the latest adoption that may have lost lines: the
+sequence that the `reference-inconclusive` message and
+`ledger --format json` (`unreconciled_adoption`) give. The reason follows
+the note rules and is required.
+
+The reconciliation is a line in the hash chain, like an adoption:
+
+```text
+{"seq":5,"time":"…","event":"reconcile-references","adoption":3,"reason":"every reference in the shift 17 journals","digest":"sha256:…","references":["unit-1","unit-2"],"prev":"sha256:…"}
+```
+
+From that line on, a guarded spend decides in this order:
+
+1. a debit in the ledger carries the reference: `duplicate-reference`;
+2. a reconciliation lists it: `duplicate-reference`, with `reconciled_at`;
+3. an adoption that may have lost lines has no reconciliation after it:
+   `reference-inconclusive`;
+4. the ledger has lines but no local witness: `reference-inconclusive`;
+5. otherwise the reference is new.
+
+A reconciliation covers the adoption it names and every earlier one. A
+second reconciliation of the same adoption adds its references. A later
+adoption that may lose lines makes references inconclusive again until it
+is reconciled too; the lists of earlier reconciliations that are still in
+the chain keep refusing their references. A reconciliation permits nothing,
+changes no count, and does not check the window. Under both writer locks it
+compares the ledger with the witness as a spend does, appends the line and
+syncs it, then updates the witness.
+
+Nothing is recorded, and the error is `usage`, when the reason or the list
+breaks these rules, the ledger has no adoption that may have lost lines,
+`--adoption` is not the latest one (the message names it), or the ledger
+has lines but no witness (hallpass cannot tell a partial copy from the
+whole history: adopt it as it stands first). With no ledger, it is `usage`,
+or `ledger-missing` (or `ledger-elsewhere`) when the witness recorded lines.
+A changed ledger is `ledger-changed`, and the state directory errors are
+those of `spend`. When the line was appended and only the witness update
+failed, the error is `witness-unavailable` with a null `recording`, and the
+reconciliation stands; the next command accepts the ledger, since it only
+adds to what the witness recorded.
+
+The ledger accepts the line only where hallpass writes it: after an
+adoption that may have lost lines, naming the latest such adoption, with
+distinct valid references and a valid reason. Anything else is
+`ledger-corrupt` at that line.
+
+**Why this is safe.** The guard's promise is that a reference already used
+on this pass is refused. After a lossy adoption, hallpass cannot keep it
+alone, because the lost lines are gone. The reconciliation keeps it with
+the operator's run records, and only by a statement recorded in the ledger:
+a reference that was used in a lost line is accepted as new only when an
+operator recorded a reconciliation, with a reason, whose list leaves it
+out. Until then every reference stays inconclusive. The line names the
+adoption it covers, and the command refuses a list made for an earlier
+adoption, so a list never silently covers a loss it was not made for. Every
+reference it lists stays a duplicate for as long as the line is in the
+chain. A second loss starts the refusal again. A loss that takes the
+reconciliation with it is itself an adoption that may have lost lines.
+
+A listed reference is refused, whatever its prefix, rather than accepted
+under a new prefix or epoch: a prefix proves nothing about references
+that callers outside the operator's control used, and an exact list can be
+audited line by line against the run records. A caller that owns a prefix
+should still list every reference it used.
+
+**Compatibility.** The line is a new kind; the ledger version stays 1. The
+line has the field `references`, which no earlier line shape accepts, and
+lacks the fields that identify a spend, debit or adoption (`counter`,
+`charges`, `carried`). A hallpass from before this line decodes no shape
+from it, so every command of it that reads the ledger (`status`, `permits`,
+`spend`, `capacity`, `rehearse`, `ledger`, `adopt`, `receipt`,
+`audit-receipts`, `audit-charges`, `reconcile`, `checkpoint`,
+`verify-checkpoint`, `compare-backups` for that candidate, and `diff
+--budget-impact`) fails with `ledger-corrupt` at that line, and nothing
+more can be spent there. It never counts around the line or skips it. Use
+a hallpass that reads the line; do not remove it. This hallpass, too,
+reports a complete line whose `event` it does not know as `ledger-corrupt`,
+and says that a newer hallpass may have written it.
 
 ### When the pass is edited
 
@@ -476,12 +584,12 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
 | the ledger is missing, but the ledger the witness last saw at another path is intact (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
-| `spend`, `adopt`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
+| `spend`, `adopt`, `reconcile-references`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
 | the spend exhausted its optional writer lock wait budget before appending | `lock-timeout` |
 | the append or its sync failed and the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
-| bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a malformed test clock | `usage` |
+| bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a bad reference list or nothing to reconcile, a malformed test clock | `usage` |
 
 A missing ledger is not an error when no witness records lines for the
 pass id: it means nothing was spent.
@@ -498,10 +606,11 @@ of a command that never appends to a ledger (for example `ledger`, `check`,
 `receipt`, `reconcile`, `capacity`): an `io` error from `ledger` has
 `recording = "not-recorded"`. The exception is an `adopt` whose adoption was
 appended before the witness update failed: its `witness-unavailable` error has a
-null `recording`, and the adoption counts. `recording` is null only for an
-error of a command that can append (`spend`, `adopt`, `status`) that is not a
-usage error and not named above, such as an `io` error: hallpass cannot say
-whether the write happened.
+null `recording`, and the adoption counts. The same holds for a
+`reconcile-references` whose reconciliation was appended. `recording` is null
+only for an error of a command that can append (`spend`, `adopt`,
+`reconcile-references`, `status`) that is not a usage error and not named
+above, such as an `io` error: hallpass cannot say whether the write happened.
 
 ## Budget questions
 
@@ -768,6 +877,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
 | `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, the ledger is intact elsewhere, missing reason, stale token, unusable state directory |
+| `reconcile-references` | reconciliation recorded | never | invalid pass, list or reason, damaged, missing or changed ledger, no adoption to reconcile, not the latest such adoption, no witness, unusable state directory |
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
 | `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
@@ -796,14 +906,18 @@ point) go to standard error as
 `ledger` is read-only. It takes the same shared lock as `status`, verifies
 the whole chain, compares it with the witness, and lists each entry
 (sequence number, time, counter, amount, the pass digest it was made
-under, note) and each adoption (with what it carried and its reason), then
-the total per counter. `--counter NAME` shows one counter.
+under, note) and each adoption (with what it carried and its reason) and
+reference reconciliation (with its adoption, its number of references, the
+first ten of them quoted, and its reason last), then the total per counter.
+While an adoption that may have lost lines is not reconciled, text adds a
+`References:` line that says so. `--counter NAME` shows one counter.
 `--tail N` shows only the last N entries and `--since SEQ` only entries with
 sequence number >= SEQ. Both are applied to the output only: the whole chain
 is verified and compared with the witness first (a damaged earlier line still
 fails), and the totals and balances cover the whole ledger. Given together,
 they select the intersection: first entries with seq >= SEQ, then the last N
-of those. Both apply after `--counter` (adoptions always count as entries).
+of those. Both apply after `--counter` (adoptions and reference
+reconciliations always count as entries).
 `--tail 0` shows no entries but still verifies and prints the totals; a
 `--since` beyond the last entry shows none. A slice is marked: text output
 has a line `Showing entries A to B of T in the ledger (...)`, and JSON has
@@ -880,7 +994,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   is empty without `--record-target`, and each entry is `{target, name,
   label}` with `name` null for an unnamed endpoint), `refusal`,
   `reference_evidence` (`{caller_ref, match_count, sequences, truncated}`
-  for `duplicate-reference` and `reference-inconclusive`, else null). The
+  for `duplicate-reference` and `reference-inconclusive`, else null;
+  `match_count` and `sequences` count debits only, and `reconciled_at`,
+  the first 64 sequences of the reference reconciliations that list the
+  reference, is present only when one does). The
   ledger line keeps its own, shorter encoding.
 - **capacity**: `digest`, `pass_id`, `now`, `test_clock`, `targets`,
   `units`, `limiting_counters`, `counters` and `unit_refusal`, as in
@@ -895,14 +1012,23 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `true` on success: a chain that does not verify is an error), `shown`
   (null without `--tail` or `--since`, else `{from, to, of}`: the first and
   last sequence number shown, null when none is, and `of`, the number of
-  entries, adoptions included, in the whole ledger), `entries`
+  entries, adoptions and reference reconciliations included, in the whole
+  ledger), `entries`
   (list of `{seq, time, counter, n, digest, note}` for a scalar spend, or
   `{seq, time, event, version, charges, digest, note, receipt}` with
   `event` `debit` for a versioned debit; `digest` is the pass
   digest the spend was decided against, `note` null when none),
-  `adoptions` (list of `{seq, time, reason, digest, carried, previous}`;
-  `carried` is an object of counter name to amount, `previous` is `{ledger,
-  seq, totals, updated}` or null), `witness`, `moved_from` (as in
+  `adoptions` (list of `{seq, time, reason, digest, carried, previous,
+  may_have_lost_references}`; `carried` is an object of counter name to
+  amount, `previous` is `{ledger, seq, totals, updated}` or null,
+  `may_have_lost_references` is true for an adoption that records a
+  previous witness of at least one line or carries an amount),
+  `reference_reconciliations` (list of `{seq, time, adoption, reason,
+  digest, references}`; `adoption` is the sequence of the adoption it
+  reconciles, `references` the whole list), `unreconciled_adoption` (the
+  latest adoption that may have lost lines when no reconciliation follows
+  it, so guarded spends are `reference-inconclusive`; else null), `witness`,
+  `moved_from` (as in
   `status`), `totals`
   (list of `{name, spent, total, remaining, over_ceiling, over_by}` for every counter of the pass
   and every counter in the ledger, sorted by name; `total` and `remaining`
@@ -914,19 +1040,25 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   counter name to amount), `previous` (as in `ledger`, or null). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
   `totals`, `previous` and `token`.
+- **reconcile-references**: `ledger`, `pass_id`, `digest`, `now`,
+  `test_clock`, `seq` (of the new line), `adoption`, `reason` and
+  `references` (the list recorded).
 - **archive**: `digest`, `provenance` (`signature-verified` or
   `unsigned`) and `approval` (the kept signature record `{principal,
   namespace, allowed_signers, signature}`, or null). **retrieve**: `digest`
   and `bytes` (the exact pass text); with `--output FILE`, `digest`, `output`
   (the path), `mode` (`0600`) and `length` (bytes written) instead of `bytes`.
 - **receipt**, **audit-receipts**, **audit-charges**, **reconcile**,
-  **compare-backups**: see [EVIDENCE.md](EVIDENCE.md). **reconcile** has
+  **compare-backups**: see [EVIDENCE.md](EVIDENCE.md). **receipt** has
+  `reconciled_at` (the first 64 sequences of the reference reconciliations
+  that list the reference, empty when none does). **reconcile** has
   `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
-  result, candidate_count, sequences, truncated, differences}` in manifest
-  order; each entry of `differences` is `{sequence, field, expected,
-  recorded}`, where `expected` and `recorded` are numbers for
-  `charge.<counter>` and `targets.count`, strings for the other fields, and
-  null when that side has none).
+  result, candidate_count, sequences, truncated, differences,
+  reconciled_at}` in manifest order; each entry of `differences` is
+  `{sequence, field, expected, recorded}`, where `expected` and `recorded`
+  are numbers for `charge.<counter>` and `targets.count`, strings for the
+  other fields, and null when that side has none; `reconciled_at` as in
+  `receipt`).
 - **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash}`, or null
   when `result` is `empty`), `local_corroboration`, `witness` `{relation,
   witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
@@ -988,7 +1120,8 @@ included). The whole-second rule above is about window times only.
 ### Test clock
 
 `HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` replaces "now" for `status`,
-`permits`, `spend`, `capacity`, `adopt` and `lint`, only in debug builds and
+`permits`, `spend`, `capacity`, `adopt`, `reconcile-references` and `lint`,
+only in debug builds and
 builds with the `test-clock` feature. When used, a warning goes to standard
 error and `test_clock` is `true`. Release builds ignore it and say so on
 standard error.
@@ -1016,8 +1149,9 @@ Crate `hallpass` (re-exports `time`):
 | `spend_charges`, `spend_charges_in`, `spend_charges_with_clock_in`, `SpendChargesRequest`, `SpendChargesOutcome`, `Charge`, `ChargeOutcome` | one debit with several charges, an optional caller reference, receipt and reference guard |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
 | `preview_adopt`, `adopt_guarded`, `AdoptPreview` | the adoption preview and its token |
+| `reconcile_references(path, adoption, &[String], reason, now, &StateDir) -> Result<ReconcileReferencesOutcome, Error>`, `read_reference_list(path, pass_id)`, `ReferenceReconciliation`, `MAX_RECONCILED_REFERENCES`, `MAX_REFERENCE_LIST_BYTES` | record a reference reconciliation (`ReconcileReferencesOutcome { reconciliation, ledger, pass_id, warnings }`) and read its list |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
-| `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
+| `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |

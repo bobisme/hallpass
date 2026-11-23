@@ -41,6 +41,10 @@ pub struct ReconcileRow {
     /// What differs between the manifest unit and each recorded candidate.
     /// Empty when nothing differs or nothing was recorded.
     pub differences: Vec<ReconcileDifference>,
+    /// The first 64 sequences of reference reconciliations that list the
+    /// reference: the operator recorded that its debit may be in lines an
+    /// adoption lost.
+    pub reconciled_at: Vec<u64>,
 }
 /// One field of a manifest unit that differs from a recorded debit.
 #[derive(Serialize)]
@@ -364,9 +368,23 @@ pub fn reconcile(
             sequences: Vec::new(),
             truncated: false,
             differences: Vec::new(),
+            reconciled_at: Vec::new(),
         })
         .collect();
+    let mut reconciled_rows = 0_usize;
     let view = visit_view(loaded, state, false, &mut |event| {
+        if let VerifiedEvent::Reconcile(r) = event {
+            for listed in &r.references {
+                if let Some(row) = index.get(listed.as_str()).map(|i| &mut rows[*i]) {
+                    if row.reconciled_at.is_empty() {
+                        reconciled_rows += 1;
+                    }
+                    if row.reconciled_at.len() < DETAIL_LIMIT {
+                        row.reconciled_at.push(r.seq);
+                    }
+                }
+            }
+        }
         let VerifiedEvent::Debit(d) = event else {
             return Ok(());
         };
@@ -419,6 +437,11 @@ pub fn reconcile(
     let mut warnings = view.warnings;
     if view.adoption_count > 0 {
         warnings.push("The available history includes adoption. Carried totals can survive even when individual receipts are missing.".into());
+    }
+    if reconciled_rows > 0 {
+        warnings.push(format!(
+            "{reconciled_rows} row(s) name a reference that a reference reconciliation lists (see reconciled_at): the operator recorded that its debit may be in lines lost before an adoption, so an absent row may still have been debited."
+        ));
     }
     Ok(Reconciliation {
         pass_id: loaded.pass.id.clone(),

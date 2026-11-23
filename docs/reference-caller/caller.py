@@ -5,6 +5,7 @@
     caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                       [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
     caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
+    caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [--rehearsal]
 
 The hallpass ledger is the authority for debits. The journal is the authority
 for what this caller did. Python 3 standard library only. See README.md.
@@ -237,6 +238,11 @@ def caller_record(records):
 
 VERDICTS = {
     ("sent", "match"): "ok: debited and sent",
+    ("sent", "reconciled"): "ok: sent; its debit is missing from the adopted ledger, and the reference is reconciled",
+    ("refused", "reconciled"): "ok: refused, nothing debited or sent",
+    ("unconfirmed", "reconciled"): "ATTENTION: completion not recorded; check the target, do not repeat",
+    ("not sent", "reconciled"): "ATTENTION: debited, never sent; the debit is missing from the adopted ledger",
+    ("unknown", "reconciled"): "ATTENTION: maybe debited in lines an adoption lost; nothing was sent",
     ("refused", "absent"): "ok: refused, nothing debited or sent",
     ("unconfirmed", "match"): "ATTENTION: completion not recorded; check the target, do not repeat",
     ("not sent", "match"): "ATTENTION: debited, never sent; the debit stands",
@@ -274,7 +280,14 @@ def handoff(a):
         reply = decode(out)
         if code not in (0, 2) or not isinstance(reply.get("rows"), list):
             fail(f"reconcile failed: {message(reply)}")
-        rows = {row["caller_ref"]: (row["result"], row["sequences"]) for row in reply["rows"]}
+        rows = {}
+        for row in reply["rows"]:
+            # A debit lost with an adopted ledger is absent, but a reference
+            # reconciliation lists it: say so rather than "no debit".
+            if row["result"] == "absent" and row.get("reconciled_at"):
+                rows[row["caller_ref"]] = ("reconciled", row["reconciled_at"])
+            else:
+                rows[row["caller_ref"]] = (row["result"], row["sequences"])
 
     table = [(ref, caller_record(rs), *rows[ref]) for ref, rs in mine.items()]
     others = []
@@ -313,13 +326,55 @@ def handoff(a):
     return 2 if attention else 0
 
 
+def reconcile_references(a):
+    """After an adoption that may have lost lines, record in the ledger every
+    reference that the journals used on this pass, so that guarded spends resume.
+
+    hallpass then refuses each listed reference as a duplicate and accepts a new
+    one. A reference left off the list would be accepted as new, so name the
+    journal of every caller that spent on this pass: this one, and each other one
+    with --also. The list is every reference in them, whatever its outcome."""
+    code, out = hallpass("ledger", "--", a.pass_file)
+    ledger = decode(out)
+    if code != 0 or ledger.get("verified") is not True:
+        fail(f"the ledger could not be verified: {message(ledger)}")
+    adoption = ledger.get("unreconciled_adoption")
+    if adoption is None:
+        print("No adoption that may have lost lines waits for a reference reconciliation: nothing to do.")
+        return 0
+    references = []
+    for journal in [a.journal, *a.also]:
+        if not os.path.exists(journal):
+            fail(f"no journal at {journal}")
+        for ref in units(read_journal(journal), a.pass_file):
+            if ref not in references:
+                references.append(ref)
+    listing = {"version": 1, "pass_id": ledger["pass_id"], "references": references}
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "references.json")
+        with open(path, "w") as f:
+            json.dump(listing, f)
+        code, out = hallpass("reconcile-references", "--adoption", str(adoption), "--references", path,
+                             "--reason", a.reason, "--", a.pass_file, rehearsal=a.rehearsal)
+    reply = decode(out)
+    if code != 0 or reply.get("result") != "ok" or not isinstance(reply.get("seq"), int):
+        fail(f"reconcile-references failed: {message(reply)}")
+    append(a.journal, event="reconcile-references", **{"pass": a.pass_file}, adoption=adoption,
+           seq=reply["seq"], references=len(references))
+    print(f"reconciled {len(references)} references for the adoption at seq {adoption}: ledger seq {reply['seq']}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(required=True)
     pin_command = commands.add_parser("pin", help="archive the reviewed pass and pin its digest")
     run_command = commands.add_parser("run", help="perform one unit of work")
     handoff_command = commands.add_parser("handoff", help="report every unit in the journal by reference")
-    for command, action in [(pin_command, pin), (run_command, run), (handoff_command, handoff)]:
+    reconcile_command = commands.add_parser(
+        "reconcile-references", help="after a lossy adoption, record the journals' references so guarded spends resume")
+    for command, action in [(pin_command, pin), (run_command, run), (handoff_command, handoff),
+                            (reconcile_command, reconcile_references)]:
         command.set_defaults(action=action)
         command.add_argument("journal")
         command.add_argument("pass_file", metavar="pass")
@@ -329,6 +384,11 @@ def main():
     handoff_command.add_argument("--since", type=int, default=0, metavar="SEQ",
                                  help="look at ledger debits from this sequence number on")
     handoff_command.add_argument("--all", action="store_true", help="list the debits that are not this journal's")
+    reconcile_command.add_argument("--reason", required=True, help="why the list is complete; recorded in the ledger")
+    reconcile_command.add_argument("--also", action="append", default=[], metavar="JOURNAL",
+                                   help="the journal of another caller that spent on this pass; repeat for each")
+    reconcile_command.add_argument("--rehearsal", action="store_true",
+                                   help="keep HALLPASS_UNSAFE_TEST_CLOCK for a debug hallpass")
     run_command.add_argument("ref")
     run_command.add_argument("--to", action="append", required=True, type=target,
                              metavar="ADDR:PORT/PROTO[@NAME]", help="a literal endpoint; repeat for each")

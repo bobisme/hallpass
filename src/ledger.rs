@@ -47,7 +47,11 @@ pub mod scenario;
 mod written;
 pub use debit::*;
 use debit::{DebitLine, parse_debit};
-pub use reference::ReferenceEvidence;
+pub use reference::{
+    MAX_RECONCILED_REFERENCES, MAX_REFERENCE_LIST_BYTES, ReconcileReferencesOutcome,
+    ReferenceEvidence, ReferenceReconciliation, read_reference_list, reconcile_references,
+};
+use reference::{ReconcileLine, parse_reconcile};
 
 /// The ledger format version.
 const LEDGER_VERSION: u32 = 1;
@@ -438,6 +442,13 @@ pub struct LedgerView {
     pub debits: Vec<LedgerDebit>,
     /// Every adoption, in order.
     pub adoptions: Vec<Adoption>,
+    /// Every reference reconciliation, in order.
+    pub reconciliations: Vec<ReferenceReconciliation>,
+    /// The latest adoption that may have lost lines, and so caller
+    /// references, when no reference reconciliation follows it: until one
+    /// does, guarded spends are refused as `reference-inconclusive`. `None`
+    /// when no adoption may have lost lines, or the latest one is reconciled.
+    pub unreconciled_adoption: Option<u64>,
     /// The totals (spends and carried amounts).
     pub tally: Tally,
     /// Timestamp of the latest recorded event, if any.
@@ -461,6 +472,11 @@ struct Parsed {
     entries: Vec<LedgerEntry>,
     debits: Vec<LedgerDebit>,
     adoptions: Vec<Adoption>,
+    reconciliations: Vec<ReferenceReconciliation>,
+    /// The latest adoption that may have lost lines, if any.
+    lossy_adoption: Option<u64>,
+    /// The adoption that the latest reference reconciliation names, if any.
+    reconciled_adoption: Option<u64>,
     /// The hash of every line; index 0 is the header, index `n` the line
     /// with sequence number `n`.
     tail: Digest,
@@ -493,6 +509,13 @@ impl Parsed {
         self.tail
     }
 
+    /// The latest adoption that may have lost lines, unless a reference
+    /// reconciliation names it.
+    fn unreconciled_adoption(&self) -> Option<u64> {
+        self.lossy_adoption
+            .filter(|seq| self.reconciled_adoption != Some(*seq))
+    }
+
     /// The pass digest that a spend or debit line records as `text`. A
     /// digest's value depends only on its text, and a line usually repeats
     /// the digest of the line before, so that text is compared, not parsed
@@ -513,6 +536,7 @@ enum Line {
     Spend(Entry),
     Debit(DebitLine),
     Adopt(AdoptLine),
+    Reconcile(ReconcileLine),
 }
 
 /// Which record shape a ledger line has.
@@ -521,18 +545,26 @@ enum Shape {
     Spend,
     Debit,
     Adopt,
+    Reconcile,
 }
 
 impl Line {
-    /// Decode one ledger line as one of the three record shapes.
+    /// Decode one ledger line as one of the four record shapes.
     ///
-    /// This accepts exactly the lines that an untagged enum of the three shapes
+    /// This accepts exactly the lines that an untagged enum of the four shapes
     /// accepts, but it does not first buffer every line into an untyped value
     /// (which cost more than hashing the line). Each shape refuses unknown
-    /// fields and requires a field that the other two refuse (`counter`,
-    /// `charges`, `carried`), so at most one shape decodes a line, and the
-    /// order of the attempts cannot change the result. The likely shape is
-    /// tried first, because a failed attempt costs more than a decode.
+    /// fields and requires a field that the other three refuse (`counter`,
+    /// `charges`, `carried`, `references`), so at most one shape decodes a
+    /// line, and the order of the attempts cannot change the result. The
+    /// likely shape is tried first, because a failed attempt costs more than
+    /// a decode.
+    ///
+    /// The reference reconciliation is the newest shape. A hallpass from
+    /// before it has only the other shapes, each refusing the field
+    /// `references`, so it decodes no shape from such a line and stops with
+    /// `ledger-corrupt` at that line: it fails closed, and never counts
+    /// around the line or skips it.
     ///
     /// Every line is checked as UTF-8 once, as a whole. A line that is not
     /// UTF-8 is not JSON either, so this refuses nothing that JSON decoding
@@ -547,10 +579,11 @@ impl Line {
             Shape::Spend => serde_json::from_str(text).ok().map(Self::Spend),
             Shape::Debit => serde_json::from_str(text).ok().map(Self::Debit),
             Shape::Adopt => serde_json::from_str(text).ok().map(Self::Adopt),
+            Shape::Reconcile => serde_json::from_str(text).ok().map(Self::Reconcile),
         };
         let first = Shape::guess(text);
         attempt(first).or_else(|| {
-            [Shape::Spend, Shape::Debit, Shape::Adopt]
+            [Shape::Spend, Shape::Debit, Shape::Adopt, Shape::Reconcile]
                 .into_iter()
                 .filter(|shape| *shape != first)
                 .find_map(attempt)
@@ -565,6 +598,8 @@ impl Shape {
             Self::Debit
         } else if text.contains("\"carried\":") {
             Self::Adopt
+        } else if text.contains("\"references\":") {
+            Self::Reconcile
         } else {
             Self::Spend
         }
@@ -622,6 +657,7 @@ enum VerifiedEvent {
     Spend(LedgerEntry),
     Debit(LedgerDebit),
     Adopt(Adoption),
+    Reconcile(ReferenceReconciliation),
 }
 
 type Visitor<'a> = dyn FnMut(&VerifiedEvent) -> Result<(), Error> + 'a;
@@ -684,6 +720,9 @@ fn scan_ledger(
         entries: Vec::new(),
         debits: Vec::new(),
         adoptions: Vec::new(),
+        reconciliations: Vec::new(),
+        lossy_adoption: None,
+        reconciled_adoption: None,
         tail: Digest::of(&first),
         prefix: (requested == Some(0)).then(|| (0, Digest::of(&first))),
         last_time: None,
@@ -709,12 +748,19 @@ fn scan_ledger(
         if line.pop() != Some(b'\n') {
             return Err(corrupt(number, "the last line is cut short (no line end)"));
         }
-        let record = Line::decode(&line)
-            .ok_or_else(|| corrupt(number, "the line is not a complete ledger entry"))?;
+        let record = Line::decode(&line).ok_or_else(|| {
+            corrupt(
+                number,
+                unknown_event(&line)
+                    .as_deref()
+                    .unwrap_or("the line is not a complete ledger entry"),
+            )
+        })?;
         let (seq, prev) = match &record {
             Line::Spend(e) => (e.seq, &e.prev),
             Line::Debit(e) => (e.seq, &e.prev),
             Line::Adopt(a) => (a.seq, &a.prev),
+            Line::Reconcile(r) => (r.seq, &r.prev),
         };
         if seq != parsed.seq + 1 {
             return Err(corrupt(
@@ -735,6 +781,9 @@ fn scan_ledger(
             Line::Spend(entry) => parse_spend(&mut parsed, entry).map(VerifiedEvent::Spend),
             Line::Debit(debit) => parse_debit(&mut parsed, debit).map(VerifiedEvent::Debit),
             Line::Adopt(adopt) => parse_adopt(&mut parsed, adopt).map(VerifiedEvent::Adopt),
+            Line::Reconcile(line) => {
+                parse_reconcile(&mut parsed, line).map(VerifiedEvent::Reconcile)
+            }
         }
         .map_err(|detail| corrupt(number, detail))?;
         visit(&event)?;
@@ -743,6 +792,7 @@ fn scan_ledger(
                 VerifiedEvent::Spend(entry) => parsed.entries.push(entry),
                 VerifiedEvent::Debit(debit) => parsed.debits.push(debit),
                 VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(adopt),
+                VerifiedEvent::Reconcile(r) => parsed.reconciliations.push(r),
             }
         }
         parsed.seq = seq;
@@ -753,6 +803,23 @@ fn scan_ledger(
         }
     }
     Ok(parsed)
+}
+
+/// The events that the line shapes of this hallpass record.
+const KNOWN_EVENTS: [&str; 3] = ["debit", "adopt", reference::RECONCILE_EVENT];
+
+/// For a line that no shape decodes: when it is a complete JSON object
+/// whose `event` this hallpass does not know, say so. A newer hallpass may
+/// have written it, and it is not a line cut short.
+fn unknown_event(line: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let event = value.get("event")?.as_str()?;
+    (!KNOWN_EVENTS.contains(&event)).then(|| {
+        format!(
+            "the line is a complete record of an event this hallpass does not know (\"{}\"), perhaps written by a newer hallpass: read this ledger with that one",
+            display_safe(event)
+        )
+    })
 }
 
 fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<LedgerEntry, &'static str> {
@@ -822,6 +889,9 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
     for (counter, n) in &line.carried {
         add(&mut parsed.tally.spent, counter, *n)
             .ok_or("the recorded amounts add up beyond any ceiling")?;
+    }
+    if reference::may_lose_references(&line.carried, previous.as_ref()) {
+        parsed.lossy_adoption = Some(line.seq);
     }
     Ok(Adoption {
         seq: line.seq,
@@ -1045,7 +1115,7 @@ fn warnings(
             "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); an allowed spend records one, and so does a spend refused by the pass itself (a ceiling, a destination, the dates); a spend that --require-new-ref refuses for want of a witness, and a --dry-run preview, record none. Until one is recorded, a lost or rewound ledger would not be noticed"
         )),
         WitnessStatus::Extended { added } => out.push(format!(
-            "the ledger has {added} line(s) after the last one the witness recorded (a spend that stopped before updating the witness, or a hallpass that keeps none); they are counted"
+            "the ledger has {added} line(s) after the last one the witness recorded (a spend, adoption or reference reconciliation that stopped before updating the witness, or a hallpass that keeps none); they are counted"
         )),
         WitnessStatus::NotChecked { reason } => {
             out.push(format!("the ledger was not checked against its witness: {reason}"));
@@ -1138,6 +1208,9 @@ fn visit_view(
         entries: Vec::new(),
         debits: Vec::new(),
         adoptions: Vec::new(),
+        reconciliations: Vec::new(),
+        lossy_adoption: None,
+        reconciled_adoption: None,
         tail: Digest::of(b""),
         prefix: None,
         last_time: None,
@@ -1146,6 +1219,7 @@ fn visit_view(
         valid_targets: Vec::new(),
         last_digest: None,
     });
+    let unreconciled_adoption = parsed.unreconciled_adoption();
     Ok(LedgerView {
         path,
         exists,
@@ -1156,8 +1230,10 @@ fn visit_view(
             hash: parsed.tail.to_string(),
         }),
         entries: parsed.entries,
+        unreconciled_adoption,
         debits: parsed.debits,
         adoptions: parsed.adoptions,
+        reconciliations: parsed.reconciliations,
         tally: parsed.tally,
         last_time: parsed.last_time,
         adoption_count: parsed.adoption_count,
@@ -1971,7 +2047,7 @@ impl LedgerView {
             state,
             id,
             &self.path,
-            self.tally.entries + self.adoption_count + 1,
+            self.tip.as_ref().map_or(0, |tip| tip.seq) + 1,
             &self.tally.spent,
         )
     }
@@ -2119,7 +2195,8 @@ impl AdoptPreview {
     /// Whether this adoption would accept a ledger that may lack lines, and
     /// so caller references, that hallpass had recorded. After it, every
     /// guarded spend (`--require-new-ref`) on this ledger is refused as
-    /// `reference-inconclusive`, as for [`Adoption::makes_references_inconclusive`].
+    /// `reference-inconclusive` until a reference reconciliation follows, as
+    /// for [`Adoption::makes_references_inconclusive`].
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
         reference::may_lose_references(&self.carried, self.previous.as_ref())
@@ -2131,7 +2208,8 @@ impl Adoption {
     /// caller references, that hallpass had recorded: it carried an amount,
     /// or recorded a previous witness of at least one line. From it on,
     /// every guarded spend (`--require-new-ref`) on this ledger is refused
-    /// as `reference-inconclusive`.
+    /// as `reference-inconclusive`, until a reference reconciliation
+    /// ([`crate::reconcile_references`]) names it or a later such adoption.
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
         reference::may_lose_references(&self.carried, self.previous.as_ref())

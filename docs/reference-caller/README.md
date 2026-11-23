@@ -21,6 +21,7 @@ caller.py pin     JOURNAL PASS ARCHIVE
 caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                   [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
 caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
+caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [--rehearsal]
 ```
 
 | Command | What it does | Exit |
@@ -28,6 +29,7 @@ caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
 | `pin` | Archives the reviewed pass with `hallpass archive` and journals its ID and digest. Later units pin this digest. | 0 pinned, 1 error |
 | `run` | Performs one unit: see below. | 0 sent, 2 refused, 1 unknown or usage error |
 | `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
+| `reconcile-references` | After an adoption that may have lost lines, records every reference in the journals with `hallpass reconcile-references`, so that guarded spends resume: see below. | 0 recorded, or nothing to reconcile; 1 error |
 
 Use the same `PASS` spelling for every command: the journal and the spend
 reply compare it as written.
@@ -68,6 +70,10 @@ did, what the ledger holds for that reference, and a verdict.
 | `unknown` | no debit | attention: nothing was debited or sent |
 | `refused CODE` | debit | attention: another run used this reference |
 | no record | debit with your `--ref-prefix` | attention: the journal does not explain this debit |
+| `sent` | reconciled: no debit, and a reference reconciliation lists the reference | ok: the debit is missing from the adopted ledger |
+| `refused CODE` | reconciled | ok |
+| `unconfirmed` | reconciled | attention: the unit may have run. Check the target's own records. |
+| `not sent` or `unknown` | reconciled | attention: nothing was sent, and the debit, if there was one, is missing from the adopted ledger |
 
 ### A ledger that other callers share
 
@@ -88,6 +94,35 @@ by other callers or without a reference, not judged; use --all to list them.`
   the prefix check. Units in the journal are always judged, whatever their
   sequence number.
 - `--all`: list the other debits, as `other: not judged` rows.
+
+## After a lost ledger
+
+When the ledger is lost or replaced and an operator adopts it, the lost
+lines may have held this caller's references. hallpass then refuses every
+`run` as `reference-inconclusive`, and nothing is sent. To let the caller
+spend again:
+
+```text
+caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...]
+```
+
+It reads `unreconciled_adoption` from `hallpass ledger` (with none, it says
+there is nothing to do and exits 0). It lists every reference in the
+journal for `PASS`, and in each `--also` journal, whatever the unit's
+outcome, and runs `hallpass reconcile-references` with that list and the
+reason. The ledger records both. hallpass then refuses each listed
+reference as `duplicate-reference` and accepts new ones. The caller
+journals a `reconcile-references` record with the adoption, the new ledger
+sequence and the number of references.
+
+A reference that is left off the list would be accepted as new. Pass the
+journal of every caller that spent on this pass, in one command: the guard
+resumes as soon as the line is recorded. If another adoption loses lines
+later, run it again. `--rehearsal` keeps `HALLPASS_UNSAFE_TEST_CLOCK`, as for
+`run`.
+
+After it, `handoff` shows a unit whose debit was lost as `reconciled seq N`
+(see the table above).
 
 ## Cost
 

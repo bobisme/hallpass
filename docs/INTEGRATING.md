@@ -256,7 +256,22 @@ a second at 42,000 lines.
   that is really lost (`ledger-missing`) is recovered with `hallpass
   adopt`. Read `warnings` from `adopt --preview` before you adopt: an
   adoption that carries totals makes every later `--require-new-ref` spend
-  on that ledger `reference-inconclusive`.
+  on that ledger `reference-inconclusive`, until you reconcile the
+  references (below).
+- **Reconcile references after a lossy adoption.** The lost lines may have
+  held caller references, so hallpass cannot tell a new reference from one
+  already used. Collect every reference that the run records of every
+  caller on this pass used, whatever its outcome, into
+  `{"version": 1, "pass_id": "ID", "references": [...]}`, read the adoption's
+  sequence from the refusal message or from `ledger --format json`
+  (`unreconciled_adoption`), and run `hallpass reconcile-references PASS
+  --adoption SEQ --references LIST --reason TEXT`. The list and the reason
+  go into the ledger. Guarded spends then refuse a listed reference as
+  `duplicate-reference` and check any other reference against the ledger. A
+  reference you leave out is accepted as new, so record one list with every
+  caller's references before any caller spends again. Another adoption that
+  may lose lines needs its own reconciliation. The reference caller does
+  this with `caller.py reconcile-references`.
 - **`permits`, `status` and `ledger` are read-only and more forgiving than
   `spend`**: when the witness cannot be checked they still answer, with a
   warning and `"witness": "not-checked"`. Only a `spend` is the permission
@@ -372,6 +387,10 @@ Give each caller its own reference prefix and pass it as `--ref-prefix`, and a
 debit with that prefix and no journal record is flagged (exit 2). See
 [a ledger that other callers
 share](reference-caller/README.md#a-ledger-that-other-callers-share).
+After an adoption that may have lost lines, its `reconcile-references`
+records every reference in its journals, so that its guarded spends resume.
+See [after a lost
+ledger](reference-caller/README.md#after-a-lost-ledger).
 
 ## Charge all known costs at the first send
 

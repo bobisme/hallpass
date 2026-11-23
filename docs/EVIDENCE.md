@@ -19,7 +19,7 @@ If the result is `found`, compare the receipt's digest, charge names and amounts
 | `ambiguous` | 2 | Multiple debits shared the reference. Preserve all candidate sequences for reconciliation. |
 | `error` | 1 | The reference, pass, ledger or witness could not be checked. |
 
-A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
+A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. `reconciled_at` lists the first 64 sequences of the reference reconciliations that name the reference: the operator recorded that its debit may be in lines an adoption lost, so `absent` does not show that it was never debited, and a warning says so. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
 
 Use `--require-new-ref` with `--caller-ref` so cooperating workers on the same
 local history submit a given reference at most once. Record the intended unit
@@ -40,11 +40,17 @@ matches and use `receipt` to compare the recorded charges and targets. The
 repeat provides no permission to send. An absent reference returns
 `reference-inconclusive` in a history with events but no local witness, or
 with an adoption that may have lost lines (it records a previous witness of
-at least one line, or carries totals). For a complete ledger without a
-witness, `hallpass adopt` records one and the guard checks references
-again. After an adoption that lost lines, spend without the guard only when
-your run record shows the unit was never submitted. See [the
-rule](spec.md#caller-references-and-receipts). A dry run reports the
+at least one line, or carries totals) and no reference reconciliation after
+it. For a complete ledger without a witness, `hallpass adopt` records one
+and the guard checks references again. After an adoption that lost lines,
+list every reference your run records used on the pass and record the list
+with `hallpass reconcile-references FILE --adoption SEQ --references LIST
+--reason TEXT`: a listed reference is then a duplicate, with
+`reference_evidence.reconciled_at`, and any other is checked against the
+ledger again. Until then, spend without the guard only when your run record
+shows the unit was never submitted. See [the
+rule](spec.md#caller-references-and-receipts) and
+[`reconcile-references`](spec.md#reconcile-referencespass-adoption-references-reason-now). A dry run reports the
 history it observes and reserves nothing. Retain your own execution record
 to decide whether the external action occurred. Calls that omit the guard
 can reuse references for correlation.
@@ -269,6 +275,10 @@ to avoid requiring endpoint evidence; supply it to require recorded targets.
 The manifest is limited to 1,048,576 bytes and 1,024 rows. Candidate sequence
 samples are capped at 64 while counts remain complete. `absent` means absent
 from available history, and adoption can preserve totals without receipts.
+Each row has `reconciled_at`, the first 64 sequences of the reference
+reconciliations that name its reference: its debit may be in lines an
+adoption lost, so an `absent` row may still have been debited, and a warning
+counts such rows.
 A different digest, charge, target or name is a mismatch. Each row has a
 `differences` list. Each entry has `sequence` (the candidate debit it
 describes), `field`, `expected` (manifest) and `recorded` (ledger). A null

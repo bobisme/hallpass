@@ -81,12 +81,14 @@ pub use files::{Digest, LoadedPass, LockWait, MAX_PASS_BYTES, load, load_with_by
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
     CheckpointExport, CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry,
-    LedgerView, MAX_CALLER_REF, MAX_NOTE, RecordedTarget, ReferenceEvidence, SpendChargesOutcome,
-    SpendChargesRequest, SpendOutcome, SpendRequest, Tally, WitnessRelation, WitnessStatus, adopt,
-    adopt_guarded, display_safe, export_checkpoint, export_checkpoint_observed, ledger_path,
-    preview_adopt, preview_spend_in, preview_spend_with_clock_in, read_ledger, read_summary,
-    rfc3339, spend, spend_charges, spend_charges_in, spend_charges_with_clock_in, spend_in,
-    spend_with_clock_in, tally, verify_checkpoint,
+    LedgerView, MAX_CALLER_REF, MAX_NOTE, MAX_RECONCILED_REFERENCES, MAX_REFERENCE_LIST_BYTES,
+    ReconcileReferencesOutcome, RecordedTarget, ReferenceEvidence, ReferenceReconciliation,
+    SpendChargesOutcome, SpendChargesRequest, SpendOutcome, SpendRequest, Tally, WitnessRelation,
+    WitnessStatus, adopt, adopt_guarded, display_safe, export_checkpoint,
+    export_checkpoint_observed, ledger_path, preview_adopt, preview_spend_in,
+    preview_spend_with_clock_in, read_ledger, read_reference_list, read_summary,
+    reconcile_references, rfc3339, spend, spend_charges, spend_charges_in,
+    spend_charges_with_clock_in, spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
 pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};

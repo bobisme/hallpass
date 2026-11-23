@@ -241,6 +241,25 @@ enum Command {
         #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
         token: Option<String>,
     },
+    /// After an adoption that may have lost lines, record which caller references may be in them, so guarded spends resume.
+    ///
+    /// The reconciliation is written into the ledger. From it on, a spend
+    /// with --require-new-ref refuses a listed reference as a duplicate and
+    /// checks any other reference against the ledger, until another
+    /// adoption may lose lines.
+    ReconcileReferences {
+        /// The pass file.
+        file: PathBuf,
+        /// The sequence number of the latest adoption that may have lost lines (`unreconciled_adoption` in `hallpass ledger`).
+        #[arg(long, value_name = "SEQ")]
+        adoption: u64,
+        /// JSON file with `version` 1, the `pass_id` and the `references`: every caller reference that may be in the lost lines.
+        #[arg(long, value_name = "LIST")]
+        references: PathBuf,
+        /// Why the list is complete (one line; it is recorded in the ledger).
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
     /// Verify an owner's detached SSH signature over the exact validated pass.
     VerifyApproval {
         /// Signed pass file.
@@ -335,6 +354,7 @@ impl Command {
             Self::Digest { .. } => "digest",
             Self::Ledger { .. } => "ledger",
             Self::Adopt { .. } => "adopt",
+            Self::ReconcileReferences { .. } => "reconcile-references",
             Self::Archive { .. } => "archive",
             Self::Retrieve { .. } => "retrieve",
             Self::Receipt { .. } => "receipt",
@@ -469,7 +489,10 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         _ => &[],
     };
     // Only the commands that write may advise a recovery that writes.
-    let message = if matches!(command, "spend" | "adopt" | "status") {
+    let message = if matches!(
+        command,
+        "spend" | "adopt" | "reconcile-references" | "status"
+    ) {
         error.to_string()
     } else {
         error.read_only_message()
@@ -1473,6 +1496,7 @@ struct Selected<'a> {
     entries: Vec<&'a hallpass::LedgerEntry>,
     debits: Vec<&'a hallpass::LedgerDebit>,
     adoptions: Vec<&'a hallpass::Adoption>,
+    reconciliations: Vec<&'a hallpass::ReferenceReconciliation>,
     slice: Option<Slice>,
 }
 
@@ -1491,12 +1515,15 @@ fn select_rows<'a>(
         .filter(|e| e.charges.iter().any(|charge| wanted(&charge.counter)))
         .collect();
     let mut adoptions: Vec<&hallpass::Adoption> = view.adoptions.iter().collect();
+    let mut reconciliations: Vec<&hallpass::ReferenceReconciliation> =
+        view.reconciliations.iter().collect();
     let slice = if tail.is_some() || since.is_some() {
         let mut seqs: Vec<u64> = entries
             .iter()
             .map(|e| e.seq)
             .chain(debits.iter().map(|e| e.seq))
             .chain(adoptions.iter().map(|a| a.seq))
+            .chain(reconciliations.iter().map(|r| r.seq))
             .filter(|seq| since.is_none_or(|s| *seq >= s))
             .collect();
         seqs.sort_unstable();
@@ -1507,12 +1534,16 @@ fn select_rows<'a>(
         entries.retain(|e| keep.contains(&e.seq));
         debits.retain(|e| keep.contains(&e.seq));
         adoptions.retain(|a| keep.contains(&a.seq));
+        reconciliations.retain(|r| keep.contains(&r.seq));
         Some(Slice {
             tail,
             since,
             from: seqs.first().copied(),
             to: seqs.last().copied(),
-            of: view.entries.len() + view.debits.len() + view.adoptions.len(),
+            of: view.entries.len()
+                + view.debits.len()
+                + view.adoptions.len()
+                + view.reconciliations.len(),
         })
     } else {
         None
@@ -1521,6 +1552,7 @@ fn select_rows<'a>(
         entries,
         debits,
         adoptions,
+        reconciliations,
         slice,
     }
 }
@@ -1541,6 +1573,42 @@ fn details_text(note: Option<&str>, receipt: Option<&str>) -> String {
     } else {
         format!(" {}", parts.join("  "))
     }
+}
+
+/// How many references of a reconciliation `ledger` text names.
+const SHOWN_REFERENCES: usize = 10;
+
+/// A reference reconciliation as one row of `ledger` text: the adoption it
+/// reconciles and the number of references, then, as in the details column,
+/// the first few references, each quoted, and the reason last, so the
+/// reason runs to the end of the line and cannot pass for a reference.
+fn reconciliation_row_text(r: &hallpass::ReferenceReconciliation) -> String {
+    let quoted = |text: &str| safe(&serde_json::to_string(text).unwrap_or_default()).into_owned();
+    let mut shown: Vec<String> = r
+        .references
+        .iter()
+        .take(SHOWN_REFERENCES)
+        .map(|reference| quoted(reference))
+        .collect();
+    if r.references.len() > SHOWN_REFERENCES {
+        shown.push(format!(
+            "and {} more (see --format json)",
+            r.references.len() - SHOWN_REFERENCES
+        ));
+    }
+    let listed = if shown.is_empty() {
+        String::new()
+    } else {
+        format!("  references: {}", shown.join(", "))
+    };
+    format!(
+        "  {:>5}  {:<20}  REFERENCES RECONCILED for the adoption at {}: {} reference(s){listed}  reason: {}",
+        r.seq,
+        stamp(r.time),
+        r.adoption,
+        r.references.len(),
+        safe(&r.reason)
+    )
 }
 
 /// One line per charge of a debit unit, in the columns of a plain spend; the
@@ -1590,7 +1658,10 @@ fn ledger_text(
     if view.exists {
         let _ = writeln!(text, "Ledger of pass {} ({ledger_shown})", pass.id);
         if let Some(c) = counter {
-            let _ = writeln!(text, "Only counter {c} (adoptions are always shown).");
+            let _ = writeln!(
+                text,
+                "Only counter {c} (adoptions and reference reconciliations are always shown)."
+            );
         }
         if let Some(slice) = &selected.slice {
             let _ = writeln!(text, "{}", slice.text());
@@ -1625,6 +1696,12 @@ fn ledger_text(
                 ),
             )
         }));
+        rows.extend(
+            selected
+                .reconciliations
+                .iter()
+                .map(|r| (r.seq, reconciliation_row_text(r))),
+        );
         rows.sort_by_key(|(seq, _)| *seq);
         if rows.is_empty() {
             text.push_str("  no entries\n");
@@ -1661,6 +1738,12 @@ fn ledger_text(
         };
     }
     let _ = writeln!(text, "Ledger: {}", ledger_state_text(view));
+    if let Some(seq) = view.unreconciled_adoption {
+        let _ = writeln!(
+            text,
+            "References: the adoption at {seq} may have lost lines and is not reconciled, so guarded spends (--require-new-ref) are refused as reference-inconclusive (see hallpass help reconcile-references)."
+        );
+    }
     let _ = writeln!(text, "Current pass digest: {}", loaded.digest);
     text
 }
@@ -1671,7 +1754,7 @@ fn ledger_state_text(view: &hallpass::LedgerView) -> String {
     if !view.exists {
         return "none yet (nothing spent)".to_owned();
     }
-    let lines = view.tally.entries + view.adoption_count;
+    let lines = view.tip.as_ref().map_or(0, |tip| tip.seq);
     let witness = match &view.witness {
         W::Matches => "the witness matches",
         W::Extended { .. } => "the witness is behind (see the warning)",
@@ -1816,7 +1899,17 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
                 "digest": a.digest.to_string(),
                 "carried": a.carried,
                 "previous": a.previous.as_ref().map(witnessed_json),
+                "may_have_lost_references": a.makes_references_inconclusive(),
             })).collect::<Vec<_>>(),
+            "reference_reconciliations": selected.reconciliations.iter().map(|r| json!({
+                "seq": r.seq,
+                "time": hallpass::rfc3339(r.time),
+                "adoption": r.adoption,
+                "reason": r.reason,
+                "digest": r.digest.to_string(),
+                "references": r.references,
+            })).collect::<Vec<_>>(),
+            "unreconciled_adoption": view.unreconciled_adoption,
             "totals": totals.iter().map(|(name, spent, total)| json!({
                 "name": name,
                 "spent": spent,
@@ -1856,7 +1949,7 @@ fn preview_adopt(file: &Path) -> Output {
 fn inconclusive_references(applies: bool, when: &str) -> Vec<String> {
     applies
         .then(|| format!(
-            "{when} guarded spends (--require-new-ref) on this ledger cannot show that a caller reference is new: the adopted ledger may lack lines hallpass had recorded, so they are refused as reference-inconclusive for the rest of this ledger. Check each reference against your run record"
+            "{when} guarded spends (--require-new-ref) on this ledger cannot show that a caller reference is new: the adopted ledger may lack lines hallpass had recorded, so they are refused as reference-inconclusive until the references that may be in the lost lines are reconciled: list them from your run records and record them with `hallpass reconcile-references` (see hallpass help reconcile-references). Check each reference against your run record"
         ))
         .into_iter()
         .collect()
@@ -1903,6 +1996,54 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
             "previous": a.previous.as_ref().map(witnessed_json),
             "totals": outcome.totals,
             "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,"),
+        }),
+        text,
+    }
+}
+
+fn reconcile_references(
+    file: &Path,
+    adoption: u64,
+    list: &Path,
+    reason: &str,
+    clock: &Clock,
+) -> Output {
+    let state = StateDir::from_env();
+    let outcome = match hallpass::load(file)
+        .and_then(|loaded| hallpass::read_reference_list(list, &loaded.pass.id))
+        .and_then(|references| {
+            hallpass::reconcile_references(file, adoption, &references, reason, clock.now, &state)
+        }) {
+        Ok(o) => o,
+        Err(e) => return error_output("reconcile-references", Some(file), &e),
+    };
+    let r = &outcome.reconciliation;
+    let text = format!(
+        "RECONCILED: {} caller reference(s) for the adoption at sequence {} of pass {}, recorded in {} as entry {} with the reason \"{}\". From here on a guarded spend (--require-new-ref) refuses a listed reference as duplicate-reference, and the adoption at sequence {} no longer makes other references inconclusive.\n",
+        r.references.len(),
+        r.adoption,
+        outcome.pass_id,
+        safe(&outcome.ledger.display().to_string()),
+        r.seq,
+        safe(&r.reason),
+        r.adoption,
+    );
+    Output {
+        code: OK,
+        json: json!({
+            "command": "reconcile-references",
+            "result": "ok",
+            "file": file.display().to_string(),
+            "ledger": outcome.ledger.display().to_string(),
+            "pass_id": outcome.pass_id,
+            "digest": r.digest.to_string(),
+            "now": stamp(clock.now),
+            "test_clock": clock.test,
+            "seq": r.seq,
+            "adoption": r.adoption,
+            "reason": r.reason,
+            "references": r.references,
+            "warnings": outcome.warnings,
         }),
         text,
     }
@@ -2087,6 +2228,7 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
             | Command::Spend { .. }
             | Command::Capacity(_)
             | Command::Adopt { .. }
+            | Command::ReconcileReferences { .. }
             | Command::Lint { .. }
     );
     if needs_clock {
@@ -2189,6 +2331,12 @@ fn run(cli: &Cli, format: Format) -> Output {
                 )
             }
         }
+        Command::ReconcileReferences {
+            file,
+            adoption,
+            references,
+            reason,
+        } => reconcile_references(file, *adoption, references, reason, &clock),
         Command::VerifyApproval {
             file,
             signature,

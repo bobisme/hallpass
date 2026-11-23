@@ -301,10 +301,17 @@ witness catches them.
   not double-count. A carry keeps totals, not caller references: an
   adoption that records a previous witness of at least one line, or
   carries anything, accepted a ledger without lines hallpass had recorded,
-  so the reference guard stays inconclusive on that ledger. An adoption
+  so the reference guard stays inconclusive on that ledger until the
+  operator records, in a reference reconciliation line, which references
+  may be in the lost lines (from the run records, with a reason): then
+  listed references are duplicates and others are checked again. Only an
+  explicit list in the ledger lets a reference that may be lost pass as
+  new, and a later loss makes references inconclusive again. An adoption
   without a witness appends to the ledger as it stands and loses no
   reference. The existing `witness` and `carried` fields tell the two
-  apart, so the ledger format did not change.
+  apart, so telling them apart needed no new field. The reconciliation
+  is a new kind of line, which an older hallpass refuses as damage rather
+  than skipping.
 - **State directory failures**: `spend` and `adopt` fail closed
   (`witness-unavailable`) when there is no state directory (neither
   `XDG_STATE_HOME` nor `HOME` is an absolute path), it cannot be created,

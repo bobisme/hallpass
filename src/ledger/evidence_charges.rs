@@ -72,6 +72,8 @@ pub fn audit_charges(
                 }
                 return Ok(());
             }
+            // A reference reconciliation charges nothing.
+            VerifiedEvent::Reconcile(_) => return Ok(()),
             VerifiedEvent::Spend(s) => (s.seq, s.digest, vec![(&s.counter, s.amount)]),
             VerifiedEvent::Debit(d) => (
                 d.seq,

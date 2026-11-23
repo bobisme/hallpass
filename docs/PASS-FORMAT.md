@@ -356,6 +356,19 @@ edit it. It is JSON Lines:
   `carried` amounts count as spent; `witness` is what the witness recorded
   before (or null). hallpass 0.1 does not know this line and fails closed
   on a ledger that has one.
+- A **reference reconciliation** is a line of its own too, written by
+  `hallpass reconcile-references FILE --adoption SEQ --references LIST
+  --reason TEXT` after an adoption that may have lost lines:
+
+  ```text
+  {"seq":5,"time":"…","event":"reconcile-references","adoption":3,"reason":"every reference in the shift 17 journals","digest":"sha256:…","references":["unit-1","unit-2"],"prev":"sha256:…"}
+  ```
+
+  `adoption` is the latest adoption before it that may have lost lines;
+  `references` are the caller references the operator listed as possibly
+  in those lines. It counts nothing. A hallpass from before it does not
+  know this line and fails closed (`ledger-corrupt`) on a ledger that has
+  one. See "`reconcile-references`" in [the specification](spec.md).
 - **The witness.** Each spend also writes
   `$XDG_STATE_HOME/hallpass/<pass id>.witness` (default
   `~/.local/state/hallpass/`), one JSON object with the last sequence

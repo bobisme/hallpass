@@ -42,8 +42,32 @@ pub struct ReceiptLookup {
     pub matches: Vec<FoundReceipt>,
     pub truncated: bool,
     pub adoption_count: u64,
+    /// The first 64 sequences of reference reconciliations that list the
+    /// reference: the operator recorded that a debit for it may be in lines
+    /// an adoption lost.
+    pub reconciled_at: Vec<u64>,
     pub witness: &'static str,
     pub warnings: Vec<String>,
+}
+
+/// The sequence and adoption of a reference reconciliation that lists
+/// `reference`.
+pub(super) fn match_reconciled(event: &VerifiedEvent, reference: &str) -> Option<(u64, u64)> {
+    let VerifiedEvent::Reconcile(r) = event else {
+        return None;
+    };
+    r.references
+        .iter()
+        .any(|listed| listed == reference)
+        .then_some((r.seq, r.adoption))
+}
+
+/// The warning for a reference that reference reconciliations list.
+pub(super) fn reconciled_warning(reconciled: &[(u64, u64)]) -> Option<String> {
+    let (seq, adoption) = reconciled.first()?;
+    Some(format!(
+        "The reference is listed in the reference reconciliation at ledger sequence {seq}: the operator recorded that a debit for it may be in lines lost before the adoption at sequence {adoption}, so this history cannot show that it was never debited."
+    ))
 }
 
 pub(super) fn match_reference<'a>(
@@ -74,7 +98,13 @@ pub fn lookup_receipt(
     }
     let mut count = 0;
     let mut matches = Vec::new();
+    let mut reconciled = Vec::new();
     let view = visit_view(loaded, state, false, &mut |event| {
+        if let Some(found) = match_reconciled(event, reference)
+            && reconciled.len() < DETAIL_LIMIT
+        {
+            reconciled.push(found);
+        }
         if let Some((d, r)) = match_reference(event, reference) {
             count += 1;
             if matches.len() < DETAIL_LIMIT {
@@ -103,6 +133,7 @@ pub fn lookup_receipt(
     if view.adoption_count > 0 {
         warnings.push("The available history includes adoption. Carried totals can survive even when individual receipts are missing.".into());
     }
+    warnings.extend(reconciled_warning(&reconciled));
     Ok(ReceiptLookup {
         pass_id: loaded.pass.id.clone(),
         caller_ref: reference.into(),
@@ -115,6 +146,7 @@ pub fn lookup_receipt(
         truncated: count > matches.len() as u64,
         matches,
         adoption_count: view.adoption_count,
+        reconciled_at: reconciled.into_iter().map(|(seq, _)| seq).collect(),
         witness: view.witness.as_str(),
         warnings,
     })
@@ -387,7 +419,7 @@ pub fn audit_receipts(
             VerifiedEvent::Adopt(a) if !a.carried.is_empty() => {
                 record_gap(&mut gaps, "adoption-carry", a.seq);
             }
-            VerifiedEvent::Adopt(_) => (),
+            VerifiedEvent::Adopt(_) | VerifiedEvent::Reconcile(_) => (),
             VerifiedEvent::Debit(d) => {
                 let provenance = revisions.note(d.digest, d.seq, &mut gaps)?;
                 let Some(receipt) = d.receipt.as_ref().filter(|r| !r.targets.is_empty()) else {
