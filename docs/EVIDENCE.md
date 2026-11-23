@@ -81,6 +81,7 @@ Supply one to 32 explicit paths. The command captures the local witness once, th
 | `foreign` | A verified candidate belongs to another pass ID. |
 | `unanchored` | The same pass ID has a verified tip, but the witness is missing or unreadable. |
 | `error` | This file could not be verified. It supplies no tip. |
+| `changed` | With `--ancestry`, an extended candidate changed between verification scans or failed the second full verification. Its `error.code` is `candidate-changed` or the verification error. |
 
 `preserved` exits 0 when an exact copy or one distinct extension preserves the witnessed prefix. Multiple distinct extension tips yield `ambiguous` even if one is longer. An independently verified prefix relationship or external records are needed to resolve their order. `no-match`, `ambiguous` and `inconclusive` exit 2. An unavailable witness yields `inconclusive`. Per-file failures yield `partial-error` and exit 1, retaining the assessment of valid files and the error code for each damaged or unreadable candidate.
 
@@ -172,3 +173,40 @@ are incomplete and duplicate references are ambiguous. The result only
 reconciles recorded accounting; it does not establish external actions, retries
 or refunds. Verification failures and malformed manifests exit 1, discrepancies
 exit 2, and a complete match exits 0.
+
+## Export and verify a checkpoint
+
+```sh
+hallpass --json checkpoint engagement.toml > checkpoint.json
+hallpass --json verify-checkpoint engagement.toml.ledger checkpoint.json
+```
+
+`checkpoint` commits to the last verified line of the ledger. Its
+`checkpoint` object holds `version`, `pass_id`, `seq` and `hash`. Retain it
+outside the administrative control of the ledger. `verify-checkpoint` reads
+only the ledger and the supplied checkpoint, and never reads or creates a
+witness. `exact` means the ledger ends at the checkpoint line and
+`extended` means `added` lines follow it; both exit 0. `mismatch` exits 2.
+A malformed checkpoint or a missing or damaged ledger exits 1.
+
+The `witness` object tells how the local witness relates to the exported
+line. It is observed under the same lock as the export.
+
+| `witness.relation` | Meaning |
+| --- | --- |
+| `matches` | The witness records the exported line. `witnessed_seq` equals `exported_seq`. |
+| `lags` | The witness records an older line of the same verified ledger. `witnessed_seq` is lower than `exported_seq`, and a warning says so. |
+| `absent` | There is no witness for this pass. `witnessed_seq` is null, and a warning says so. |
+
+`local_corroboration` is true for `matches` and `lags`. A lagging witness
+corroborates the history only up to `witnessed_seq`.
+
+Before anything has been recorded there is no ledger and no witnessed
+spend, so there is no line to commit to. `checkpoint` then exits 2 with
+`result = "empty"`, `checkpoint = null`, `witness.relation = "absent"` and
+both sequences null. In text mode stdout is empty. In JSON mode the object
+holds no checkpoint. Either way a redirect such as the one above leaves no
+valid checkpoint, and `verify-checkpoint` rejects the file with exit 1.
+Check the exit code before you retain the output. A
+missing ledger after a witnessed spend is an error (exit 1), not an empty
+result.

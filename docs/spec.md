@@ -3,64 +3,12 @@
 This page describes what hallpass does at the current commit. Anything not
 yet built is marked **planned**. The exact file format is in
 [PASS-FORMAT.md](PASS-FORMAT.md); the reasons behind the decisions are in
-[DESIGN.md](DESIGN.md).
-
-## Approval review
-
-`hallpass diff OLD NEW` is read-only and compares declared fields, printing
-both byte digests. It normalizes port ranges, distinguishes informational
-`hostname` from enforced `names`, reports destination additions/removals and
-order changes, and flags uncertain containment for owner review. It never
-authorizes a spend. `hallpass lint PASS` reports named rules overlapping
-nameless rules for the same address family, protocol, and ports; each claimed
-effective allowance is replayed through `permits_named` at the supplied time.
-Lint reports at most 256 findings and indicates when it truncated the list.
-`check` and `status` also warn about each such pair, in text and in
-`warnings` and `name_restriction_overlaps`. The pass stays valid and `check`
-exits 0. In `diff`, `before` and `after` are JSON strings, numbers or null
-(absent); text prints absent values as `none`. A network change is named
-`destination[LABEL].network`, or `.address` when both sides are single hosts.
-
-`diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
-destination decisions using the ordinary evaluator at the supplied offset
-timestamp. The report retains the field diff and review flags. Each
-`examples.rows` entry includes the target, optional name, instant and
-before/after label or refusal code. `examples.candidates` counts visits,
-`evaluated` counts distinct requests, and `truncated` signals omitted work.
-Sampling ends after 512 visits or 64 changed rows.
-
-`consumer-coverage PASS --can CAPABILITY` compares the full validated approval
-with declared checks for literal endpoints, names, time and revocation, and
-each charged counter. The response identifies its `pass_id`, `digest`,
-`declared` features and individual `findings`. The operator supplies the
-declaration. Live decisions and charges happen independently.
-
-`verify-approval` uses OpenSSH detached signatures under the fixed namespace
-`hallpass-approval-v1`. A verified result includes the expected principal,
-pass ID and digest of the exact bytes supplied to the verifier. The operator
-provisions the trust file and selects the principal. See the signing and
-digest-pinning workflow in the [integration guide](INTEGRATING.md).
-
-`hallpass test-pass PASS SUITE` checks up to 1,024 ordered cases offline.
-Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
-invalid input or an error. See the [example suite](review-suite.toml).
-The opt-in `--strength` mode first checks the baseline, then evaluates up to 64
-in-memory mutations that only loosen the pass: remove destination name
-restrictions, extend a port range by one adjacent valid port, widen a network
-by one bit (a single address becomes a /31 or /127), add the other transport,
-and move `valid_from` one second earlier and `valid_until` one second later.
-It reports the first case that distinguishes each edit or marks the edit as
-surviving. A mutation that would not validate, and every ceiling change
-(cases cannot spend), has status `skipped` with a `reason`; `mutations_skipped`
-counts them and `mutations_tested` does not. Work is capped at
-4,096 total case evaluations; incomplete analysis exits 2 and is explicitly
-truncated. Survivors are review prompts, never instructions to change the
-approval.
-
-`check` and `status` report exact declared address-space unions separately for
-IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`
-and one IPv6 `/64` are documented consumer comparison points; they are
-advisory only and do not change existing validation caps.
+[DESIGN.md](DESIGN.md). How a tool calls hallpass is in
+[INTEGRATING.md](INTEGRATING.md); the evidence commands are in
+[EVIDENCE.md](EVIDENCE.md). A runnable first-shift walkthrough is
+[WALKTHROUGH.md](WALKTHROUGH.md), run by `tests/walkthrough.rs`. A complete
+caller is in [reference-caller/](reference-caller/README.md), run by
+`tests/reference_caller.rs`.
 
 ## Purpose
 
@@ -101,6 +49,8 @@ the same questions.
   protocol (`192.0.2.10:5060/udp`, `[2001:db8::1]:443/tcp`).
 - **Ceiling**: a named counter with a total (`calls = 6`). Each tool
   defines its own units.
+- **Debit**: the record of one unit of work in the ledger. It charges one
+  or more counters, each by a positive amount.
 - **Ledger**: the append-only file beside the pass that records every
   spend (and every adoption).
 - **Witness**: a small record per pass id in the user's state directory,
@@ -120,6 +70,8 @@ the same questions.
 format = 1
 id = "example-2026-11"            # the ledger belongs to this id
 name = "Example voice edge"
+# require_target_v1 = true         # optional: every debit must check a destination
+# required_counters_v1 = ["calls"] # optional: every debit must charge these
 
 [approval]
 owner = "Pat Owner, Example Corp"
@@ -159,7 +111,12 @@ Validation rules, all reported together with field paths
 
 ## Decision rules
 
-All decisions take `now` from the caller.
+All decisions take `now` from the caller. The CLI samples the live clock
+after evidence verification for status, permits and previews, and after
+preparatory witness writes under writer locks immediately before spend
+policy evaluation. Explicit-time Rust APIs use the instant supplied by their
+caller. Status and spend warn when that instant is strictly earlier than the
+latest ledger event; equal instants do not warn.
 
 ### Window state
 
@@ -207,6 +164,18 @@ A name never grants: it is looked at only after the address, protocol and
 port matched. Names compare in canonical form (ASCII lower case, no
 trailing dot); the pass must spell them that way, a query need not.
 
+The CLI `permits` reads the ledger and its witness too (read-only, shared
+lock): a damaged, lost or changed record is an error there as everywhere.
+The optional `permits --digest` precondition uses the byte digest and gives
+exit 2 / `pass-changed` on a mismatch after ledger verification.
+
+For permits and spend, repeat `--to ADDR:PORT/PROTO[@NAME]` up to 64 times.
+IPv6 uses brackets. A separate `--name` requires exactly one target without
+a suffix. All targets use one loaded pass. One refused target refuses the
+whole unit. `targets` preserves input order and `refused_target` is a
+one-based index or null. Existing scalar target and label fields describe
+the first endpoint.
+
 ### `spend(pass, counter, n, note, expected digest, needed, target, name, now)`
 
 With a target, one spend answers "may I send this much to this destination
@@ -239,15 +208,17 @@ request name follows the destination rules.
    witness now, with a warning.
 6. Refuse, recording nothing in the ledger, in this order: `pass-changed`
    (an expected digest was given and differs), the window rules (`revoked`,
-   `not-yet-valid`, `expired`, `window-too-short`), when a target was given
-   every refusal of `permits` for it, with the name and `needed`
-   (`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`,
-   `port-not-listed`, `name-required`, `name-not-listed`),
-   `target-required` (an owner-required destination was omitted),
-   `required-counter-missing` (the debit omitted an owner-required charge),
-   `unknown-counter` (not in `[ceilings]`), `ceiling-reached` (spent + n >
-   total). The destination is decided against the pass as read under the
-   locks, the same reading the entry's digest names.
+   `not-yet-valid`, `expired`, `window-too-short`), with the reference
+   guard `duplicate-reference` or `reference-inconclusive` (see "Caller
+   references and receipts"), when a target was given every refusal of
+   `permits` for it, with the name and `needed` (`embedded-ipv4`,
+   `network-or-broadcast`, `address-not-listed`, `port-not-listed`,
+   `name-required`, `name-not-listed`), `target-required` (an
+   owner-required destination was omitted), `required-counter-missing` (the
+   debit omitted an owner-required charge), `unknown-counter` (not in
+   `[ceilings]`), `ceiling-reached` (spent + n > total). The destination is
+   decided against the pass as read under the locks, the same reading the
+   entry's digest names.
 7. Otherwise append one entry (time, counter, n, digest of the pass as just
    read, note, sequence number, hash of the previous line), sync it to disk,
    then replace the witness (written aside, synced, renamed), and release
@@ -259,6 +230,60 @@ Two processes spending at once never together exceed the total. Writers
 always lock the witness first and the ledger second; readers take only a
 shared lock on the ledger and read the witness, which is replaced
 atomically.
+
+#### Several charges in one debit
+
+One unit can debit multiple named budgets. Each counter may occur once in a
+unit. The same policy decision checks the pass digest, active window,
+requested destinations, and every ceiling under the writer locks. A
+successful commit syncs one ledger sequence and updates the witness with
+every resulting balance. Refusal leaves every counter balance unchanged.
+Positive previews return projected_spent for each charge while leaving the
+reported current balances and the ledger unchanged. Historical scalar debits
+and adoption carry-forward remain valid, and tallying counts a multi-charge
+unit once while adding each charge to its counter.
+
+#### Preview
+
+`spend --dry-run` returns 0 / `would-allow`, 2 / `refused` or 1 / `error`.
+It reads a snapshot, checks observable write access and leaves the ledger
+and witness untouched. A positive preview has a null sequence, current spent
+and remaining amounts, and `projected_spent`. Concurrent changes and later
+filesystem failures can change the result of the real spend.
+
+#### Caller references and receipts
+
+The versioned debit can retain an explicitly supplied caller reference and,
+when requested, the approved targets and matched destination labels. The
+reference correlates the caller's own run record with the digest and
+sequence. An older incompatible reader fails closed on a versioned debit.
+Charges remain monotone through restoration and adoption. Callers commit
+at first send and reconcile ambiguous append outcomes against the ledger.
+
+With `spend --require-new-ref --caller-ref TEXT`, the verified writer scan
+checks that exact reference under both locks across all digests of the pass
+ID. Digest and window refusals take precedence. A duplicate exits 2 with
+`refusal.code=duplicate-reference`, `seq: null`, and `reference_evidence`
+containing `caller_ref`, `match_count`, the first 64 `sequences` in ledger
+order, and `truncated`. The scan verifies the rest of the chain after a
+match, including entries after the witness.
+
+An absent reference in an adopted history or a nonempty unanchored history
+exits 2 with `reference-inconclusive` and empty match details. A guarded
+refusal does not anchor an unanchored nonempty history. Missing or invalid
+caller references are usage errors. A dry run reports observed matches
+without a reservation. The guard coordinates cooperating guarded writers
+on the same local history. External execution requires a separate record.
+The Rust option is `SpendChargesRequest::require_new_ref`.
+
+#### Lock wait
+
+On a committing spend, `--lock-timeout-ms N` gives both writer locks one
+shared monotonic wait budget. Zero requests one nonblocking attempt per lock.
+Omitting the option uses blocking locks. A timeout exits 1 with
+`error.code = "lock-timeout"` and `error.recording = "not-recorded"`.
+The budget covers lock acquisition. It places no deadline on a subsequent
+append or sync. An external process timeout can leave the outcome unknown.
 
 ### The witness
 
@@ -276,6 +301,15 @@ reads the ledger (`status`, `permits`, `spend`, `ledger`, `adopt`) compares:
 | present | the witnessed line is there, and `k` lines follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added lines; they count |
 | present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
 | present | could not be read (no state directory, damaged, not private) | `spend` and `adopt`: **error `witness-unavailable`**. `status`, `permits`, `ledger`: answered, with a warning and `not-checked` |
+
+The same evidence, by command:
+
+| State evidence | permits | status / ledger | spend and spend preview |
+|---|---|---|---|
+| Fresh pass, no previous spend | evaluate policy | report fresh | evaluate policy |
+| Ledger without a witness | evaluate with warning | report missing witness | evaluate; only a real spend can establish the witness |
+| Unusable witness state | evaluate with warning | report not-checked | error |
+| Missing or divergent witnessed history | error | error | error |
 
 The path in the witness is informational: identity is the hash chain. A
 pass moved with its ledger is accepted with a warning and the witness
@@ -305,6 +339,20 @@ ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
 the loss. The window is not checked: an adoption permits nothing.
 
+`adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
+case, present totals, carry and projected totals, prior witness and a versioned
+opaque token. It checks observable ledger, directory and witness write access
+without creating files; later permission changes and I/O failures can still prevent
+application. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
+the writer's witness and ledger locks; a stale token is an error (exit 1) and
+requires a new preview. An adoption already appended before a subsequent witness
+write failure still counts; inspect the ledger before retrying.
+
+The guard coordinates hallpass writers through their locks. Programs that edit
+pass or ledger files without taking those locks can change them after a reviewed
+snapshot; the missing-ledger decision uses the validated pass snapshot held at
+publication time.
+
 ### When the pass is edited
 
 - The spent amount of a counter is the sum of all ledger entries with that
@@ -330,6 +378,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the path is not a regular file | `not-regular-file` |
 | the pass is larger than 1 MiB | `too-large` |
 | the pass is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
+| the pass belongs to a user other than the effective user or root | `untrusted-owner` |
 | the pass does not validate (every problem listed) | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
@@ -344,6 +393,173 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 
 A missing ledger is not an error when no witness records lines for the
 pass id: it means nothing was spent.
+
+A JSON error says in `error.recording` what the failed command left in the
+ledger. After `witness-not-updated`, `error.recording` is `recorded` and the
+JSON error contains `seq` and `ledger`. A `ledger-append-uncertain` error
+includes the ledger path and `recording = "uncertain"`. Both exit 1. Inspect
+the ledger and reconcile before retrying. `lock-timeout` and
+`witness-unavailable` have `recording = "not-recorded"`: the attempt appended
+no entry to the ledger. The exception is an `adopt` whose adoption was appended before the
+witness update failed: its `witness-unavailable` error has a null
+`recording`, and the adoption counts. Every other error has a null
+`recording`.
+
+## Budget questions
+
+Neither command below writes a ledger or a witness, and neither reserves
+budget. Each live unit still needs a successful spend.
+
+### `capacity`
+
+Run `hallpass --format json capacity PASS` with the same unit syntax as spend,
+using a positional counter with optional `--n` or repeated `--charge`.
+`--to`, `--name`, `--duration` and `--digest` apply the same debit policy at
+one instant. Each counter's capacity is `floor(remaining / n)`. The minimum
+is the overall `units`, and `limiting_counters` lists every tied counter in
+request order. The `counters` rows include `counter`, `n`, `total`, `spent`,
+`remaining`, that counter's `units` and `remaining_after` the overall count.
+A valid unit yields `result=capacity` and exit 0, including at zero with
+`unit_refusal` describing the first exhausted budget. An invalid unit policy
+yields exit 2, `result=refused`, `units: null`, `refusal` and a one-based
+`refused_target` when applicable. A usage or evidence error exits 1. Capacity
+writes no ledger or witness and reserves no budget.
+
+### `rehearse`
+
+Run `hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml`
+to project three ordered debits of 40 bytes against a 100-byte ceiling. The first
+two steps leave 20 bytes. The third returns `simulation-refused` (exit 2) and
+preserves both balances. A complete projection returns `simulated` (exit 0).
+Submit each actual unit with `spend` to check the current approval and balances.
+
+A local UTF-8 TOML scenario has `version = 1` and 1–128 ordered `[[step]]`
+tables. Each table supplies a unique pass-style identifier `id`, a quoted RFC
+3339 `at` instant and an ordered list of `charges = [{counter = "bytes", n = 40}]`.
+Instants may be equal and must be nondecreasing. Optional `duration` is an
+unsigned 32-bit count of seconds. Optional `targets` lists up to 64 literal
+endpoints in spend's `ADDR:PORT/PROTO[@NAME]` syntax. Each step has 1–64
+distinct positive charges. The scenario file limit is 256 KiB.
+
+The command reads one validated pass and compares its ledger with the witness.
+The result identifies the pass digest, witness status and starting totals,
+including historical charges and adoption carry. Each evaluated step reports
+the before and after totals for its requested counters, remaining budget,
+matched labels or refusal evidence. Following steps report `unevaluated`.
+Every projection stays in memory. A subsequent live debit reads current state.
+
+## Approval review
+
+These commands read passes and, for `--budget-impact`, the verified ledger.
+None of them authorizes a spend.
+
+### Comparing revisions
+
+`hallpass diff OLD NEW` is read-only and compares declared fields, printing
+both byte digests. It normalizes port ranges, distinguishes informational
+`hostname` from enforced `names`, reports destination additions/removals and
+order changes, and flags uncertain containment for owner review. It never
+authorizes a spend. In `diff`, `before` and `after` are JSON strings, numbers
+or null (absent); text prints absent values as `none`. A network change is
+named `destination[LABEL].network`, or `.address` when both sides are single
+hosts.
+
+`diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
+destination decisions using the ordinary evaluator at the supplied offset
+timestamp. The report retains the field diff and review flags. Each
+`examples.rows` entry includes the target, optional name, instant and
+before/after label or refusal code. `examples.candidates` counts visits,
+`evaluated` counts distinct requests, and `truncated` signals omitted work.
+Sampling ends after 512 visits or 64 changed rows. `--at` takes an RFC 3339
+timestamp with an offset; `now` is refused.
+
+### Projecting an amendment against live balances
+
+`hallpass diff CURRENT PROPOSED --budget-impact --json` reads one verified summary from CURRENT. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
+
+### Proving endpoint containment
+
+`hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID and open windows. Each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
+
+The result `contained` (exit 0) certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` (exit 2) by exhibiting a new allowance. Otherwise the result is `inconclusive` (exit 2), with a reason such as a work limit or coverage that would require combining old rules. Invalid input exits 1. Label attribution, other instants, costs and scope duration are outside this certificate. See the accompanying declared-field diff for those edits.
+
+### Name overlaps and declared breadth
+
+`hallpass lint PASS` reports named rules overlapping nameless rules for the
+same address family, protocol, and ports; each claimed effective allowance
+is replayed through `permits_named` at the supplied time. Lint reports at
+most 256 findings and indicates when it truncated the list. The finding code
+is `name-restriction-overlap`. `check` and `status` also warn about each
+such pair, in text and in `warnings` and `name_restriction_overlaps`. The
+pass stays valid and `check` exits 0.
+
+`check` and `status` report exact declared address-space unions separately for
+IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`
+and one IPv6 `/64` are documented consumer comparison points; they are
+advisory only and do not change existing validation caps.
+
+### Consumer coverage
+
+`consumer-coverage PASS --can CAPABILITY` compares the full validated approval
+with declared checks for literal endpoints, names, time and revocation, and
+each charged counter. The response identifies its `pass_id`, `digest`,
+`declared` features and individual `findings`. The operator supplies the
+declaration. Live decisions and charges happen independently. Capabilities
+are `endpoints`, `names`, `live-window`, `target-on-every-debit` and
+`charge:COUNTER`, or `none` alone. Finding codes are `missing-endpoints`,
+`missing-names`, `missing-live-window`, `missing-target-on-every-debit` and
+`missing-counter`.
+
+### Signed approvals
+
+`verify-approval` uses OpenSSH detached signatures under the fixed namespace
+`hallpass-approval-v1`. A verified result includes the expected principal,
+pass ID and digest of the exact bytes supplied to the verifier. The operator
+provisions the trust file and selects the principal. See the signing and
+digest-pinning workflow in the [integration guide](INTEGRATING.md#signing-and-verifying-an-approval).
+
+### Case suites
+
+`hallpass test-pass PASS SUITE` checks up to 1,024 ordered cases offline.
+Exit 0 means all cases matched, 2 means an expectation differed, and 1 means
+invalid input or an error. See the [example suite](review-suite.toml).
+The opt-in `--strength` mode first checks the baseline, then evaluates up to 64
+in-memory mutations that only loosen the pass: remove destination name
+restrictions, extend a port range by one adjacent valid port, widen a network
+by one bit (a single address becomes a /31 or /127), add the other transport,
+and move `valid_from` one second earlier and `valid_until` one second later.
+It reports the first case that distinguishes each edit or marks the edit as
+surviving. A mutation that would not validate, and every ceiling change
+(cases cannot spend), has status `skipped` with a `reason`; `mutations_skipped`
+counts them and `mutations_tested` does not. Work is capped at
+4,096 total case evaluations; incomplete analysis exits 2 and is explicitly
+truncated. Survivors are review prompts, never instructions to change the
+approval.
+
+## Accounting history
+
+### Checkpoints
+
+`checkpoint` exports a versioned pass ID, sequence and exact-line hash, plus
+whether a local witness corroborates the history. JSON `witness.relation` is
+`matches`, `lags` or `absent`, observed under the same lock as the export, with
+`witnessed_seq` and `exported_seq`. Only `lags` and `absent` add a warning.
+`local_corroboration` is true for `matches` and `lags`. A pass with no ledger and
+no witnessed spend has nothing to commit to. `checkpoint` then exits 2 with
+`result = "empty"`, `checkpoint = null` and empty text output. A witnessed spend
+with a missing ledger is still an error. `verify-checkpoint` validates the supplied ledger and reports `exact`
+or `extended` (exit 0), `mismatch` (exit 2), or an input/error condition (exit
+1). Verification uses the supplied checkpoint as its trust input and does not
+read or create a witness. Retain checkpoints separately from the ledger.
+
+### Archives and evidence
+
+`archive PASS DIR` retains the exact validated pass bytes in a private
+directory, and `retrieve DIR DIGEST` prints them again by their full digest.
+`receipt`, `audit-receipts`, `audit-charges`, `reconcile` and
+`compare-backups` read the ledger under shared locks and report historical
+evidence. None of these commands writes the ledger or the witness.
+[EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
 
 ## Command line
 
@@ -361,8 +577,13 @@ With neither set, terminals select pretty and pipes select text. Operational
 commands use their established plain output in both modes. The help command
 uses a compact listing in text and the expanded listing in pretty.
 
+Use `hallpass --version` for the binary version. Readers should accept extra
+JSON fields. Stable refusal/error codes and on-disk format versions are
+separate contracts.
+
 Exit **0** indicates success, **1** indicates a usage, file or accounting
-error, and **2** indicates a policy refusal, verification mismatch or coverage gaps. Text
+error, and **2** indicates a policy refusal, verification mismatch, coverage
+gaps or inconclusive evidence. Text
 errors go to stderr. In JSON mode every command emits one object on stdout,
 including usage errors, help and version. Parser failures also print their
 diagnostic to stderr and return `error.code = "usage"` with null `command`
@@ -372,27 +593,41 @@ and `file`. Help and version requests return their own command name and
 
 | Command | Exit 0 | Exit 2 | Exit 1 |
 |---|---|---|---|
+| `help` | the command directory, or one command's page | never | unknown topic |
+| `version` | the version | never | bad arguments |
 | `init` | template written (mode 0600; it does not validate until filled in) | never | file exists, write failed |
-| `check` | the pass validates | never | any problem |
+| `check` | the pass validates (warnings can still be present) | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
-| `permits` | allowed | refused | invalid pass or target, ledger error (as `status`) |
+| `permits` | allowed | refused, also `pass-changed` with `--digest` | invalid pass or target, ledger error (as `status`) |
+| `spend` | recorded (with `--to`: and the destination is permitted); with `--dry-run`, `would-allow` | refused by the digest, the window, the reference guard, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `capacity` | budget count, including zero | invalid unit policy | usage, pass or accounting error |
-| `spend` | recorded (with `--to`: and the destination is permitted) | refused by the window, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
+| `rehearse` | `simulated`: every step fits | `simulation-refused`: a step is refused | invalid scenario or pass, accounting error |
 | `digest` | printed | never | invalid pass |
-| `diff` | field comparison completed, including any requested sample | never | invalid pass, instant or usage |
-| `consumer-coverage` | `covered` | `gaps` | invalid declaration or pass |
-| `verify-approval` | `verified` | `unverified` | invalid pass, unavailable verifier or input |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
-| `adopt` | adoption recorded | never | invalid pass, damaged ledger, nothing to adopt, missing reason, unusable state directory |
+| `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, missing reason, stale token, unusable state directory |
+| `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
+| `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
+| `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
+| `audit-receipts` | `complete` | `incomplete`, `mismatch` | unusable ledger or archive entry |
+| `audit-charges` | `complete` | `incomplete`, `mismatch`, `empty` | unusable ledger or archive entry |
+| `reconcile` | `match` | `discrepancy` | invalid manifest, pass or history |
+| `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass |
+| `checkpoint` | exported | `empty`: nothing recorded yet | invalid pass, ledger error (as `status`) |
+| `verify-checkpoint` | `exact` or `extended` | `mismatch` | malformed checkpoint, missing or damaged ledger |
+| `verify-approval` | `verified` | `unverified` | invalid pass, unavailable verifier or input |
+| `diff` | field comparison completed, including any requested sample or projection; with `--containment`, `contained` | `--containment`: `expanded` or `inconclusive`; `--budget-impact`: different pass IDs | invalid pass, instant or usage, unusable accounting evidence |
+| `consumer-coverage` | `covered` | `gaps` | invalid declaration or pass |
+| `lint` | the report, with or without findings | never | invalid pass |
+| `test-pass` | every case matched; with `--strength`, `complete` | a mismatch; with `--strength`, survivors, partial analysis or a failed baseline | invalid pass or suite |
+| `approval-id` | the ID is printed | never | bad arguments |
 
 `check` does not judge the window; `status` does.
 
-`permits` reads the ledger and its witness too (read-only, shared lock):
-a damaged, lost or changed record is an error there as everywhere.
-
 Warnings (no witness yet, a ledger extended past its witness or moved, a
-witness that could not be checked, a debit that checked no destination) go
-to standard error as
+witness that could not be checked, a debit that checked no destination, a
+decision clock earlier than the latest ledger event, a destination whose
+`names` another destination defeats, declared breadth beyond a comparison
+point) go to standard error as
 `hallpass: warning: ...` in text output, and into `warnings` in JSON.
 
 `ledger` is read-only. It takes the same shared lock as `status`, verifies
@@ -404,35 +639,47 @@ so and exits 0. In text output every operator-supplied string (notes, and
 pass text in `status`) is shown with control characters, line separators
 and bidirectional controls escaped as `\u{...}` and a backslash as `\\`,
 so a note can neither forge a line of output nor send a terminal escape
-sequence. JSON output carries the exact text.
+sequence. Error messages already carry their own escapes, so their
+backslashes are printed once, as written. JSON output carries the exact text.
 
 ### JSON fields
 
 Every object has `command`, a command-specific `result`, `warnings` (strings)
-and `advice` (objects with `level`, `type` and `message`). Both arrays can
-be empty. Commands that report a pass path use `file`.
+and `advice` (objects with `level`, `type` and `message`, and `argv` for a
+suggested help command). Both arrays can be empty. Commands that report a
+pass path use `file`. A `refusal` is `{code, message}` or null.
 
-- **help** includes `topic` (null for root), `commands`, `usage`, `arguments`,
-  `examples`, `workflow` and `exit_codes`. Argument metadata describes
-  unconditional requirements. Consult the usage forms for conditional ones.
+- **help** includes `topic` (null for root), `description`, `commands`
+  (list of `{name, description}`), `usage`, `arguments`, `examples`,
+  `workflow` and `exit_codes`. Argument metadata describes unconditional
+  requirements. Consult the usage forms for conditional ones.
 - **version** returns the package version in `version`.
 
-- **error** (any command): `error` `{code, message, line}` (`line` is the
-  1-based ledger line for `ledger-corrupt`, else null), `problems` (list of
+- **error** (any command): `error` `{code, message, line, recording, seq,
+  ledger}` (`line` is the 1-based ledger line for `ledger-corrupt`, else
+  null; `recording`, `seq` and `ledger` as in "Fail-closed cases", null when
+  they do not apply, and absent from parser failures), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
-- **check**: `digest`, `pass_id`, `require_target`, `problems` (empty).
+- **check**: `digest`, `pass_id`, `require_target`, `problems` (empty),
+  `breadth` `{ipv4, ipv6}` (declared address counts as decimal strings),
+  `name_restriction_overlaps` (list of `{code, named_label, unnamed_label,
+  message}`, one per pair that `lint` reports; each message is also in
+  `warnings`).
 - **status**: `digest`, `now`, `test_clock`, `pass` `{id, name, owner,
   reference, operator}`, `window`, `destinations` (list of `{label, kind`
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
-  end}`)`, ports_text, hostname, names, whole_network_approved}`), `counters` (list
-  of `{name, total, spent, remaining}`), `require_target`, `unlisted_spends` (list of `{name,
+  end}`)`, ports_text, hostname, names, whole_network_approved}`), `breadth`
+  (as in `check`), `counters` (list of `{name, total, spent, remaining}`),
+  `required_counters`, `require_target`, `unlisted_spends` (list of `{name,
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
   `not-checked`; `moved_from` the path the witness last saw, or null),
-  `refusal` (`{code, message}` or null).
+  `name_restriction_overlaps` (as in `check`), `refusal`.
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
-  (normalized), `name` (normalized, or null), `label` (or null), `refusal` (or null), `window`.
+  (normalized, the first target), `name` (normalized, or null), `label` (or
+  null), `targets` (list of `{target, name, label}` in request order),
+  `refused_target` (one-based, or null), `refusal`, `window`.
 - **spend**: every reply (`allowed`, `would-allow` or `refused`) has the
   same keys, whatever the flags. `file`, `digest`, `pass_id`, `now`,
   `test_clock`, `charges` (list of `{counter, n, total, spent, remaining,
@@ -451,15 +698,24 @@ be empty. Commands that report a pass path use `file`.
   (`{caller_ref, targets}` retained by a committed debit that asked for
   one, else null; `caller_ref` is null without `--caller-ref`, `targets`
   is empty without `--record-target`, and each entry is `{target, name,
-  label}` with `name` null for an unnamed endpoint), `refusal` (or null),
-  `reference_evidence` (for `duplicate-reference` and
-  `reference-inconclusive`, else null). The ledger line keeps its own,
-  shorter encoding.
+  label}` with `name` null for an unnamed endpoint), `refusal`,
+  `reference_evidence` (`{caller_ref, match_count, sequences, truncated}`
+  for `duplicate-reference` and `reference-inconclusive`, else null). The
+  ledger line keeps its own, shorter encoding.
+- **capacity**: `digest`, `pass_id`, `now`, `test_clock`, `targets`,
+  `units`, `limiting_counters`, `counters` and `unit_refusal`, as in
+  "Budget questions"; a refusal adds `refusal` and `refused_target`.
+- **rehearse**: `digest`, `pass_id`, `witness`, `ceilings`,
+  `starting_spent`, `projected_spent`, `steps` (each with `id`, `at`,
+  `duration`, `charges`, `targets`, `status`, `balances`, `labels` and
+  `refusal`) and `stopped_at` (the refused step, or null).
 - **digest**: `digest`, `pass_id`.
 - **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
   pass now), `counter` (the `--counter` filter or null), `verified` (always
   `true` on success: a chain that does not verify is an error), `entries`
-  (list of `{seq, time, counter, n, digest, note}`; `digest` is the pass
+  (list of `{seq, time, counter, n, digest, note}` for a scalar spend, or
+  `{seq, time, event, version, charges, digest, note, receipt}` with
+  `event` `debit` for a versioned debit; `digest` is the pass
   digest the spend was decided against, `note` null when none),
   `adoptions` (list of `{seq, time, reason, digest, carried, previous}`;
   `carried` is an object of counter name to amount, `previous` is `{ledger,
@@ -472,7 +728,38 @@ be empty. Commands that report a pass path use `file`.
 - **adopt**: `ledger`, `pass_id`, `digest`, `now`, `test_clock`, `case`
   (`ledger-missing`, `ledger-changed` or `no-witness`), `created` (a new
   ledger was started), `seq`, `reason`, `carried` and `totals` (objects of
-  counter name to amount), `previous` (as in `ledger`, or null).
+  counter name to amount), `previous` (as in `ledger`, or null). A preview
+  has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
+  `totals`, `previous` and `token`.
+- **archive**: `digest`. **retrieve**: `digest` and `bytes` (the exact
+  pass text).
+- **receipt**, **audit-receipts**, **audit-charges**, **reconcile**,
+  **compare-backups**: see [EVIDENCE.md](EVIDENCE.md). **reconcile** has
+  `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
+  result, candidate_count, sequences, truncated, differences}` in manifest
+  order; each entry of `differences` is `{sequence, field, expected,
+  recorded}`).
+- **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash}`, or null
+  when `result` is `empty`), `local_corroboration`, `witness` `{relation,
+  witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
+  `absent`; `witnessed_seq` is null for `absent`, `exported_seq` null for
+  `empty`).
+- **verify-checkpoint**: `added` (lines after the checkpoint) and
+  `trust_input` (`supplied-checkpoint`).
+- **verify-approval**: `principal` (or `expected_principal` when
+  unverified), `pass_id` and `digest` when verified, `namespace`, `archive`.
+- **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,
+  `new_digest`, `approval_id_changed`, `changes` (list of `{field, before,
+  after, review_required}`; `before` and `after` are a JSON string, number
+  or null), `introduced` and `removed` (labels), `order_changed`,
+  `review_required`; `examples`, `budget_impact` or `containment` when
+  requested.
+- **consumer-coverage**: `pass_id`, `digest`, `declared`,
+  `require_target`, `findings` (each with its `code`).
+- **lint**: `digest`, `findings`, `truncated`.
+- **test-pass**: `cases` (the suite path), `digest`, `results`,
+  `mismatches`; `mutation_strength` with `--strength`.
+- **approval-id**: `id`, `owner`, `reference`.
 
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
@@ -480,17 +767,21 @@ seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
 fields are null except the one that applies. Times are UTC, whole seconds,
 `YYYY-MM-DDTHH:MM:SSZ`.
 
-Refusal codes: `not-yet-valid`, `expired`, `revoked`, `window-too-short`,
-`embedded-ipv4`, `network-or-broadcast`, `address-not-listed`, `port-not-listed`, `name-required`, `name-not-listed`,
-`required-counter-missing`, `unknown-counter`, `ceiling-reached`, `pass-changed`.
+### Refusal codes
+
+`not-yet-valid`, `expired`, `revoked`, `window-too-short`, `embedded-ipv4`,
+`network-or-broadcast`, `address-not-listed`, `port-not-listed`,
+`name-required`, `name-not-listed`, `target-required`,
+`required-counter-missing`, `unknown-counter`, `ceiling-reached`,
+`pass-changed`, `duplicate-reference`, `reference-inconclusive`.
 
 ### Test clock
 
 `HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` replaces "now" for `status`,
-`permits`, `spend` and `adopt`, only in debug builds and builds with the
-`test-clock` feature. When used, a warning goes to standard error and
-`test_clock` is `true`. Release builds ignore it and say so on standard
-error.
+`permits`, `spend`, `capacity`, `adopt` and `lint`, only in debug builds and
+builds with the `test-clock` feature. When used, a warning goes to standard
+error and `test_clock` is `true`. Release builds ignore it and say so on
+standard error.
 
 ## Library API
 
@@ -507,12 +798,20 @@ Crate `hallpass` (re-exports `time`):
 | `Pass::permits_named(&Target, Option<&HostName>, now, needed) -> Decision` | the same for a request that carries a host name; needed when the destination lists `names` |
 | `HostName` | a canonical DNS name; `str::parse` normalizes a query, `HostName::canonical` requires the pass spelling |
 | `Pass::destination_for(ip, port, protocol)` | the matching destination, window and `names` not checked |
+| `permits_in`, `permits_with_clock_in`, `NamedTarget`, `PermitOutcome`, `TargetRefusal`, `MAX_TARGETS` | several targets of one unit against the file, with the ledger and witness verified |
 | `SpendRequest::new(counter, amount)` | a request; set `note`, `expect_digest`, `needed`, `target`, `name` as needed (the struct is `non_exhaustive`: fields may be added) |
 | `spend(path, &SpendRequest, now) -> Result<SpendOutcome, Error>` | atomic spend with the witness in `StateDir::from_env()`; with `target` set it also decides the destination; `SpendOutcome.refusal` is `None` when recorded; `SpendOutcome.label`, `SpendOutcome.warnings` |
 | `spend_in(path, &SpendRequest, now, &StateDir)` | the same with an explicit state directory |
+| `spend_with_clock_in`, `preview_spend_in`, `preview_spend_with_clock_in` | the same with the clock sampled under the locks, and read-only previews |
+| `spend_charges`, `spend_charges_in`, `spend_charges_with_clock_in`, `SpendChargesRequest`, `SpendChargesOutcome`, `Charge`, `ChargeOutcome` | one debit with several charges, an optional caller reference, receipt and reference guard |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
+| `preview_adopt`, `adopt_guarded`, `AdoptPreview` | the adoption preview and its token |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
+| `read_summary` | the tally and witness status without the entries |
+| `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
+| `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |
+| modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |
 | `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `ledger_path(path)` | `<pass>.ledger` |
@@ -553,169 +852,18 @@ larger than listed; IPv6 transition prefixes chosen by a provider (6rd,
 MAP, NAT64 network-specific prefixes); and work already running when a
 pass is revoked. [DESIGN.md](DESIGN.md) explains each.
 
-## Not yet built (planned)
+## Consumers
 
-- **Consumers.** Built: the playpen egress guard consumes passes through
+- **playpen** (built): the playpen egress guard consumes passes through
   the library (`playpen run --pass FILE`). It loads the pass with `load`,
   refuses to start unless `check_window(now, 0)` passes, allows exactly the
   destinations (optionally narrowed by label), ends the run at
   `valid_until`, and re-reads the pass every few seconds to stop the
   command when it is revoked, expired, unreadable, invalid or a destination
   in use changes. playpen does not spend: it limits where packets go, not
-  how many. Planned: the SIP assessment toolbox calling `hallpass
+  how many.
+- **Planned**: the SIP assessment toolbox calling `hallpass
   --format json spend --to ...` before each call ([INTEGRATING.md](INTEGRATING.md)); the web tester
   using the library per request.
 - **Protocols beyond tcp and udp**, and link-local destinations with an
   interface field: would need a new format version; not planned in detail.
-
-
-## Caller decision contract (0.2)
-
-Use `hallpass --version` for the binary version. Readers should accept extra
-JSON fields. Stable refusal/error codes and on-disk format versions are
-separate contracts. The CLI samples the live clock after evidence verification for status, permits
-and previews, and after preparatory witness writes under writer locks immediately
-before spend policy evaluation. Explicit-time Rust APIs use the instant supplied
-by their caller. Status and spend warn when that instant is strictly earlier than
-the latest ledger event; equal instants do not warn.
-
-The optional `permits --digest` precondition uses the byte digest and gives
-exit 2 / `pass-changed` on a mismatch after ledger verification. For permits
-and spend, repeat `--to ADDR:PORT/PROTO[@NAME]` up to 64 times. IPv6 uses
-brackets. A separate `--name` requires exactly one target without a suffix.
-All targets use one loaded pass. `targets` preserves input order and
-`refused_target` is a one-based index or null. Existing scalar target and
-label fields describe the first endpoint.
-
-`spend --dry-run` returns 0 / `would-allow`, 2 / `refused` or 1 / `error`.
-It reads a snapshot, checks observable write access and leaves the ledger
-and witness untouched. A positive preview has a null sequence, current spent
-and remaining amounts, and `projected_spent`. Concurrent changes and later
-filesystem failures can change the result of the real spend.
-
-| State evidence | permits | status / ledger | spend and spend preview |
-|---|---|---|---|
-| Fresh pass, no previous spend | evaluate policy | report fresh | evaluate policy |
-| Ledger without a witness | evaluate with warning | report missing witness | evaluate; only a real spend can establish the witness |
-| Unusable witness state | evaluate with warning | report not-checked | error |
-| Missing or divergent witnessed history | error | error | error |
-
-On a committing spend, `--lock-timeout-ms N` gives both writer locks one
-shared monotonic wait budget. Zero requests one nonblocking attempt per lock.
-Omitting the option uses blocking locks. A timeout exits 1 with
-`error.code = "lock-timeout"` and `error.recording = "not-recorded"`.
-The budget covers lock acquisition. It places no deadline on a subsequent
-append or sync. An external process timeout can leave the outcome unknown.
-
-After `witness-not-updated`, `error.recording` is `recorded` and the JSON
-error contains `seq` and `ledger`. A `ledger-append-uncertain` error includes
-the ledger path and `recording = "uncertain"`. Both exit 1. Inspect the
-ledger and reconcile before retrying.
-
-### Recovery preview and checkpoints
-
-`adopt --preview` is a read-only snapshot of an adoptable ledger, reporting its
-case, present totals, carry and projected totals, prior witness and a versioned
-opaque token. It checks observable ledger, directory and witness write access
-without creating files; later permission changes and I/O failures can still prevent
-application. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
-the writer's witness and ledger locks; a stale token is an error (exit 1) and
-requires a new preview. An adoption already appended before a subsequent witness
-write failure still counts; inspect the ledger before retrying.
-
-`checkpoint` exports a versioned pass ID, sequence and exact-line hash, plus
-whether a local witness corroborates the history. JSON `witness.relation` is
-`matches`, `lags` or `absent`, observed under the same lock as the export, with
-`witnessed_seq` and `exported_seq`. Only `lags` and `absent` add a warning.
-`local_corroboration` is true for `matches` and `lags`. A pass with no ledger and
-no witnessed spend has nothing to commit to. `checkpoint` then exits 2 with
-`result = "empty"`, `checkpoint = null` and empty text output. A witnessed spend
-with a missing ledger is still an error. `verify-checkpoint` validates the supplied ledger and reports `exact`
-or `extended` (exit 0), `mismatch` (exit 2), or an input/error condition (exit
-1). Verification uses the supplied checkpoint as its trust input and does not
-read or create a witness. Retain checkpoints separately from the ledger.
-
-The guard coordinates hallpass writers through their locks. Programs that edit
-pass or ledger files without taking those locks can change them after a reviewed
-snapshot; the missing-ledger decision uses the validated pass snapshot held at
-publication time.
-
-### Atomic accounting
-
-One unit can debit multiple named budgets. The same policy decision checks
-the pass digest, active window, requested destinations, and every ceiling
-under the writer locks. A successful commit syncs one ledger sequence and
-updates the witness with every resulting balance. Refusal leaves every
-counter balance unchanged. Positive previews return projected_spent for each
-charge while leaving the reported current balances and the ledger unchanged. Historical
-scalar debits and adoption carry-forward remain valid, and tallying counts
-a multi-charge unit once while adding each charge to its counter.
-
-The versioned debit can retain an explicitly supplied caller reference and,
-when requested, the approved targets and matched destination labels. The
-reference correlates the caller's own run record with the digest and
-sequence. An older incompatible reader fails closed on a versioned debit.
-Charges remain monotone through restoration and adoption. Callers commit
-at first send and reconcile ambiguous append outcomes against the ledger.
-
-With `spend --require-new-ref --caller-ref TEXT`, the verified writer scan
-checks that exact reference under both locks across all digests of the pass
-ID. Digest and window refusals take precedence. A duplicate exits 2 with
-`refusal.code=duplicate-reference`, `seq: null`, and `reference_evidence`
-containing `caller_ref`, `match_count`, the first 64 `sequences` in ledger
-order, and `truncated`. The scan verifies the rest of the chain after a
-match, including entries after the witness.
-
-An absent reference in an adopted history or a nonempty unanchored history
-exits 2 with `reference-inconclusive` and empty match details. A guarded
-refusal does not anchor an unanchored nonempty history. Missing or invalid
-caller references are usage errors. A dry run reports observed matches
-without a reservation. The guard coordinates cooperating guarded writers
-on the same local history. External execution requires a separate record.
-The Rust option is `SpendChargesRequest::require_new_ref`.
-
-### Rehearsing a budget
-
-Run `hallpass --format json capacity PASS` with the same unit syntax as spend,
-using a positional counter with optional `--n` or repeated `--charge`.
-`--to`, `--name`, `--duration` and `--digest` apply the same debit policy at
-one instant. Each counter's capacity is `floor(remaining / n)`. The minimum
-is the overall `units`, and `limiting_counters` lists every tied counter in
-request order. The `counters` rows include `counter`, `n`, `total`, `spent`,
-`remaining`, that counter's `units` and `remaining_after` the overall count.
-A valid unit yields `result=capacity` and exit 0, including at zero with
-`unit_refusal` describing the first exhausted budget. An invalid unit policy
-yields exit 2, `result=refused`, `units: null`, `refusal` and a one-based
-`refused_target` when applicable. A usage or evidence error exits 1. Capacity
-writes no ledger or witness and reserves no budget.
-
-Run `hallpass --format json rehearse docs/required-counters.toml docs/rehearse.toml`
-to project three ordered debits of 40 bytes against a 100-byte ceiling. The first
-two steps leave 20 bytes. The third returns `simulation-refused` (exit 2) and
-preserves both balances. A complete projection returns `simulated` (exit 0).
-Submit each actual unit with `spend` to check the current approval and balances.
-
-A local UTF-8 TOML scenario has `version = 1` and 1–128 ordered `[[step]]`
-tables. Each table supplies a unique pass-style identifier `id`, a quoted RFC
-3339 `at` instant and an ordered list of `charges = [{counter = "bytes", n = 40}]`.
-Instants may be equal and must be nondecreasing. Optional `duration` is an
-unsigned 32-bit count of seconds. Optional `targets` lists up to 64 literal
-endpoints in spend's `ADDR:PORT/PROTO[@NAME]` syntax. Each step has 1–64
-distinct positive charges. The scenario file limit is 256 KiB.
-
-The command reads one validated pass and compares its ledger with the witness.
-The result identifies the pass digest, witness status and starting totals,
-including historical charges and adoption carry. Each evaluated step reports
-the before and after totals for its requested counters, remaining budget,
-matched labels or refusal evidence. Following steps report `unevaluated`.
-Every projection stays in memory. A subsequent live debit reads current state.
-
-### Projecting an amendment against live balances
-
-`hallpass diff CURRENT PROPOSED --budget-impact --json` reads one verified summary from CURRENT. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
-
-### Proving endpoint containment
-
-`hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID and open windows. Each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
-
-The result `contained` (exit 0) certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` (exit 2) by exhibiting a new allowance. Otherwise the result is `inconclusive` (exit 2), with a reason such as a work limit or coverage that would require combining old rules. Invalid input exits 1. Label attribution, other instants, costs and scope duration are outside this certificate. See the accompanying declared-field diff for those edits.

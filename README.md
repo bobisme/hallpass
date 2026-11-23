@@ -124,7 +124,8 @@ Current pass digest: sha256:…
 `spend --to` checks the destination, the approval window, revocation and the
 requested charges under the writer locks. A policy refusal adds no debit.
 With `require_target_v1 = true`, omitting `--to` refuses the debit.
-Other passes allow a targetless debit. An owner can use
+Other passes allow a targetless debit, and `spend` then warns that no
+destination was checked. An owner can use
 `required_counters_v1` to require several counters on every debit. Supply
 their costs together, for example `--charge requests=1 --charge bytes=100`.
 The sixth `spend` of `calls` succeeds and the seventh is refused (exit 2),

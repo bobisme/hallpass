@@ -1,126 +1,16 @@
 # Calling hallpass from another tool
 
-## Review and case suites
-
-An owner with an existing SSH signing key can endorse the exact pass bytes.
-OpenSSH writes a detached signature beside the file.
-
-```text
-ssh-keygen -Y sign -n hallpass-approval-v1 -f ~/.ssh/approval_key engagement.pass.toml
-```
-
-Obtain the owner's public key through your trusted provisioning channel. In
-your own OpenSSH allowed-signers file, bind the expected principal to that
-key, for example `owner@example.org ssh-ed25519 AAAA...`. The verifier
-decides which principal may speak for the named approval owner. Keep that
-trust file under your control, separately from the submitted pass and signature.
-
-```text
-hallpass --json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig \
-  --allowed-signers /etc/hallpass/trusted_signers --principal owner@example.org
-```
-
-Exit 0 with `result=verified` identifies the signer, pass ID and exact digest.
-An unverified signature exits 2. Input and missing-verifier errors exit 1.
-Historical verification can succeed after expiry. Supply the returned digest
-to `permits --digest` or `spend --digest` for the live decision.
-
-To retain exactly the bytes that passed verification, create a private archive
-once and request publication in the same invocation:
-
-```text
-mkdir -m 700 approval-archive
-hallpass --format json verify-approval engagement.pass.toml \
-  --signature engagement.pass.toml.sig \
-  --allowed-signers /etc/hallpass/trusted_signers \
-  --principal owner@example.org --archive approval-archive
-```
-
-The successful JSON response includes `digest` and the requested `archive`
-destination. Pin that digest for the live check. If someone edits the working
-pass later, retrieve the originally verified bytes with
-`hallpass --format text retrieve approval-archive "$digest"`. The archive
-stores pass bytes only. Keep the detached signature, the trusted allowed
-signers file and the expected principal separately; those are needed to
-verify the archived bytes again. A failed signature check publishes nothing.
-
-Run `hallpass diff OLD NEW` to inspect the changed terms and both byte
-digests. Run `hallpass lint NEW` to see where a second destination relaxes a
-name restriction.
-
-For concrete changes, add `--examples --at 2026-11-20T09:00:00Z` to
-`diff`. It samples literal network boundaries, range endpoints and adjacent
-ports with and without declared names. Each row records the exact review
-instant and both decisions, including the label or refusal code. It visits
-up to 512 candidates and returns up to 64 changed rows. Check
-`examples.truncated` for omitted work. An empty sample cannot establish
-equivalence. Continue to review the declared fields and `review_required`.
-
-Try the owner example from the repository root with
-`hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml`.
-The suite checks a named allowance, a name refusal and both window boundaries.
-Each case supplies an offset timestamp, target, and an expected outcome of
-`allowed` or a stable refusal code. The version 1 TOML suite accepts up to
-1,024 cases and 256 KiB. Exit 0 means every expectation matched, 2 means a
-mismatch, and 1 means invalid input. The report includes the pass digest
-and preserves input order. The command reads no accounting state.
-
-Opt in to a bounded suite-strength check with `--strength`:
-
-```text
-hallpass --format json test-pass docs/review-approval.toml \
-  docs/review-suite-weak.toml --strength
-hallpass --format json test-pass docs/review-approval.toml \
-  docs/review-suite-strong.toml --strength
-```
-
-The weak fixture checks only an allowed name. Its report shows that removing
-the destination's names survives. The strong fixture adds refusals for a
-wrong name, adjacent ports, the neighbouring address, the other transport
-and the instants one second outside each end of the window; the report names the
-first case that distinguishes each edit. Each mutation changes one term in an
-in-memory copy and uses the ordinary evaluator. Every mutation only loosens
-the pass. Besides names and ports, the check widens each network by one bit
-(a single address becomes its /31 or /127), adds the other transport as a
-second destination, and moves `valid_from` one second earlier and
-`valid_until` one second later. A mutation that would not validate, such as a
-network that would pass the breadth cap, is reported as `skipped` with a
-`reason`. Raising a ceiling is always `skipped`: a case cannot spend, so no
-case can see it. Skipped mutations are not counted as tested or survived.
-Text output prints one line per mutation. Overlapping rules can make an
-edit semantically redundant, so survivors are review prompts and never
-instructions to alter the approval. The check caps itself at 64 mutations and
-4,096 case evaluations. Inspect `truncated`; partial analysis cannot be
-reported as full coverage. A failing baseline stops mutation analysis.
-
-## Mapping written approvals and practice runs
-
-Keep the exact written reference in `approval.reference`. For a stable ID,
-construct `hp1-` plus the first 52 lowercase hexadecimal characters of
-SHA-256 over the namespace `hallpass/approval/v1`, owner identity, and the
-exact reference string, separated by NUL bytes. If that ID already belongs to
-different owner/reference material, append `-2`, `-3`, and so on. Revisions of
-the same approval retain the ID; a different owner or reference is a new ledger
-identity. An approval without a trustworthy start instant is incomplete:
-request the actual approval time instead of guessing one.
-
-For example, run `hallpass approval-id --owner "Pat Owner" --reference
-"Change 9812 / Voice edge (approved)"` and copy the printed ID into the pass.
-Keep the reference exactly as written when revising destinations or ceilings.
-If that message omits the start instant, obtain it from the owner before
-issuing the pass.
-
-For a loopback practice run, allocate a fresh ID and explicit window and
-ceilings for each separately approved start. For example, use `practice-` followed by a new UUIDv4 as the run ID, while retaining the reusable owner reference as
-metadata. Persist that ID in the pass and keep the ordinary ledger and witness
-locations. A restart in the same run reuses the same pass and ledger; a second
-run gets a new ID and budget. Do not copy a pass without its ledger, use a reset
-flag, or apply this recipe to routed rehearsals.
-
 This page is for the author of a tool that sends traffic and wants hallpass
 to decide whether it may. It covers the command line, the library, what a
 "yes" guarantees and what it does not. The rules themselves are in
 [spec.md](spec.md), the file format in [PASS-FORMAT.md](PASS-FORMAT.md).
+Writing, signing and reviewing the pass come before the first call. They
+are at the end of this page: [Mapping written approvals and practice
+runs](#mapping-written-approvals-and-practice-runs), [Signing and verifying
+an approval](#signing-and-verifying-an-approval) and [Review and case
+suites](#review-and-case-suites).
+
+New operators can start with the runnable [first-shift walkthrough](WALKTHROUGH.md).
 
 ## The one call
 
@@ -161,8 +51,8 @@ for people and may change.
 The test `tests/integrating.rs` writes the pass below as
 `engagement.pass.toml`, runs every `$ hallpass` line of this section at
 2026-11-20T09:00:00Z, and compares the exit code and the fields shown. The
-real objects have more fields ([spec.md](spec.md), "JSON output"); a caller
-must ignore fields it does not know.
+real objects have more fields ([spec.md, "JSON fields"](spec.md#json-fields));
+a caller must ignore fields it does not know.
 
 ```toml
 format = 1
@@ -360,6 +250,12 @@ state files or a ledger header may exist. The limit ends at lock acquisition.
 An external process timeout, an uncertain append, or a failed witness update
 still calls for reconciliation. Subsequent requests reevaluate live policy.
 
+A `witness-unavailable` error also has `recording = "not-recorded"`: the
+spend stopped before it appended a debit. The exception is `adopt` when the
+adoption was appended and only the witness update failed. That error has a
+null `recording`, and the adoption counts. Inspect the ledger before you run
+`adopt` again. Every other error has a null `recording`.
+
 ### Test a subprocess wrapper
 
 Run `python3 docs/conformance/check.py` from the checkout. The reference
@@ -390,6 +286,10 @@ unit and shows its warning.
 
 The reference runner also runs the [version 2 scalar fixtures](conformance/cases-v2.json).
 New integrations should use version 3 for complete request checking.
+
+For a complete caller that journals each unit, gates its callback with
+`inspect_reply`, and reconciles interrupted units by reference without
+repeating them, see the [reference caller](reference-caller/README.md).
 
 ## Charge all known costs at the first send
 
@@ -622,4 +522,124 @@ request and 100 bytes left, two callers can both pass preflight for that
 amount. Only one can commit the debit. If that caller crashes before sending,
 the remaining budget is still zero requests and zero bytes. If a crash leaves
 the append outcome uncertain, reconcile the ledger before attempting another
-spend.
+spend. The [reference caller](reference-caller/README.md#after-an-interruption)
+shows one way to keep the caller-side record that this reconciliation needs.
+
+## Mapping written approvals and practice runs
+
+Keep the exact written reference in `approval.reference`. For a stable ID,
+construct `hp1-` plus the first 52 lowercase hexadecimal characters of
+SHA-256 over the namespace `hallpass/approval/v1`, owner identity, and the
+exact reference string, separated by NUL bytes. If that ID already belongs to
+different owner/reference material, append `-2`, `-3`, and so on. Revisions of
+the same approval retain the ID; a different owner or reference is a new ledger
+identity. An approval without a trustworthy start instant is incomplete:
+request the actual approval time instead of guessing one.
+
+For example, run `hallpass approval-id --owner "Pat Owner" --reference
+"Change 9812 / Voice edge (approved)"` and copy the printed ID into the pass.
+Keep the reference exactly as written when revising destinations or ceilings.
+If that message omits the start instant, obtain it from the owner before
+issuing the pass.
+
+For a loopback practice run, allocate a fresh ID and explicit window and
+ceilings for each separately approved start. For example, use `practice-` followed by a new UUIDv4 as the run ID, while retaining the reusable owner reference as
+metadata. Persist that ID in the pass and keep the ordinary ledger and witness
+locations. A restart in the same run reuses the same pass and ledger; a second
+run gets a new ID and budget. Do not copy a pass without its ledger, use a reset
+flag, or apply this recipe to routed rehearsals.
+
+## Signing and verifying an approval
+
+An owner with an existing SSH signing key can endorse the exact pass bytes.
+OpenSSH writes a detached signature beside the file.
+
+```text
+ssh-keygen -Y sign -n hallpass-approval-v1 -f ~/.ssh/approval_key engagement.pass.toml
+```
+
+Obtain the owner's public key through your trusted provisioning channel. In
+your own OpenSSH allowed-signers file, bind the expected principal to that
+key, for example `owner@example.org ssh-ed25519 AAAA...`. The verifier
+decides which principal may speak for the named approval owner. Keep that
+trust file under your control, separately from the submitted pass and signature.
+
+```text
+hallpass --json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig \
+  --allowed-signers /etc/hallpass/trusted_signers --principal owner@example.org
+```
+
+Exit 0 with `result=verified` identifies the signer, pass ID and exact digest.
+An unverified signature exits 2. Input and missing-verifier errors exit 1.
+Historical verification can succeed after expiry. Supply the returned digest
+to `permits --digest` or `spend --digest` for the live decision.
+
+To retain exactly the bytes that passed verification, create a private archive
+once and request publication in the same invocation:
+
+```text
+mkdir -m 700 approval-archive
+hallpass --format json verify-approval engagement.pass.toml \
+  --signature engagement.pass.toml.sig \
+  --allowed-signers /etc/hallpass/trusted_signers \
+  --principal owner@example.org --archive approval-archive
+```
+
+The successful JSON response includes `digest` and the requested `archive`
+destination. Pin that digest for the live check. If someone edits the working
+pass later, retrieve the originally verified bytes with
+`hallpass --format text retrieve approval-archive "$digest"`. The archive
+stores pass bytes only. Keep the detached signature, the trusted allowed
+signers file and the expected principal separately; those are needed to
+verify the archived bytes again. A failed signature check publishes nothing.
+
+## Review and case suites
+
+Run `hallpass diff OLD NEW` to inspect the changed terms and both byte
+digests. Run `hallpass lint NEW` to see where a second destination relaxes a
+name restriction.
+
+For concrete changes, add `--examples --at 2026-11-20T09:00:00Z` to
+`diff`. It samples literal network boundaries, range endpoints and adjacent
+ports with and without declared names. Each row records the exact review
+instant and both decisions, including the label or refusal code. It visits
+up to 512 candidates and returns up to 64 changed rows. Check
+`examples.truncated` for omitted work. An empty sample cannot establish
+equivalence. Continue to review the declared fields and `review_required`.
+
+Try the owner example from the repository root with
+`hallpass --format json test-pass docs/review-approval.toml docs/review-suite.toml`.
+The suite checks a named allowance, a name refusal and both window boundaries.
+Each case supplies an offset timestamp, target, and an expected outcome of
+`allowed` or a stable refusal code. The version 1 TOML suite accepts up to
+1,024 cases and 256 KiB. Exit 0 means every expectation matched, 2 means a
+mismatch, and 1 means invalid input. The report includes the pass digest
+and preserves input order. The command reads no accounting state.
+
+Opt in to a bounded suite-strength check with `--strength`:
+
+```text
+hallpass --format json test-pass docs/review-approval.toml \
+  docs/review-suite-weak.toml --strength
+hallpass --format json test-pass docs/review-approval.toml \
+  docs/review-suite-strong.toml --strength
+```
+
+The weak fixture checks only an allowed name. Its report shows that removing
+the destination's names survives. The strong fixture adds refusals for a
+wrong name, adjacent ports, the neighbouring address, the other transport
+and the instants one second outside each end of the window; the report names the
+first case that distinguishes each edit. Each mutation changes one term in an
+in-memory copy and uses the ordinary evaluator. Every mutation only loosens
+the pass. Besides names and ports, the check widens each network by one bit
+(a single address becomes its /31 or /127), adds the other transport as a
+second destination, and moves `valid_from` one second earlier and
+`valid_until` one second later. A mutation that would not validate, such as a
+network that would pass the breadth cap, is reported as `skipped` with a
+`reason`. Raising a ceiling is always `skipped`: a case cannot spend, so no
+case can see it. Skipped mutations are not counted as tested or survived.
+Text output prints one line per mutation. Overlapping rules can make an
+edit semantically redundant, so survivors are review prompts and never
+instructions to alter the approval. The check caps itself at 64 mutations and
+4,096 case evaluations. Inspect `truncated`; partial analysis cannot be
+reported as full coverage. A failing baseline stops mutation analysis.

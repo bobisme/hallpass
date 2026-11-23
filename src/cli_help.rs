@@ -69,7 +69,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json spend docs/required-counters.toml --charge requests=1 --charge bytes=24 --to 192.0.2.10:443/tcp@app.example.org --dry-run",
                 "hallpass --format json spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --caller-ref batch-42 --require-new-ref --digest \"$digest\"",
             ],
-            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Read require_target from check or status. When true, supply --to for every debit. A targetless request returns refusal.code=target-required. Retain a checked target only with --record-target. Preview with --dry-run, then submit with the reviewed digest and required targets and charges. Use --caller-ref with --require-new-ref to deny duplicates under the writer locks. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. On duplicate-reference, reconcile reference_evidence.sequences with your run record and receipt. After a lost reply, uncertain error or reference-inconclusive refusal, reconcile with the ledger and your run record before retrying.",
+            "Use COUNTER with optional --n, or repeat --charge COUNTER=N. Read require_target from check or status. When true, supply --to for every debit. A targetless request returns refusal.code=target-required. When false, a debit without --to checks no destination and has a warning that says so. Retain a checked target only with --record-target. Preview with --dry-run, then submit with the reviewed digest and required targets and charges. Use --caller-ref with --require-new-ref to deny duplicates under the writer locks. Require exit 0, command=spend, result=allowed, a positive seq, test_clock=false and a reply matching the request. A preview reserves nothing. On duplicate-reference, reconcile reference_evidence.sequences with your run record and receipt. After a lost reply, uncertain error or reference-inconclusive refusal, reconcile with the ledger and your run record before retrying.",
         ),
         "digest" => (
             &["hallpass --format json digest engagement.pass.toml"],
@@ -156,14 +156,14 @@ fn history_guide(name: &str) -> Guide {
                 "hallpass reconcile engagement.pass.toml manifest.json",
                 "hallpass --format json reconcile engagement.pass.toml manifest.json",
             ],
-            "Compare a version 1 local manifest with the available verified ledger in one pass. See docs/EVIDENCE.md for the JSON schema. Missing or duplicate references and mismatched or unrecorded details exit 2; invalid input or history exits 1. This is accounting evidence, not proof of external work.",
+            "Compare a version 1 local manifest with the available verified ledger in one pass. See docs/EVIDENCE.md for the JSON schema. Read rows[].differences: each entry names a field that differs, the candidate sequence, the manifest value (expected) and the ledger value (recorded); null means that side has none. Missing or duplicate references and mismatched or unrecorded details exit 2; invalid input or history exits 1. This is accounting evidence, not proof of external work.",
         ),
         "compare-backups" => (
             &[
                 "hallpass --format json compare-backups engagement.pass.toml backup-a.ledger backup-b.ledger",
                 "hallpass --format json compare-backups engagement.pass.toml --ancestry backup-a.ledger backup-b.ledger",
             ],
-            "Supply up to 32 candidate ledger files and the pass identifying the witness. Inspect each verified tip, relation and tip_group, then review the assessment. By default distinct extensions are ambiguous. With --ancestry, verified prefix links and maximal groups distinguish successive backups from competing branches. Recheck the chosen file after restoration. Per-file input failures exit 1, preserving other rows.",
+            "Supply up to 32 candidate ledger files and the pass identifying the witness. Inspect each verified tip, relation and tip_group, then review the assessment. By default distinct extensions are ambiguous. With --ancestry, verified prefix links and maximal groups distinguish successive backups from competing branches. Only candidates that extend the witness are compared, so empty prefix_links does not mean the backups are unrelated. Recheck the chosen file after restoration. Per-file input failures exit 1, preserving other rows.",
         ),
         "checkpoint" => (
             &["hallpass --format json checkpoint engagement.pass.toml > checkpoint.json"],
