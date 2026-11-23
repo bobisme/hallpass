@@ -44,6 +44,7 @@ mod evidence_charges;
 mod evidence_manifest;
 mod reference;
 pub mod scenario;
+mod written;
 pub use debit::*;
 use debit::{DebitLine, parse_debit};
 pub use reference::ReferenceEvidence;
@@ -52,6 +53,8 @@ pub use reference::ReferenceEvidence;
 const LEDGER_VERSION: u32 = 1;
 /// The longest note a spend may carry, in characters.
 pub const MAX_NOTE: usize = 500;
+/// The read buffer for a scan of the whole ledger (fewer, larger reads).
+const SCAN_BUFFER: usize = 1 << 16;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -442,6 +445,9 @@ struct Parsed {
     adoption_count: u64,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
+    /// Recorded targets this scan already found valid, so that a target
+    /// repeated on many lines is checked once (see `debit::KNOWN_TARGETS`).
+    valid_targets: Vec<RecordedTarget>,
 }
 
 impl Parsed {
@@ -462,12 +468,66 @@ impl Parsed {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum Line {
     Spend(Entry),
     Debit(DebitLine),
     Adopt(AdoptLine),
+}
+
+/// Which record shape a ledger line has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Spend,
+    Debit,
+    Adopt,
+}
+
+impl Line {
+    /// Decode one ledger line as one of the three record shapes.
+    ///
+    /// This accepts exactly the lines that an untagged enum of the three shapes
+    /// accepts, but it does not first buffer every line into an untyped value
+    /// (which cost more than hashing the line). Each shape refuses unknown
+    /// fields and requires a field that the other two refuse (`counter`,
+    /// `charges`, `carried`), so at most one shape decodes a line, and the
+    /// order of the attempts cannot change the result. The likely shape is
+    /// tried first, because a failed attempt costs more than a decode.
+    ///
+    /// A line in the exact spelling hallpass writes is read directly
+    /// ([`written`]), with the same result. Any other line is checked as UTF-8
+    /// once. A line that is not UTF-8 is not JSON either, so this refuses
+    /// nothing that JSON decoding accepts.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if let Some(line) = written::read(bytes) {
+            return Some(line);
+        }
+        let text = std::str::from_utf8(bytes).ok()?;
+        let attempt = |shape: Shape| match shape {
+            Shape::Spend => serde_json::from_str(text).ok().map(Self::Spend),
+            Shape::Debit => serde_json::from_str(text).ok().map(Self::Debit),
+            Shape::Adopt => serde_json::from_str(text).ok().map(Self::Adopt),
+        };
+        let first = Shape::guess(text);
+        attempt(first).or_else(|| {
+            [Shape::Spend, Shape::Debit, Shape::Adopt]
+                .into_iter()
+                .filter(|shape| *shape != first)
+                .find_map(attempt)
+        })
+    }
+}
+
+impl Shape {
+    /// The shape to try first: only a guess, see [`Line::decode`].
+    fn guess(text: &str) -> Self {
+        if text.contains("\"charges\":") {
+            Self::Debit
+        } else if text.contains("\"carried\":") {
+            Self::Adopt
+        } else {
+            Self::Spend
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -495,7 +555,12 @@ struct WitnessLine {
 
 /// Add `n` to `counter` in `totals`, refusing a sum beyond any ceiling.
 fn add(totals: &mut BTreeMap<String, u64>, counter: &str, n: u64) -> Option<()> {
-    let total = totals.entry(counter.to_owned()).or_insert(0);
+    // Look up before inserting: a scan adds to the same few counters on every
+    // line, and an owned key would be allocated (and dropped) each time.
+    if !totals.contains_key(counter) {
+        totals.insert(counter.to_owned(), 0);
+    }
+    let total = totals.get_mut(counter)?;
     *total = total.checked_add(n).filter(|t| *t <= MAX_CEILING)?;
     Some(())
 }
@@ -577,6 +642,7 @@ fn scan_ledger(
         last_time: None,
         adoption_count: 0,
         seq: 0,
+        valid_targets: Vec::new(),
     };
     record_checkpoint(&mut checkpoints, 0, parsed.tail);
     let mut number = 1;
@@ -594,8 +660,8 @@ fn scan_ledger(
         if line.pop() != Some(b'\n') {
             return Err(corrupt(number, "the last line is cut short (no line end)"));
         }
-        let record: Line = serde_json::from_slice(&line)
-            .map_err(|_| corrupt(number, "the line is not a complete ledger entry"))?;
+        let record = Line::decode(&line)
+            .ok_or_else(|| corrupt(number, "the line is not a complete ledger entry"))?;
         let (seq, prev) = match &record {
             Line::Spend(e) => (e.seq, &e.prev),
             Line::Debit(e) => (e.seq, &e.prev),
@@ -607,7 +673,7 @@ fn scan_ledger(
                 "the sequence number is out of order (a line is missing or was moved)",
             ));
         }
-        if *prev != parsed.tail().to_string() {
+        if !parsed.tail().is_written_as(prev) {
             return Err(corrupt(
                 number,
                 "the line does not follow the one before it (a line was changed, removed or moved)",
@@ -948,8 +1014,8 @@ fn visit_view(
     let parsed = file
         .as_ref()
         .map(|f| {
-            scan_ledger(&path, BufReader::new(f), collect, requested, None, visit)?
-                .for_pass(&path, id)
+            let reader = BufReader::with_capacity(SCAN_BUFFER, f);
+            scan_ledger(&path, reader, collect, requested, None, visit)?.for_pass(&path, id)
         })
         .transpose()?;
     let (witness, moved) = match saved_witness {
@@ -974,6 +1040,7 @@ fn visit_view(
         last_time: None,
         adoption_count: 0,
         seq: 0,
+        valid_targets: Vec::new(),
     });
     Ok(LedgerView {
         path,
@@ -1409,7 +1476,7 @@ fn lock_for_writing(
     }
     let parsed = scan_ledger(
         &path,
-        BufReader::new(&file),
+        BufReader::with_capacity(SCAN_BUFFER, &file),
         false,
         witness.as_ref().map(|w| w.seq),
         None,

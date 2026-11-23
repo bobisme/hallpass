@@ -412,11 +412,90 @@ require usable witness evidence.
 Ledger decisions scan the complete chain line by line, hashing the original
 bytes. Summary reads retain totals, the tail, and the requested witnessed
 prefix instead of retaining every event or line hash. Retained memory therefore
-depends on counter names and the largest line, while each decision still takes
+depends on counter names, the largest line and at most 16 recorded targets
+already checked, while each decision still takes
 linear time in the number of ledger lines. Full-history reads retain events for
 listing. A separately retained checkpoint commits to an exact prefix but does
 not establish who approved it or authenticate a checkpoint rewritten alongside
 the ledger.
+
+### Cost per call
+
+Every `permits`, `status`, `spend` and spend preview verifies the whole ledger
+once: it reads every byte, hashes every line, checks each `seq` and `prev`,
+and decodes and validates every record. No call verifies twice. A line in the
+exact spelling hallpass writes is read directly (`src/ledger/written.rs`).
+Any other spelling goes to `serde_json`. Both accept the same lines with the
+same values, and property tests compare them.
+
+`cargo test --release --test ledger_scale -- --ignored --nocapture` measures
+this. Its ledgers mix legacy spends, debits and debits with a caller reference
+and a recorded target (about 300 bytes a line). The numbers below are the best
+median of three runs on a loaded 32-core AMD Threadripper 9970X with SHA
+extensions. The ledger is on tmpfs, so the sync after each append costs
+nothing here. On a disk, add the sync time to each spend.
+
+Before and after this change, in milliseconds per call. `permits` and `spend`
+call the library; CLI `spend` starts the binary for each call. The last column
+is spends a second from 16 threads together.
+
+| Ledger lines | Size | Read and hash | `permits` | `spend` | CLI `spend` | 16 spenders |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.3 kB | 0.001 | 0.019 → 0.017 | 0.054 → 0.043 | 0.69 → 0.62 | 2,800 → 6,400 |
+| 1,000 | 0.3 MB | 0.17 | 1.6 → 0.46 | 1.6 → 0.47 | 2.6 → 1.1 | 460 → 1,400 |
+| 10,000 | 3.0 MB | 1.6 | 15.2 → 4.1 | 15.0 → 4.3 | 16.5 → 5.7 | 61 → 197 |
+| 100,000 | 30 MB | 18.9 | 154 → 46 | 149 → 47 | 152 → 47 | 6 → 21 |
+
+`permits` and `status` cost the same. On an ext4 NVMe disk, the syncs added
+about 7 ms to each spend, and 16 spenders reached 134 spends a second at 1
+line and 82 at 10,000 lines.
+
+"Read and hash" is the floor for a call that checks every byte: it reads the
+ledger and hashes each line, and decodes nothing. In a profile at 100,000
+lines before this change, the time went to decoding through an untagged serde enum, which buffered each
+line into an intermediate value (about 40%), to formatting the previous
+line's hash as text to compare it with `prev` (about 34%), to SHA-256 (about
+8%) and to hex parsing (about 5%). Now hashing and reading are about 40% of a
+call, and the rest is decoding and validation.
+
+**Practical size.** A call costs about 0.45 µs per ledger line, and a
+CLI call adds about 0.6 ms to start the process and load the pass. Up to
+10,000 lines, a call takes a few milliseconds. At 100,000 lines (30 MB), a call
+takes about 46 ms. Spends hold both locks while they verify, so the spends
+on one pass run one at a time: all callers together sustain about 20 spends
+a second. Cost grows linearly: 1,000,000 lines would take about half a second
+per call. Keep the ledger of one pass below about 100,000 lines.
+
+**Batch with `--n`.** The cost depends on the number of lines, not on the
+amounts. A caller that counts every request at a high rate should spend once
+per group: `hallpass spend PASS requests --n 50` (or `--charge requests=50
+--charge bytes=N`) immediately before the first send of the group records one
+line for the group. A recorded spend is final, so a group that stops early
+still counts its unsent part. Batching can count more than was sent, never
+less. Choose the group size so that the ledger stays below about 100,000
+lines for the whole engagement. For example, 10,000,000 requests in groups of
+100 make 100,000 lines.
+
+**Incremental verification was considered and not adopted.** To skip the
+prefix that an earlier call verified, a call must know that the prefix has
+not changed since. There are two ways, and neither is worth its cost:
+
+- Trust file metadata (size, inode, change time). The cost per call would be
+  flat. But a changed middle line would be found only when the metadata
+  shows a change, or by a full verification. A write that does not change the
+  metadata (storage damage, or a raw device write) would go unnoticed on
+  every call. That moves detection from every call to fewer calls.
+- Keep a digest of the verified prefix and its totals, for example beside the
+  witness. Detection stays on every call, because the call still hashes every
+  byte, so this saves only the decoding. The "read and hash" column shows the
+  most it can save: about 60% of a call. In exchange, ceiling decisions would
+  depend on a cached copy of the totals in the state directory instead of the
+  ledger. A later release that tightens a validation rule would also not
+  check the cached prefix again.
+
+Batching reduces the number of lines, and so every cost, by the group size.
+If larger ledgers become necessary, revisit the prefix digest: it is the
+design that keeps detection on every call.
 
 ### Recorded spends are final
 

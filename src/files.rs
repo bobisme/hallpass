@@ -71,40 +71,79 @@ pub const MAX_PASS_BYTES: u64 = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Digest([u8; 32]);
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// The length of a digest's text form: `sha256:` and 64 hex digits.
+const DIGEST_TEXT_LEN: usize = 7 + 64;
+
 impl Digest {
     /// The digest of `bytes`.
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
+
+    /// The text form, as [`fmt::Display`] writes it, without allocating.
+    fn text(&self) -> [u8; DIGEST_TEXT_LEN] {
+        let mut out = [0u8; DIGEST_TEXT_LEN];
+        out[..7].copy_from_slice(b"sha256:");
+        for (pair, byte) in out[7..].as_chunks_mut::<2>().0.iter_mut().zip(self.0) {
+            *pair = [
+                HEX_DIGITS[usize::from(byte >> 4)],
+                HEX_DIGITS[usize::from(byte & 0x0f)],
+            ];
+        }
+        out
+    }
+
+    /// Whether `text` is exactly this digest's text form (`sha256:` and 64
+    /// lower-case hex digits). The ledger chain compares every `prev` field
+    /// this way, without formatting a new string per line.
+    pub(crate) fn is_written_as(&self, text: &str) -> bool {
+        text.as_bytes() == self.text()
+    }
 }
 
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("sha256:")?;
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
+        let text = self.text();
+        f.write_str(std::str::from_utf8(&text).map_err(|_| fmt::Error)?)
     }
 }
+
+/// The value of each lower-case hex digit, and 0xff for every other byte.
+static HEX_VALUES: [u8; 256] = {
+    let mut table = [0xff; 256];
+    let mut value: u8 = 0;
+    while value < 16 {
+        table[HEX_DIGITS[value as usize] as usize] = value;
+        value += 1;
+    }
+    table
+};
 
 impl FromStr for Digest {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bad = || format!("`{s}` is not a digest; write sha256: and 64 lower-case hex digits");
-        let hex = s.strip_prefix("sha256:").ok_or_else(bad)?;
-        if hex.len() != 64
-            || !hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        let hex = s.strip_prefix("sha256:").ok_or_else(bad)?.as_bytes();
+        if hex.len() != 64 {
             return Err(bad());
         }
         let mut out = [0u8; 32];
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| bad())?;
+        // Any byte that is not a lower-case hex digit sets the high bits.
+        let mut seen = 0u8;
+        for (byte, [high, low]) in out.iter_mut().zip(hex.as_chunks::<2>().0) {
+            let (high, low) = (
+                HEX_VALUES[usize::from(*high)],
+                HEX_VALUES[usize::from(*low)],
+            );
+            seen |= high | low;
+            *byte = (high << 4) | (low & 0x0f);
+        }
+        if seen > 0x0f {
+            return Err(bad());
         }
         Ok(Self(out))
     }
@@ -279,6 +318,38 @@ mod tests {
         assert_eq!(d.to_string().parse::<Digest>(), Ok(d));
         assert!("sha256:BA7816".parse::<Digest>().is_err());
         assert!("md5:00".parse::<Digest>().is_err());
+    }
+
+    #[test]
+    fn digest_text_is_exactly_lower_case_hex() {
+        use std::fmt::Write as _;
+        for input in [&b""[..], b"abc", b"\xff\x00", &[0xab; 1000]] {
+            let d = Digest::of(input);
+            let text = d.to_string();
+            // The text as the earlier `Display` wrote it, a byte at a time.
+            let mut expected = "sha256:".to_owned();
+            for byte in d.0 {
+                write!(expected, "{byte:02x}").expect("write");
+            }
+            assert_eq!(text, expected);
+            assert!(d.is_written_as(&text));
+            assert_eq!(text.parse::<Digest>(), Ok(d));
+            for other in [
+                text.to_uppercase(),
+                text.replace("sha256:", "SHA256:"),
+                format!("{text}0"),
+                text[..text.len() - 1].to_owned(),
+                format!("{}g", &text[..text.len() - 1]),
+                Digest::of(b"other").to_string(),
+            ] {
+                assert!(!d.is_written_as(&other), "{other}");
+                assert_ne!(other.parse::<Digest>(), Ok(d), "{other}");
+            }
+        }
+        for bad in ["g", "G", "A", "/", ":", "`", " "] {
+            let text = format!("sha256:{bad}{}", "0".repeat(63));
+            assert!(text.parse::<Digest>().is_err(), "{text}");
+        }
     }
 }
 

@@ -79,15 +79,15 @@ pub struct LedgerDebit {
 #[serde(deny_unknown_fields)]
 pub(super) struct DebitLine {
     pub(super) seq: u64,
-    time: String,
-    event: String,
-    version: u32,
-    charges: Vec<DebitCharge>,
-    digest: String,
+    pub(super) time: String,
+    pub(super) event: String,
+    pub(super) version: u32,
+    pub(super) charges: Vec<DebitCharge>,
+    pub(super) digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<String>,
+    pub(super) note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    receipt: Option<DebitReceipt>,
+    pub(super) receipt: Option<DebitReceipt>,
     pub(super) prev: String,
 }
 
@@ -116,7 +116,25 @@ pub(super) fn valid_text(text: &str, max: usize) -> bool {
         && !text.chars().any(|c| c.is_control() || is_disguising(c))
 }
 
-fn valid_receipt(receipt: &DebitReceipt) -> bool {
+/// How many distinct valid recorded targets one ledger scan remembers.
+pub(super) const KNOWN_TARGETS: usize = 16;
+
+fn valid_target(entry: &RecordedTarget) -> bool {
+    entry
+        .target
+        .parse::<Target>()
+        .is_ok_and(|target| target.to_string() == entry.target)
+        && entry
+            .name
+            .as_deref()
+            .is_none_or(|name| HostName::canonical(name).is_ok())
+        && crate::pass::is_identifier(&entry.label)
+}
+
+/// Check a recorded receipt. A target's validity depends only on its text, so
+/// a target in `known` (found valid earlier in the same scan) is not parsed
+/// again: a caller that records its targets repeats the same few on every line.
+fn valid_receipt(receipt: &DebitReceipt, known: &mut Vec<RecordedTarget>) -> bool {
     (receipt.caller_ref.is_some() || !receipt.targets.is_empty())
         && receipt
             .caller_ref
@@ -124,15 +142,14 @@ fn valid_receipt(receipt: &DebitReceipt) -> bool {
             .is_none_or(|text| valid_text(text, MAX_CALLER_REF))
         && receipt.targets.len() <= MAX_TARGETS
         && receipt.targets.iter().all(|entry| {
-            entry
-                .target
-                .parse::<Target>()
-                .is_ok_and(|target| target.to_string() == entry.target)
-                && entry
-                    .name
-                    .as_deref()
-                    .is_none_or(|name| HostName::canonical(name).is_ok())
-                && crate::pass::is_identifier(&entry.label)
+            if known.contains(entry) {
+                return true;
+            }
+            let valid = valid_target(entry);
+            if valid && known.len() < KNOWN_TARGETS {
+                known.push(entry.clone());
+            }
+            valid
         })
 }
 
@@ -154,7 +171,10 @@ pub(super) fn parse_debit(
         return Err("the debit time or digest is invalid");
     };
     if line.note.as_deref().is_some_and(|n| check_note(n).is_err())
-        || line.receipt.as_ref().is_some_and(|r| !valid_receipt(r))
+        || line
+            .receipt
+            .as_ref()
+            .is_some_and(|r| !valid_receipt(r, &mut parsed.valid_targets))
     {
         return Err("the debit note or receipt is invalid");
     }
