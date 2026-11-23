@@ -255,11 +255,12 @@ Create a private archive directory, then retain the exact approved pass bytes:
 mkdir -m 700 approval-archive
 hallpass archive engagement.pass.toml approval-archive
 hallpass --format json ledger engagement.pass.toml
-hallpass --format text retrieve approval-archive "$reviewed_digest" > reviewed-pass.toml
+hallpass retrieve approval-archive "$reviewed_digest" --output reviewed-pass.toml
 hallpass --format json checkpoint engagement.pass.toml > checkpoint.json
 ```
 
 Use the full pass digest from the ledger entry as `reviewed_digest`.
+`--output FILE` creates the file with mode 0600 and refuses an existing file or a link; a `>` redirect would use your umask, and under `umask 002` the 0664 file is one `diff` and `archive` refuse.
 Retain the checkpoint separately with the report. `retrieve` in text mode writes
 exact original UTF-8 bytes, including comments and the original ending; JSON
 mode instead emits metadata and a JSON string. The archive is user-owned and

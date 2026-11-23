@@ -92,6 +92,10 @@ pub struct Destination {
     pub names: Vec<HostName>,
     /// The owner approved the whole network beyond the breadth cap.
     pub whole_network_approved: bool,
+    /// Labels of the nameless destinations whose overlap with this
+    /// destination's `names` list the owner accepted. Advice only: it never
+    /// changes a decision.
+    pub overlap_acknowledged: Vec<String>,
 }
 
 /// A validated pass.
@@ -234,6 +238,12 @@ fn check_text(text: &str, max: usize) -> Result<(), String> {
     if text.chars().any(char::is_control) {
         return Err(
             "contains a control character (such as a newline or tab); write one plain line"
+                .to_owned(),
+        );
+    }
+    if text.chars().any(crate::ledger::is_disguising) {
+        return Err(
+            "contains a line separator or a bidirectional text control (such as U+202E), which can make it display as something else; write one plain line"
                 .to_owned(),
         );
     }
@@ -564,6 +574,9 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
             None => complete = false,
         }
     }
+    if complete {
+        check_overlap_acknowledgements(w, &out);
+    }
     complete.then_some(out)
 }
 
@@ -579,6 +592,7 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
             "ports",
             "hostname",
             "names",
+            "overlap_acknowledged",
             "whole_network_approved",
         ],
     );
@@ -651,6 +665,7 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
         }
     });
     let names = parse_names(w, t, p);
+    let overlap_acknowledged = parse_overlap_acknowledged(w, t, p);
     Some(Destination {
         label: label?,
         network: network?,
@@ -659,7 +674,95 @@ fn parse_destination(w: &mut Walker, t: &Table, p: &str) -> Option<Destination> 
         hostname,
         names: names?,
         whole_network_approved: whole?,
+        overlap_acknowledged: overlap_acknowledged?,
     })
+}
+
+/// The optional `overlap_acknowledged` list: distinct destination labels.
+/// Whether each label names a real nameless destination is checked once all
+/// destinations are known ([`check_overlap_acknowledgements`]).
+fn parse_overlap_acknowledged(w: &mut Walker, t: &Table, p: &str) -> Option<Vec<String>> {
+    let field = join(p, "overlap_acknowledged");
+    let items = match t.get("overlap_acknowledged") {
+        None => return Some(Vec::new()),
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            w.problem(
+                field,
+                format!(
+                    "must be a list of destination labels (for example `overlap_acknowledged = [\"wide\"]`), not {}",
+                    kind(other)
+                ),
+            );
+            return None;
+        }
+    };
+    if items.is_empty() {
+        w.problem(
+            field,
+            "is an empty list; list the labels of the nameless destinations whose overlap the owner accepted, or remove the key",
+        );
+        return None;
+    }
+    if items.len() > MAX_DESTINATIONS {
+        w.problem(field, "lists more labels than a pass has destinations");
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut complete = true;
+    for (i, item) in items.iter().enumerate() {
+        let at = format!("{field}[{}]", i + 1);
+        match item.as_str() {
+            None => {
+                w.problem(
+                    at,
+                    format!("must be a quoted destination label, not {}", kind(item)),
+                );
+                complete = false;
+            }
+            Some(label) if out.iter().any(|l| l == label) => {
+                w.problem(at, format!("`{label}` is listed twice; remove one"));
+                complete = false;
+            }
+            Some(label) => out.push(label.to_owned()),
+        }
+    }
+    complete.then_some(out)
+}
+
+/// Each acknowledgement names one other destination that has no `names`, and
+/// sits on a destination that has them: the only pair an overlap can be
+/// between. Whether the two really overlap is advice, not a pass problem (see
+/// `review::name_overlap_warnings`).
+fn check_overlap_acknowledgements(w: &mut Walker, destinations: &[Destination]) {
+    for (i, d) in destinations.iter().enumerate() {
+        if d.overlap_acknowledged.is_empty() {
+            continue;
+        }
+        let field = format!("destination[{}].overlap_acknowledged", i + 1);
+        if d.names.is_empty() {
+            w.problem(
+                &field,
+                "is set on a destination without `names`; an overlap is a named destination whose names list another destination defeats. Put it on the destination that has `names`",
+            );
+            continue;
+        }
+        for (j, label) in d.overlap_acknowledged.iter().enumerate() {
+            let at = format!("{field}[{}]", j + 1);
+            match destinations.iter().find(|o| o.label == *label) {
+                None => w.problem(at, format!("`{label}` is not the label of any destination")),
+                Some(o) if o.label == d.label => w.problem(
+                    at,
+                    "names this destination itself; name the other, nameless destination",
+                ),
+                Some(o) if !o.names.is_empty() => w.problem(
+                    at,
+                    format!("destination `{label}` has `names`, so it cannot defeat another destination's names list; name a destination without `names`"),
+                ),
+                Some(_) => {}
+            }
+        }
+    }
 }
 
 /// The optional `names` list: canonical host names, no duplicates.

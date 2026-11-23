@@ -96,6 +96,9 @@ Validation rules, all reported together with field paths
 ([PASS-FORMAT.md](PASS-FORMAT.md) has the full list):
 
 - unknown keys are errors in every table;
+- text fields (`name`, `owner`, `reference`, `operator`, `revoked_reason`)
+  hold no control character, line or paragraph separator or bidirectional
+  control (the characters a note refuses); new after 0.2.0;
 - addresses in canonical spelling only; refused: host names, IPv4 leading
   zeros and shortened forms, zones, non-canonical IPv6, IPv6 forms carrying
   IPv4 (mapped, compatible, NAT64, and the transition forms 6to4, Teredo,
@@ -609,6 +612,22 @@ is `name-restriction-overlap`. `check` and `status` also warn about each
 such pair, in text and in `warnings` and `name_restriction_overlaps`. The
 pass stays valid and `check` exits 0.
 
+The owner may accept one overlap in the pass: the named destination lists the
+label of the nameless destination in `overlap_acknowledged`. That is advice
+only and never changes a decision. `status` then prints one `Note:` line
+instead of a warning on every call, and marks the pair `acknowledged` in
+`name_restriction_overlaps`; `check`, `lint` and `diff` still show the full
+overlap, marked as acknowledged, and `diff` lists a changed list as
+`destination[LABEL].overlap_acknowledged` with review required. A label that
+names no destination, the destination itself, a destination that has `names`,
+or an acknowledgement on a destination without `names` makes the pass
+invalid. A well-formed acknowledgement of a pair that does not overlap (the
+addresses, protocol or ports are apart) is not an error, because it can hide
+nothing; `check`, `status` and `lint` warn that it covers nothing
+(`overlap-acknowledgement-unmatched`). That warning is skipped when `lint`
+cut its list at 256 findings. A pass that uses the key is refused by a
+hallpass that predates it, as any unknown key is.
+
 `check` and `status` report exact declared address-space unions separately for
 IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`
 and one IPv6 `/64` are documented consumer comparison points; they are
@@ -676,6 +695,12 @@ read or create a witness. Retain checkpoints separately from the ledger.
 
 `archive PASS DIR` retains the exact validated pass bytes in a private
 directory, and `retrieve DIR DIGEST` prints them again by their full digest.
+`retrieve DIR DIGEST --output FILE` writes them to a new file instead, with
+mode 0600 whatever the umask; it refuses a path where anything exists (a file
+or a link, a dangling link included) and removes a file it could not finish
+writing. Redirecting the output with `>` gives the file the shell's umask
+mode, 0664 under the common `umask 002`, which `diff` and `archive` refuse
+because the group could change it.
 `receipt`, `audit-receipts`, `audit-charges`, `reconcile` and
 `compare-backups` read the ledger under shared locks and report historical
 evidence. None of these commands writes the ledger or the witness.
@@ -804,18 +829,22 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **check**: `digest`, `pass_id`, `require_target`, `problems` (empty),
   `breadth` `{ipv4, ipv6}` (declared address counts as decimal strings),
   `name_restriction_overlaps` (list of `{code, named_label, unnamed_label,
-  message}`, one per pair that `lint` reports; each message is also in
-  `warnings`).
+  acknowledged, message}`, one per pair that `lint` reports, and one with
+  code `overlap-acknowledgement-unmatched` for each acknowledgement that
+  names no overlap; each message is also in `warnings`, including those of
+  acknowledged pairs).
 - **status**: `digest`, `now`, `test_clock`, `pass` `{id, name, owner,
   reference, operator}`, `window`, `destinations` (list of `{label, kind`
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
-  end}`)`, ports_text, hostname, names, whole_network_approved}`), `breadth`
+  end}`)`, ports_text, hostname, names, whole_network_approved,
+  overlap_acknowledged}`), `breadth`
   (as in `check`), `counters` (list of `{name, total, spent, remaining, over_ceiling, over_by}`; when the owner lowers a ceiling below what is spent, `over_ceiling` is true, `over_by` is the excess, `remaining` is 0, and text shows `OVER by N`),
   `required_counters`, `require_target`, `unlisted_spends` (list of `{name,
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
   `not-checked`; `moved_from` the path the witness last saw, or null),
-  `name_restriction_overlaps` (as in `check`), `refusal`.
+  `name_restriction_overlaps` (as in `check`, but `warnings` leaves out the
+  messages of acknowledged pairs), `refusal`.
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
   (normalized, the first target), `name` (normalized, or null), `label` (or
   null), `targets` (list of `{target, name, label}` in request order),
@@ -875,7 +904,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
   `totals`, `previous` and `token`.
 - **archive**: `digest`. **retrieve**: `digest` and `bytes` (the exact
-  pass text).
+  pass text); with `--output FILE`, `digest`, `output` (the path), `mode`
+  (`0600`) and `length` (bytes written) instead of `bytes`.
 - **receipt**, **audit-receipts**, **audit-charges**, **reconcile**,
   **compare-backups**: see [EVIDENCE.md](EVIDENCE.md). **reconcile** has
   `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
@@ -899,10 +929,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   after, review_required}`; `before` and `after` are a JSON string, number
   or null), `introduced` and `removed` (labels), `introduced_grants` and
   `removed_grants` (one `{label, scope, network, protocol, ports, names,
-  hostname, whole_network_approved}` per introduced or removed destination;
+  hostname, whole_network_approved, overlap_acknowledged}` per introduced or removed destination;
   `scope` is `address` or `network`; empty `names` means any name),
   `name_restriction_overlaps` (as in `check`, limited to overlaps that
-  NEW introduces; their messages are also in `warnings`),
+  NEW introduces; their messages are also in `warnings`, acknowledged or
+  not, so the reviewer sees what the owner accepted),
   `order_changed`, `review_required`; `examples`, `budget_impact` or `containment` when
   requested.
 - **consumer-coverage**: `pass_id`, `digest`, `declared`,

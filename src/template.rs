@@ -90,6 +90,19 @@ revoked = false
 /// [`Error::Exists`] when anything (a file or a link) is already at `path`,
 /// or [`Error::Io`].
 pub fn write_template(path: &Path) -> Result<(), Error> {
+    write_new_private(path, TEMPLATE.as_bytes())
+}
+
+/// Create the file `path` with `bytes`, mode 0600 whatever the umask.
+///
+/// Never overwrites and never follows a link: anything already at `path`, a
+/// dangling link included, is refused. A partly written file is removed.
+///
+/// # Errors
+///
+/// [`Error::Exists`] when anything (a file or a link) is already at `path`,
+/// or [`Error::Io`].
+pub fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if path.symlink_metadata().is_ok() {
         return Err(Error::Exists {
             path: path.to_path_buf(),
@@ -109,9 +122,13 @@ pub fn write_template(path: &Path) -> Result<(), Error> {
                 Error::io(path, &e)
             }
         })?;
-    file.write_all(TEMPLATE.as_bytes())
+    // The mode given to open is cut by the umask, which can only clear bits.
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|e| Error::io(path, &e))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            Error::io(path, &e)
+        })
 }
 
 #[cfg(test)]

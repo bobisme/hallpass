@@ -124,6 +124,8 @@ pub struct DestinationGrant {
     pub names: Vec<String>,
     pub hostname: Option<String>,
     pub whole_network_approved: bool,
+    /// Labels whose overlap with this destination's names the owner accepted.
+    pub overlap_acknowledged: Vec<String>,
 }
 
 fn grant(d: &crate::Destination) -> DestinationGrant {
@@ -146,6 +148,11 @@ fn grant(d: &crate::Destination) -> DestinationGrant {
         names,
         hostname: d.hostname.clone(),
         whole_network_approved: d.whole_network_approved,
+        overlap_acknowledged: {
+            let mut labels = d.overlap_acknowledged.clone();
+            labels.sort_unstable();
+            labels
+        },
     }
 }
 
@@ -318,6 +325,18 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
             new_names.join(","),
             true,
         );
+        let sorted = |d: &crate::Destination| {
+            let mut labels = d.overlap_acknowledged.clone();
+            labels.sort_unstable();
+            labels.join(",")
+        };
+        change(
+            &mut changes,
+            format!("destination[{label}].overlap_acknowledged"),
+            sorted(x),
+            sorted(y),
+            true,
+        );
         change(
             &mut changes,
             format!("destination[{label}].whole_network_approved"),
@@ -415,6 +434,8 @@ pub struct OverlapFinding {
     pub port_end: u16,
     pub effective: bool,
     pub inactive_reason: Option<String>,
+    /// The owner acknowledged this pair in `overlap_acknowledged`.
+    pub acknowledged: bool,
 }
 
 /// One row per contiguous interval of common ports. Both lists are bounded.
@@ -520,6 +541,7 @@ pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
                         port_end: end,
                         effective,
                         inactive_reason,
+                        acknowledged: named.overlap_acknowledged.contains(&unnamed.label),
                     });
                 }
                 if b <= d {
@@ -537,33 +559,70 @@ pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
 /// One pair of destinations where a nameless rule defeats a `names` list.
 #[derive(Clone, Debug, Serialize)]
 pub struct NameOverlapWarning {
+    /// `name-restriction-overlap`, or `overlap-acknowledgement-unmatched`
+    /// for an acknowledgement in the pass that names no overlap.
     pub code: &'static str,
     pub named_label: String,
     pub unnamed_label: String,
+    /// The owner wrote this pair in `overlap_acknowledged`. Advice only: the
+    /// overlap still exists and decisions are unchanged.
+    pub acknowledged: bool,
     pub message: String,
 }
 
-/// Advice for `check` and `status`: one entry per pair that `lint` reports as
-/// `name-restriction-overlap`. The pass stays valid; the names list may have
-/// no effect for the shared addresses.
+/// Advice for `check`, `status` and `diff` about name-restriction overlaps.
+///
+/// One entry per pair that `lint` reports as `name-restriction-overlap`, and
+/// one for each acknowledgement (`overlap_acknowledged`) whose pair does not
+/// overlap. The pass stays valid; the names list may have no effect for the shared addresses. An
+/// acknowledged pair is still listed, marked `acknowledged`, so a command can
+/// show it as a note and `check` and `lint` can keep showing it in full.
 #[must_use]
 pub fn name_overlap_warnings(pass: &Pass) -> Vec<NameOverlapWarning> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
-    for f in lint(pass, pass.approval.valid_from).findings {
+    let report = lint(pass, pass.approval.valid_from);
+    for f in report.findings {
         if !seen.insert((f.named_label.clone(), f.unnamed_label.clone())) {
             continue;
         }
-        let message = format!(
+        let acknowledged = f.acknowledged;
+        let mut message = format!(
             "destination `{}` restricts names, but destination `{}` allows the same addresses and ports without names, so the names list may have no effect there; run `hallpass lint` for details",
             f.named_label, f.unnamed_label
         );
+        if acknowledged {
+            message.push_str(
+                "; the owner acknowledged this overlap in the pass (`overlap_acknowledged`), and it still applies",
+            );
+        }
         out.push(NameOverlapWarning {
             code: f.code,
             named_label: f.named_label,
             unnamed_label: f.unnamed_label,
+            acknowledged,
             message,
         });
+    }
+    // With the list cut short, a missing pair proves nothing.
+    if !report.truncated {
+        for d in &pass.destinations {
+            for label in &d.overlap_acknowledged {
+                if seen.contains(&(d.label.clone(), label.clone())) {
+                    continue;
+                }
+                out.push(NameOverlapWarning {
+                    code: "overlap-acknowledgement-unmatched",
+                    named_label: d.label.clone(),
+                    unnamed_label: label.clone(),
+                    acknowledged: false,
+                    message: format!(
+                        "destination `{}` acknowledges an overlap with `{label}`, but the two share no address, protocol and port, so the acknowledgement covers nothing; remove it from `overlap_acknowledged`",
+                        d.label
+                    ),
+                });
+            }
+        }
     }
     out
 }

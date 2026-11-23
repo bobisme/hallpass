@@ -174,8 +174,8 @@ pub enum Error {
     /// The lock-wait budget expired before any debit was appended.
     #[error("timed out acquiring the writer lock on {}; this spend recorded no debit. Retry, or find and stop the process holding it (`fuser {}`). The lock is released automatically when its holder exits or crashes, so a stale lock does not need removing.", path.display(), path.display())]
     LockTimeout { path: PathBuf },
-    /// The file already exists (`init` never overwrites).
-    #[error("{} already exists; hallpass init never overwrites. Choose another path.", path.display())]
+    /// The file already exists (`init` and `retrieve --output` never overwrite).
+    #[error("{} already exists; hallpass never overwrites a file or follows a link (`init`, `retrieve --output`). Choose another path.", path.display())]
     Exists {
         /// The file.
         path: PathBuf,

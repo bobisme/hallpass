@@ -167,6 +167,10 @@ enum Command {
         directory: PathBuf,
         /// Full sha256 digest from archive or a ledger entry.
         digest: String,
+        /// Write the bytes to this new file (mode 0600) instead of printing
+        /// them. Refuses an existing file or a link.
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
     /// Find retained debit receipts for one exact caller reference across revisions.
     Receipt {
@@ -687,7 +691,7 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
     for f in &findings {
         let _ = writeln!(
             text,
-            "{}: {} overlaps {} in {} on {}-{} / {} (example {}, effective unnamed permission: {}){}",
+            "{}: {} overlaps {} in {} on {}-{} / {} (example {}, effective unnamed permission: {}){}{}",
             f.code,
             f.named_label,
             f.unnamed_label,
@@ -699,12 +703,22 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
             f.effective,
             f.inactive_reason
                 .as_ref()
-                .map_or(String::new(), |r| format!(" ({r})"))
+                .map_or(String::new(), |r| format!(" ({r})")),
+            if f.acknowledged {
+                " [acknowledged by the owner in the pass; still applies]"
+            } else {
+                ""
+            }
         );
     }
+    let stale: Vec<String> = hallpass::review::name_overlap_warnings(&loaded.pass)
+        .into_iter()
+        .filter(|w| w.code == "overlap-acknowledgement-unmatched")
+        .map(|w| w.message)
+        .collect();
     Output {
         code: OK,
-        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":[]}),
+        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":stale}),
         text,
     }
 }
@@ -969,6 +983,28 @@ fn status(file: &Path, clock: &Clock) -> Output {
     status_with_clock(file, clock, &StateDir::from_env(), || clock.sample())
 }
 
+/// An overlap the owner acknowledged is one line of text, not a warning on
+/// every call; `check` and `lint` still show it in full.
+fn status_overlaps(
+    overlaps: &[hallpass::review::NameOverlapWarning],
+    warnings: &mut Vec<String>,
+    text: &mut String,
+) {
+    warnings.extend(
+        overlaps
+            .iter()
+            .filter(|w| !w.acknowledged)
+            .map(|w| w.message.clone()),
+    );
+    let acknowledged = overlaps.iter().filter(|w| w.acknowledged).count();
+    if acknowledged > 0 {
+        let _ = writeln!(
+            text,
+            "Note: {acknowledged} name-restriction overlap(s) acknowledged by the owner in the pass; they still apply. `hallpass check` and `hallpass lint` list them."
+        );
+    }
+}
+
 fn status_with_clock(
     file: &Path,
     clock: &Clock,
@@ -1005,6 +1041,7 @@ fn status_with_clock(
                 "hostname": d.hostname,
                 "names": d.names.iter().map(hallpass::HostName::as_str).collect::<Vec<_>>(),
                 "whole_network_approved": d.whole_network_approved,
+                "overlap_acknowledged": d.overlap_acknowledged,
             })
         })
         .collect();
@@ -1034,8 +1071,8 @@ fn status_with_clock(
     let mut warnings = view.warnings.clone();
     warnings.extend(hallpass::review::breadth_warnings(&breadth));
     let overlaps = hallpass::review::name_overlap_warnings(pass);
-    warnings.extend(overlaps.iter().map(|w| w.message.clone()));
     let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
+    status_overlaps(&overlaps, &mut warnings, &mut text);
     let _ = writeln!(
         text,
         "Declared breadth: IPv4 {}, IPv6 {}.",
@@ -1903,13 +1940,27 @@ fn archive(file: &Path, directory: &Path) -> Output {
     }
 }
 
-fn retrieve(directory: &Path, digest: &str) -> Output {
+fn retrieve(directory: &Path, digest: &str, output: Option<&Path>) -> Output {
     let result = digest
         .parse::<hallpass::Digest>()
         .map_err(Error::Usage)
         .and_then(|digest| hallpass::retrieve_pass(directory, digest));
     match result {
         Ok(bytes) => {
+            if let Some(path) = output {
+                if let Err(e) = hallpass::write_new_private(path, &bytes) {
+                    return error_output("retrieve", Some(path), &e);
+                }
+                return Output {
+                    code: 0,
+                    json: json!({"command": "retrieve", "result": "ok", "digest": digest, "output": path.display().to_string(), "mode": "0600", "length": bytes.len()}),
+                    text: format!(
+                        "Retrieved {digest} to {} (mode 0600, {} bytes)\n",
+                        safe(&path.display().to_string()),
+                        bytes.len()
+                    ),
+                };
+            }
             let Ok(text) = String::from_utf8(bytes) else {
                 return error_output(
                     "retrieve",
@@ -2089,7 +2140,11 @@ fn run(cli: &Cli, format: Format) -> Output {
             since,
         } => ledger(file, counter.as_deref(), *tail, *since),
         Command::Archive { file, directory } => archive(file, directory),
-        Command::Retrieve { directory, digest } => retrieve(directory, digest),
+        Command::Retrieve {
+            directory,
+            digest,
+            output,
+        } => retrieve(directory, digest, output.as_deref()),
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
         Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
         Command::AuditCharges { file, directory } => cli_evidence::audit_charges(file, directory),

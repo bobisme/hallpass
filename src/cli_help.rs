@@ -91,7 +91,7 @@ fn guide(name: &str) -> Guide {
         ),
         "retrieve" => (
             &["hallpass --format json retrieve approval-archive \"$digest\""],
-            "Supply the full digest from archive or ledger. Read bytes for the exact pass text. Select --format text when redirecting the original bytes to a file.",
+            "Supply the full digest from archive or ledger. Read bytes for the exact pass text. To keep the bytes as a file, use --output FILE: it creates a new file with mode 0600 and refuses an existing file or a link. Redirecting --format text output makes a file with your umask's mode, which diff and archive refuse when group or others can write it.",
         ),
         "verify-approval" => (
             &[

@@ -224,7 +224,7 @@ pub fn ledger_path(pass_path: &Path) -> PathBuf {
 /// characters: the Unicode line and paragraph separators (some viewers break
 /// lines at them) and the bidirectional formatting controls (they reorder how
 /// the text around them is displayed, so a note could disguise itself).
-const fn is_disguising(c: char) -> bool {
+pub const fn is_disguising(c: char) -> bool {
     matches!(
         c,
         '\u{2028}'

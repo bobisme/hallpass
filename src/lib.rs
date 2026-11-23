@@ -91,7 +91,7 @@ pub use pass::{
     MAX_COUNTERS, MAX_DESTINATIONS, Pass, Problem, is_counter_name,
 };
 pub use ports::PortSet;
-pub use template::{TEMPLATE, write_template};
+pub use template::{TEMPLATE, write_new_private, write_template};
 pub use time;
 pub use witness::{StateDir, Witnessed, totals_text};
 

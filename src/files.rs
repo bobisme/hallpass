@@ -304,7 +304,7 @@ fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> 
             mode: mode & 0o7777,
             who: "other users can change the approval",
             fix: "600",
-            advice: "check that its content is what the owner approved",
+            advice: "check that its content is what the owner approved. If you saved it with `hallpass retrieve DIR DIGEST > FILE` under a umask that leaves group write, write it with `hallpass retrieve DIR DIGEST --output FILE` instead, which creates the file with mode 0600",
         });
     }
     Ok(())

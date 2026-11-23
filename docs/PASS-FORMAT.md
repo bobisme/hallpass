@@ -44,8 +44,17 @@ requests = 500
   `revokd`) would otherwise drop a restriction without anyone noticing.
 - **Text fields** (`name`, `owner`, `reference`, `operator`, `label`,
   `revoked_reason`, `hostname`) must be quoted strings on one line: no
-  control characters (newline, tab), no leading or trailing spaces, not
-  empty.
+  control characters (newline, tab), no Unicode line or paragraph
+  separator (U+2028, U+2029) and no bidirectional control (U+061C, U+200E,
+  U+200F, U+202A to U+202E, U+2066 to U+2069), no leading or trailing
+  spaces, not empty. The bidirectional controls reorder the text around them,
+  so an owner or reference could read as something other than the bytes the
+  owner approved, as in `--note`, which refuses them too. A pass that holds
+  one fails to load, with the field named. Right-to-left text itself
+  (Arabic, Hebrew) is accepted: only the invisible controls are refused.
+  This refusal is new after 0.2.0; a pass written earlier that holds such a
+  character must be re-approved without it. Everything hallpass prints
+  still escapes these characters.
 - **Numbers** (`format`, ports, ceilings) are plain decimal digits. TOML's
   other spellings are refused: `0x10`, `0o17`, `0b110`, `1_000`, `+6`. A
   reviewer who reads `0x10` as 10 would approve less than the 16 a tool
@@ -149,6 +158,7 @@ spend of every running tool that asks.
 | `ports` | yes | `443`, `[80, 443]`, `"8000-8100"`, or a list mixing ports and range strings: `[5060, "10000-10100"]` |
 | `hostname` | no | what the owner calls this destination. It must be a DNS host name: at most 253 characters of ASCII letters, digits, `.`, `-` and `_`, whose last dot-separated part is not a number (`10`, `0x7f`). It is not an IP address (put that in `address`). Free text such as `"ExampleCo CDN edge"` is refused. **Informational only: it grants nothing**, and hallpass never resolves it |
 | `names` | no | the only host names this destination is approved for, as a list: `names = ["app.example.com", "admin.example.com"]`. **It narrows and never grants**: see below |
+| `overlap_acknowledged` | no | on a destination with `names`: the labels of the nameless destinations whose overlap with this `names` list the owner accepts, as a list: `overlap_acknowledged = ["wide"]`. Each label must name another destination that has no `names`; an empty list, a repeated label, the destination itself or an unknown label is refused. It changes no decision: see "Reviewing an overlap". **A hallpass older than this key refuses the pass as having an unknown key** |
 | `whole_network_approved` | no | `true` only when the written approval names this whole network; needed for a network broader than the cap. Not allowed with `address` |
 
 ### Names
@@ -189,6 +199,30 @@ also qualifies through `subnet` during the approval window. Run
 `hallpass lint PASS` to see both labels, the shared service and the example
 decision. The stable finding code is `name-restriction-overlap`. `check` and
 `status` print the same overlap as a warning, and `check` still exits 0.
+
+To accept an overlap, add the other destination's label to
+`overlap_acknowledged` on the named destination:
+
+```toml
+[[destination]]
+label = "app"
+address = "192.0.2.10"
+protocol = "tcp"
+ports = 443
+names = ["app.example.com"]
+overlap_acknowledged = ["subnet"]
+```
+
+One entry names exactly one overlap (`app` with `subnet`); an acknowledgement
+does not cover another pair. It never changes a decision: `subnet` still
+allows the unnamed request. `status` then prints one `Note:` line instead of
+a warning on every call. `check`, `lint` and `diff` still list the overlap in
+full and mark it acknowledged, so a reviewer sees it. If the two destinations
+do not overlap (a port or address was edited), `check`, `status` and `lint`
+warn that the acknowledgement covers nothing, so it can be removed. Because
+the key is part of the approved bytes, adding it is a pass change that
+`diff` shows as `destination[app].overlap_acknowledged` with review
+required.
 
 ### Address spelling
 
