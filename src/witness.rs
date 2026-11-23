@@ -66,6 +66,30 @@ impl StateDir {
         }
     }
 
+    /// A warning when `XDG_STATE_HOME` is set but not absolute, so the XDG
+    /// rules make hallpass ignore it. It names the value and the directory
+    /// used instead; a witness kept there is a different one from any kept
+    /// under the ignored value.
+    #[must_use]
+    pub fn ignored_env_warning() -> Option<String> {
+        let xdg = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty())?;
+        if Path::new(&xdg).is_absolute() {
+            return None;
+        }
+        let shown: String = xdg
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+        let instead = resolve(None, std::env::var_os("HOME")).map_or_else(
+            |_| "and HOME is not absolute either, so there is no state directory".to_owned(),
+            |dir| format!("using {} instead", dir.display()),
+        );
+        Some(format!(
+            "XDG_STATE_HOME is set to the relative path `{shown}`, which is ignored (the XDG rules need an absolute path); {instead}. Witnesses kept under another directory are not seen there, so a lost or rewound ledger is not noticed until one is recorded; set XDG_STATE_HOME to an absolute path or unset it"
+        ))
+    }
+
     /// The directory, or why there is none.
     ///
     /// # Errors

@@ -213,6 +213,38 @@ pub fn span(duration: Duration) -> String {
     }
 }
 
+/// Time still left in an open window, for text.
+///
+/// Like [`span`] it rounds down, so the number never promises more time than
+/// the decision allows; a part second reads `less than 1 s`, so an open
+/// window never reads `0 s`.
+#[must_use]
+pub fn span_left(duration: Duration) -> String {
+    if duration > Duration::ZERO && duration < Duration::SECOND {
+        "less than 1 s".to_owned()
+    } else {
+        span(duration)
+    }
+}
+
+/// Time until a window opens, for text. It rounds a part second up, so the
+/// window is never said to open sooner than it does.
+#[must_use]
+pub fn span_until(duration: Duration) -> String {
+    span(Duration::seconds(whole_seconds_up(duration)))
+}
+
+/// Whole seconds in `duration`, rounded up, never negative.
+#[must_use]
+pub fn whole_seconds_up(duration: Duration) -> i64 {
+    let s = duration.whole_seconds();
+    if duration.subsec_nanoseconds() > 0 {
+        s.saturating_add(1).max(0)
+    } else {
+        s.max(0)
+    }
+}
+
 impl Pass {
     /// The window state at `now`.
     #[must_use]
@@ -262,7 +294,7 @@ impl Pass {
                 message: format!(
                     "the approval window has not opened (valid from {}, in {}); wait for it to open",
                     stamp(a.valid_from),
-                    span(opens_in)
+                    span_until(opens_in)
                 ),
             }),
             WindowState::Expired { .. } => Err(Refusal {
@@ -279,7 +311,7 @@ impl Pass {
                         "the work may take up to {} and would end at or after the window closes (valid until {}; {} remain); do less, or {new_window}",
                         span(needed),
                         stamp(a.valid_until),
-                        span(remaining)
+                        span_left(remaining)
                     ),
                 })
             }

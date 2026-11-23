@@ -59,7 +59,7 @@ the same questions.
   notice a lost, replaced or rewound ledger.
 - **State directory**: `$XDG_STATE_HOME/hallpass/`, or
   `$HOME/.local/state/hallpass/` when `XDG_STATE_HOME` is unset, empty or
-  not an absolute path. Created mode 0700; witness and lock files 0600.
+  not an absolute path. A relative `XDG_STATE_HOME` is ignored with a warning that names it and the directory used instead. Created mode 0700; witness and lock files 0600.
 - **Adoption**: an operator's recorded acknowledgment, with a reason, of a
   ledger that was lost, changed outside hallpass, or had no witness.
 - **Digest**: `sha256:` plus the SHA-256 of the pass file's exact bytes.
@@ -764,7 +764,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   reference, operator}`, `window`, `destinations` (list of `{label, kind`
   (`address` or `network`)`, destination, protocol, ports` (list of `{start,
   end}`)`, ports_text, hostname, names, whole_network_approved}`), `breadth`
-  (as in `check`), `counters` (list of `{name, total, spent, remaining}`),
+  (as in `check`), `counters` (list of `{name, total, spent, remaining, over_ceiling, over_by}`; when the owner lowers a ceiling below what is spent, `over_ceiling` is true, `over_by` is the excess, `remaining` is 0, and text shows `OVER by N`),
   `required_counters`, `require_target`, `unlisted_spends` (list of `{name,
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
@@ -818,9 +818,9 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `carried` is an object of counter name to amount, `previous` is `{ledger,
   seq, totals, updated}` or null), `witness`, `moved_from` (as in
   `status`), `totals`
-  (list of `{name, spent, total, remaining}` for every counter of the pass
+  (list of `{name, spent, total, remaining, over_ceiling, over_by}` for every counter of the pass
   and every counter in the ledger, sorted by name; `total` and `remaining`
-  null for a counter the pass no longer has). `spent` includes carried
+  null for a counter the pass no longer has; `over_ceiling` is false and `over_by` null there). `spent` includes carried
   amounts.
 - **adopt**: `ledger`, `pass_id`, `digest`, `now`, `test_clock`, `case`
   (`ledger-missing`, `ledger-changed` or `no-witness`), `created` (a new
@@ -845,7 +845,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `foreign` or `mismatch`), `added` (lines after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
-  unverified), `pass_id` and `digest` when verified, `namespace`, `archive`.
+  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `archive`.
 - **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,
   `new_digest`, `approval_id_changed`, `changes` (list of `{field, before,
   after, review_required}`; `before` and `after` are a JSON string, number
@@ -867,7 +867,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is
 `not-yet-valid`, `valid`, `expired` or `revoked`; the three `seconds_*`
-fields are null except the one that applies. Window times (`valid_from`,
+fields are null except the one that applies. `seconds_remaining` and
+`seconds_since_end` round down and `seconds_until_open` rounds up, so none
+promises more time than the decision allows; text says "less than 1 s left"
+for a part second in an open window. Window times (`valid_from`,
 `valid_until`) are UTC, whole seconds, `YYYY-MM-DDTHH:MM:SSZ`.
 
 Recorded ledger times follow one rule in every command that reports them

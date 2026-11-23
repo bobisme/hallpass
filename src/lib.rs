@@ -68,7 +68,10 @@ pub use address::{
     parse_address, parse_network,
 };
 pub use archive::{archive_pass, archive_pass_bytes, retrieve_pass};
-pub use decision::{Decision, Refusal, RefusalCode, WindowState, span, stamp};
+pub use decision::{
+    Decision, Refusal, RefusalCode, WindowState, span, span_left, span_until, stamp,
+    whole_seconds_up,
+};
 pub use error::{Error, MissingLedger};
 pub use files::{Digest, LoadedPass, LockWait, MAX_PASS_BYTES, load, load_with_bytes};
 pub use ledger::{

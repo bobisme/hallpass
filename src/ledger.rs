@@ -992,7 +992,7 @@ fn warnings(
             "there was no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); one is recorded now, so from here on a lost or rewound ledger is noticed"
         )),
         WitnessStatus::Missing => out.push(format!(
-            "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); the next spend records one, and until then a lost or rewound ledger would not be noticed"
+            "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); a spend that is allowed records one (a refused or previewed spend does not), and until then a lost or rewound ledger would not be noticed"
         )),
         WitnessStatus::Extended { added } => out.push(format!(
             "the ledger has {added} line(s) after the last one the witness recorded (a spend that stopped before updating the witness, or a hallpass that keeps none); they are counted"
@@ -3615,7 +3615,7 @@ mod tests {
         let elsewhere = StateDir::new(dir.path().join("other-machine"));
         let v = view(&path, &elsewhere).expect("read");
         assert_eq!(v.witness, WitnessStatus::Missing);
-        assert!(v.warnings[0].contains("next spend records one"));
+        assert!(v.warnings[0].contains("a spend that is allowed records one"));
         assert!(
             !dir.path().join("other-machine").exists(),
             "reading wrote nothing"

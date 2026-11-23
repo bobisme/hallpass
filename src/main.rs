@@ -18,7 +18,7 @@ use clap::{FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
     Digest, Error, LoadedPass, NamedTarget, Pass, Problem, Refusal, SpendRequest, StateDir,
-    WindowState, span, stamp,
+    WindowState, span, span_left, span_until, stamp,
 };
 use serde_json::{Value, json};
 
@@ -473,9 +473,12 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
 
 fn window_json(pass: &Pass, state: &WindowState) -> Value {
     let seconds = |d: &Duration| d.whole_seconds().max(0);
+    // Time left rounds down, so it never promises more than the decision
+    // allows; time until opening rounds up, so nobody starts early.
+    let up = |d: &Duration| hallpass::whole_seconds_up(*d);
     let (remaining, opens, ended, reason) = match state {
         WindowState::Valid { remaining } => (Some(seconds(remaining)), None, None, None),
-        WindowState::NotYetValid { opens_in } => (None, Some(seconds(opens_in)), None, None),
+        WindowState::NotYetValid { opens_in } => (None, Some(up(opens_in)), None, None),
         WindowState::Expired { ended_ago } => (None, None, Some(seconds(ended_ago)), None),
         WindowState::Revoked { reason } => (None, None, None, reason.clone()),
     };
@@ -497,9 +500,14 @@ fn window_text(pass: &Pass, state: &WindowState) -> String {
         stamp(pass.approval.valid_until)
     );
     match state {
-        WindowState::Valid { remaining } => format!("VALID, {} left ({range})", span(*remaining)),
+        WindowState::Valid { remaining } => {
+            format!("VALID, {} left ({range})", span_left(*remaining))
+        }
         WindowState::NotYetValid { opens_in } => {
-            format!("NOT YET VALID, opens in {} ({range})", span(*opens_in))
+            format!(
+                "NOT YET VALID, opens in {} ({range})",
+                span_until(*opens_in)
+            )
         }
         WindowState::Expired { ended_ago } => {
             format!("EXPIRED {} ago ({range})", span(*ended_ago))
@@ -837,11 +845,19 @@ fn status_text(
     }
     for (name, total) in &pass.ceilings {
         let spent = tally.spent(name);
-        let _ = writeln!(
-            text,
-            "  {name:<16} {total} total, {spent} spent, {} left",
-            total.saturating_sub(spent)
-        );
+        let _ = if spent > *total {
+            writeln!(
+                text,
+                "  {name:<16} {total} total, {spent} spent, 0 left: OVER by {} (the ceiling was lowered below what is spent; nothing more can be spent)",
+                spent - total
+            )
+        } else {
+            writeln!(
+                text,
+                "  {name:<16} {total} total, {spent} spent, {} left",
+                total - spent
+            )
+        };
     }
     for (name, spent) in tally
         .spent
@@ -946,6 +962,8 @@ fn status_with_clock(
                 "total": total,
                 "spent": spent,
                 "remaining": total.saturating_sub(spent),
+                "over_ceiling": spent > *total,
+                "over_by": spent.saturating_sub(*total),
             })
         })
         .collect();
@@ -1414,6 +1432,42 @@ fn select_rows<'a>(
     }
 }
 
+/// One line per charge of a debit unit, in the columns of a plain spend; the
+/// first line carries the sequence, time, digest and note.
+fn debit_rows_text(e: &hallpass::LedgerDebit) -> String {
+    let note = e
+        .note
+        .as_deref()
+        .map_or_else(String::new, |n| safe(n).into_owned());
+    let receipt = e.receipt.as_ref().map_or_else(String::new, |r| {
+        format!(" receipt {}", debit_receipt_text(r))
+    });
+    // One line per charge, in the same columns as a plain spend; the
+    // first line carries the sequence, time, digest and note.
+    let mut lines = Vec::new();
+    for (i, charge) in e.charges.iter().enumerate() {
+        let (seq, time, digest, tail) = if i == 0 {
+            (
+                e.seq.to_string(),
+                stamp(e.time),
+                short_digest(&e.digest),
+                format!("DEBIT of {} counter(s) {note}{receipt}", e.charges.len()),
+            )
+        } else {
+            (String::new(), String::new(), String::new(), String::new())
+        };
+        lines.push(
+            format!(
+                "  {seq:>5}  {time:<20}  {:<16} {:>8}  {digest:<19}  {tail}",
+                charge.counter, charge.amount
+            )
+            .trim_end()
+            .to_owned(),
+        );
+    }
+    lines.join("\n")
+}
+
 fn ledger_text(
     loaded: &LoadedPass,
     view: &hallpass::LedgerView,
@@ -1452,30 +1506,7 @@ fn ledger_text(
                 )
             })
             .collect();
-        rows.extend(debits.iter().map(|e| {
-            let charges = e
-                .charges
-                .iter()
-                .map(|charge| format!("{}={}", charge.counter, charge.amount))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let note = e
-                .note
-                .as_deref()
-                .map_or_else(String::new, |n| safe(n).into_owned());
-            let receipt = e.receipt.as_ref().map_or_else(String::new, |r| {
-                format!(" receipt {}", debit_receipt_text(r))
-            });
-            (
-                e.seq,
-                format!(
-                    "  {:>5}  {:<20}  DEBIT {charges}  {}  {note}{receipt}",
-                    e.seq,
-                    stamp(e.time),
-                    short_digest(&e.digest)
-                ),
-            )
-        }));
+        rows.extend(debits.iter().map(|e| (e.seq, debit_rows_text(e))));
         rows.extend(adoptions.iter().map(|a| {
             (
                 a.seq,
@@ -1514,6 +1545,11 @@ fn ledger_text(
     }
     for (name, spent, total) in totals {
         let _ = match total {
+            Some(t) if spent > t => writeln!(
+                text,
+                "  {name:<16} {spent} spent of {t}: OVER by {}",
+                spent - t
+            ),
             Some(t) => writeln!(text, "  {name:<16} {spent} spent of {t}"),
             None => writeln!(text, "  {name:<16} {spent} spent (no ceiling in this pass)"),
         };
@@ -1680,6 +1716,8 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
                 "spent": spent,
                 "total": total,
                 "remaining": total.map(|t| t.saturating_sub(*spent)),
+                "over_ceiling": total.is_some_and(|t| *spent > t),
+                "over_by": total.map(|t| spent.saturating_sub(t)),
             })).collect::<Vec<_>>(),
             "warnings": view.warnings,
         }),
@@ -2205,6 +2243,9 @@ fn main() -> ExitCode {
             let mut output = run(&cli, format);
             if let Some(warning) = &input.env_warning {
                 add_warning(&mut output, warning);
+            }
+            if let Some(warning) = StateDir::ignored_env_warning() {
+                add_warning(&mut output, &warning);
             }
             emit(output, format)
         }
