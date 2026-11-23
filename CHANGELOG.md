@@ -38,6 +38,35 @@ Changes since commit d70c09f.
   window by one second. A suite with no survivors before can now report
   survivors and exit 2.
 
+- **The default output format comes from `HALLPASS_FORMAT`.** The
+  unprefixed `FORMAT` variable is ignored, with a warning when
+  `HALLPASS_FORMAT` is unset. An invalid `HALLPASS_FORMAT` is a usage error
+  that names the variable. A caller that set `FORMAT=json` must set
+  `HALLPASS_FORMAT=json`.
+- **Argument parse errors have the full error shape.** In JSON mode they
+  now carry `command` (when the subcommand was recognized), `file`,
+  `problems`, and `error.ledger`, `error.recording` (`"not-recorded"`) and
+  `error.seq`, and nothing is printed to standard error.
+- **Read-only commands no longer advise `hallpass adopt`.** A missing or
+  changed ledger, or a damaged witness, reported by `diff`, `ledger`,
+  `receipt`, `reconcile`, `checkpoint`, the audits and the other read-only
+  commands now says the command changed nothing and points to `hallpass
+  status`. `spend`, `adopt` and `status` keep the advice.
+- **`diff --budget-impact` reads the live ledger.** It uses the ledger
+  beside NEW, or beside OLD only when NEW has none, and reports
+  `budget_impact.ledger` and `budget_impact.ledger_source`.
+- **Guarded spends after an adoption.** `--require-new-ref` checks new
+  references again after an adoption that kept every line (for example a
+  ledger moved to a new machine and adopted there). An adoption that lost
+  witnessed lines or carried totals still makes new references
+  `reference-inconclusive`. Both inconclusive refusals now name the next
+  step.
+- **Audit archives.** `audit-charges` and `audit-receipts` report a
+  missing, non-directory or world-readable archive directory as an error
+  (exit 1) instead of an `archive-missing` gap (exit 2).
+- **Library:** `Error::Insecure` has a new `advice` field, and
+  `AddressError` has a new `NonStandardIpv4` variant.
+
 ### Added
 
 - A warning when a debit checks no destination: an allowed or previewed
@@ -65,6 +94,23 @@ Changes since commit d70c09f.
 
 ### Changed
 
+- `ledger` takes `--tail N` and `--since SEQ` to show only recent
+  entries, with a `shown` marker in text and JSON. The whole chain is still
+  verified, and totals cover the whole ledger.
+- `diff --containment` reports up to 8 counterexamples
+  (`containment.counterexamples`, `more_counterexamples`);
+  `containment.example` is kept. `diff --examples` lists newly allowed
+  changes first, tags each row with `change`, and counts refusal-code-only
+  changes (`refusal_code_changes`); `--refusal-changes` lists them.
+- The reference caller takes each target's canonical spelling from
+  `hallpass permits` before it journals an intent. An upper-case or
+  uncompressed IPv6 target, or a name with a trailing dot, no longer ends in
+  an unknown outcome and a failed handoff.
+- The `window-too-short` refusal says the work would end at or after the
+  window closes, matching the exclusive `valid_until`.
+- A numeric IPv4 spelling with a `0x` part is named as non-standard IPv4,
+  not as a host name. A ledger mode error gives ledger advice. Error
+  messages end with a full stop.
 - `audit-receipts`, `audit-charges`, `reconcile`, `compare-backups`, the
   `test-pass --strength` report and the receipt line of `spend` print
   readable text instead of JSON fragments. `receipt` prints times as
