@@ -257,6 +257,26 @@ pub fn display_safe(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Whether `text` has a control character (`char::is_control`). ASCII text,
+/// the usual case, is checked byte by byte without decoding characters: its
+/// control characters are the bytes below 0x20 and 0x7f. Every byte is
+/// checked, without stopping early, so that the loop runs on many at once.
+fn has_control(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().fold(0, |found, b| {
+            found | u8::from(b < 0x20) | u8::from(b == 0x7f)
+        }) != 0
+    } else {
+        text.chars().any(char::is_control)
+    }
+}
+
+/// Whether `text` has more than `max` characters. A text of at most `max`
+/// bytes has at most `max` characters, so only a longer one is counted.
+fn longer_than(text: &str, max: usize) -> bool {
+    text.len() > max && text.chars().count() > max
+}
+
 /// Check a note before it is recorded: one plain line, at most
 /// [`MAX_NOTE`] characters, without control characters, line separators or
 /// bidirectional controls.
@@ -274,13 +294,13 @@ fn check_new_note(note: &str) -> Result<(), String> {
 /// the rule hallpass 0.1 wrote notes under, so older ledgers stay readable;
 /// new notes must also pass [`check_new_note`].
 fn check_note(note: &str) -> Result<(), String> {
-    if note.chars().any(char::is_control) {
+    if has_control(note) {
         return Err(
             "the note contains a control character (such as a newline); write one plain line"
                 .to_owned(),
         );
     }
-    if note.chars().count() > MAX_NOTE {
+    if longer_than(note, MAX_NOTE) {
         return Err(format!(
             "the note is longer than {MAX_NOTE} characters; shorten it"
         ));
@@ -448,6 +468,8 @@ struct Parsed {
     /// Recorded targets this scan already found valid, so that a target
     /// repeated on many lines is checked once (see `debit::KNOWN_TARGETS`).
     valid_targets: Vec<RecordedTarget>,
+    /// The pass digest text this scan read last, and its value.
+    last_digest: Option<(String, Digest)>,
 }
 
 impl Parsed {
@@ -465,6 +487,21 @@ impl Parsed {
 
     const fn tail(&self) -> Digest {
         self.tail
+    }
+
+    /// The pass digest that a spend or debit line records as `text`. A
+    /// digest's value depends only on its text, and a line usually repeats
+    /// the digest of the line before, so that text is compared, not parsed
+    /// again.
+    fn pass_digest(&mut self, text: &str) -> Option<Digest> {
+        if let Some((last, digest)) = &self.last_digest
+            && last == text
+        {
+            return Some(*digest);
+        }
+        let digest = text.parse::<Digest>().ok()?;
+        self.last_digest = Some((text.to_owned(), digest));
+        Some(digest)
     }
 }
 
@@ -493,15 +530,15 @@ impl Line {
     /// order of the attempts cannot change the result. The likely shape is
     /// tried first, because a failed attempt costs more than a decode.
     ///
-    /// A line in the exact spelling hallpass writes is read directly
-    /// ([`written`]), with the same result. Any other line is checked as UTF-8
-    /// once. A line that is not UTF-8 is not JSON either, so this refuses
-    /// nothing that JSON decoding accepts.
+    /// Every line is checked as UTF-8 once, as a whole. A line that is not
+    /// UTF-8 is not JSON either, so this refuses nothing that JSON decoding
+    /// accepts. A line in the exact spelling hallpass writes is then read
+    /// directly ([`written`]), with the same result as `serde_json`.
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if let Some(line) = written::read(bytes) {
+        let text = std::str::from_utf8(bytes).ok()?;
+        if let Some(line) = written::read(text) {
             return Some(line);
         }
-        let text = std::str::from_utf8(bytes).ok()?;
         let attempt = |shape: Shape| match shape {
             Shape::Spend => serde_json::from_str(text).ok().map(Self::Spend),
             Shape::Debit => serde_json::from_str(text).ok().map(Self::Debit),
@@ -557,10 +594,11 @@ struct WitnessLine {
 fn add(totals: &mut BTreeMap<String, u64>, counter: &str, n: u64) -> Option<()> {
     // Look up before inserting: a scan adds to the same few counters on every
     // line, and an owned key would be allocated (and dropped) each time.
-    if !totals.contains_key(counter) {
-        totals.insert(counter.to_owned(), 0);
+    if let Some(total) = totals.get_mut(counter) {
+        *total = total.checked_add(n).filter(|t| *t <= MAX_CEILING)?;
+        return Some(());
     }
-    let total = totals.get_mut(counter)?;
+    let total = totals.entry(counter.to_owned()).or_insert(0);
     *total = total.checked_add(n).filter(|t| *t <= MAX_CEILING)?;
     Some(())
 }
@@ -643,6 +681,7 @@ fn scan_ledger(
         adoption_count: 0,
         seq: 0,
         valid_targets: Vec::new(),
+        last_digest: None,
     };
     record_checkpoint(&mut checkpoints, 0, parsed.tail);
     let mut number = 1;
@@ -707,8 +746,8 @@ fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<LedgerEntry, &'stati
     if !is_counter_name(&entry.counter) || entry.n == 0 || entry.n > MAX_CEILING {
         return Err("the counter name or amount is not valid");
     }
-    let (Ok(digest), Ok(time)) = (
-        entry.digest.parse::<Digest>(),
+    let (Some(digest), Ok(time)) = (
+        parsed.pass_digest(&entry.digest),
         OffsetDateTime::parse(&entry.time, &Rfc3339),
     ) else {
         return Err("the time, digest or note is not valid");
@@ -1042,6 +1081,7 @@ fn visit_view(
         adoption_count: 0,
         seq: 0,
         valid_targets: Vec::new(),
+        last_digest: None,
     });
     Ok(LedgerView {
         path,

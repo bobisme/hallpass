@@ -2,49 +2,53 @@
 //!
 //! JSON allows many spellings of one record (any key order, spaces, escapes).
 //! Nearly every line of a real ledger has the spelling that hallpass itself
-//! writes: keys in declaration order, no spaces, and short ASCII strings without
-//! escapes. This reader accepts only that spelling of a legacy spend or a debit
-//! (with or without a receipt). It declines everything else, adoptions
-//! included, and `serde_json` then decodes the line as before.
+//! writes: keys in declaration order, no spaces, and strings whose only escapes
+//! are `\"` and `\\` (the text in a valid ledger has no control characters, so
+//! `serde_json` writes no other escape). This reader accepts only that spelling
+//! of a legacy spend or a debit (with or without a receipt). It declines
+//! everything else, adoptions included, and `serde_json` then decodes the line
+//! as before.
 //!
 //! The reader never accepts a line that `serde_json` refuses, and it never
-//! decodes a value differently. An accepted line is a JSON object with exactly
-//! the fields of one record shape. Each string contains only printable ASCII
-//! other than `"` and `\`, so its value is its own bytes. Each number is a plain
-//! unsigned integer without leading zeros that fits its field. The tests compare
-//! this reader with `serde_json`.
+//! decodes a value differently. It reads a line that is already known to be
+//! UTF-8. An accepted line is a JSON object with exactly the fields of one
+//! record shape. Each string ends at the first `"` that is not escaped, has no
+//! control character (which JSON does not allow unescaped), and has no escape
+//! other than `\"` and `\\`, which decode to `"` and `\`; every other character
+//! is its own value. Each number is a plain unsigned integer without leading
+//! zeros that fits its field. The tests compare this reader with `serde_json`.
 
 use super::Entry;
 use super::debit::{DebitCharge, DebitLine, DebitReceipt, RecordedTarget};
 
 /// Read a legacy spend or a debit line, or `None` for `serde_json` to decode.
-pub(super) fn read(line: &[u8]) -> Option<super::Line> {
+pub(super) fn read(line: &str) -> Option<super::Line> {
     let mut at = Cursor(line);
-    at.tag(br#"{"seq":"#)?;
+    at.tag(r#"{"seq":"#)?;
     let seq = at.number()?;
-    at.tag(br#","time":""#)?;
+    at.tag(r#","time":""#)?;
     let time = at.text()?;
-    if at.tag(br#","counter":""#).is_some() {
+    if at.tag(r#","counter":""#).is_some() {
         spend(at, seq, time).map(super::Line::Spend)
     } else {
-        at.tag(br#","event":""#)?;
+        at.tag(r#","event":""#)?;
         debit(at, seq, time).map(super::Line::Debit)
     }
 }
 
 fn spend(mut at: Cursor<'_>, seq: u64, time: String) -> Option<Entry> {
     let counter = at.text()?;
-    at.tag(br#","n":"#)?;
+    at.tag(r#","n":"#)?;
     let n = at.number()?;
-    at.tag(br#","digest":""#)?;
+    at.tag(r#","digest":""#)?;
     let digest = at.text()?;
-    let note = if at.tag(br#","note":null"#).is_some() {
+    let note = if at.tag(r#","note":null"#).is_some() {
         None
     } else {
-        at.tag(br#","note":""#)?;
+        at.tag(r#","note":""#)?;
         Some(at.text()?)
     };
-    at.tag(br#","prev":""#)?;
+    at.tag(r#","prev":""#)?;
     let prev = at.text()?;
     at.end()?;
     Some(Entry {
@@ -60,34 +64,34 @@ fn spend(mut at: Cursor<'_>, seq: u64, time: String) -> Option<Entry> {
 
 fn debit(mut at: Cursor<'_>, seq: u64, time: String) -> Option<DebitLine> {
     let event = at.text()?;
-    at.tag(br#","version":"#)?;
+    at.tag(r#","version":"#)?;
     let version = u32::try_from(at.number()?).ok()?;
-    at.tag(br#","charges":["#)?;
+    at.tag(r#","charges":["#)?;
     let mut charges = Vec::new();
     loop {
-        at.tag(br#"{"counter":""#)?;
+        at.tag(r#"{"counter":""#)?;
         let counter = at.text()?;
-        at.tag(br#","n":"#)?;
+        at.tag(r#","n":"#)?;
         let amount = at.number()?;
-        at.tag(b"}")?;
+        at.tag("}")?;
         charges.push(DebitCharge { counter, amount });
-        if at.tag(b",").is_none() {
+        if at.tag(",").is_none() {
             break;
         }
     }
-    at.tag(br#"],"digest":""#)?;
+    at.tag(r#"],"digest":""#)?;
     let digest = at.text()?;
-    let note = if at.tag(br#","note":""#).is_some() {
+    let note = if at.tag(r#","note":""#).is_some() {
         Some(at.text()?)
     } else {
         None
     };
-    let receipt = if at.tag(br#","receipt":{"#).is_some() {
+    let receipt = if at.tag(r#","receipt":{"#).is_some() {
         Some(receipt(&mut at)?)
     } else {
         None
     };
-    at.tag(br#","prev":""#)?;
+    at.tag(r#","prev":""#)?;
     let prev = at.text()?;
     at.end()?;
     Some(DebitLine {
@@ -105,60 +109,90 @@ fn debit(mut at: Cursor<'_>, seq: u64, time: String) -> Option<DebitLine> {
 
 /// The rest of a receipt whose opening brace was consumed.
 fn receipt(at: &mut Cursor<'_>) -> Option<DebitReceipt> {
-    let caller_ref = if at.tag(br#""caller_ref":""#).is_some() {
+    let caller_ref = if at.tag(r#""caller_ref":""#).is_some() {
         Some(at.text()?)
     } else {
         None
     };
-    let targets_key: &[u8] = if caller_ref.is_some() {
-        br#","targets":["#
+    let targets_key = if caller_ref.is_some() {
+        r#","targets":["#
     } else {
-        br#""targets":["#
+        r#""targets":["#
     };
     let mut targets = Vec::new();
     if at.tag(targets_key).is_some() {
         loop {
-            at.tag(br#"{"target":""#)?;
+            at.tag(r#"{"target":""#)?;
             let target = at.text()?;
-            let name = if at.tag(br#","name":""#).is_some() {
+            let name = if at.tag(r#","name":""#).is_some() {
                 Some(at.text()?)
             } else {
                 None
             };
-            at.tag(br#","label":""#)?;
+            at.tag(r#","label":""#)?;
             let label = at.text()?;
-            at.tag(b"}")?;
+            at.tag("}")?;
             targets.push(RecordedTarget {
                 target,
                 name,
                 label,
             });
-            if at.tag(b",").is_none() {
+            if at.tag(",").is_none() {
                 break;
             }
         }
-        at.tag(b"]")?;
+        at.tag("]")?;
     }
-    at.tag(b"}")?;
+    at.tag("}")?;
     Some(DebitReceipt {
         caller_ref,
         targets,
     })
 }
 
+/// The position of the first byte in `text` that ends the plain part of a
+/// JSON string: `"`, `\` or a control character below U+0020 (which JSON
+/// does not allow unescaped). A byte of a multi-byte UTF-8 character is never
+/// one of them.
+///
+/// Eight bytes are checked at a time. For each byte `b` of a word `x`, the
+/// high bit of `x - 0x01…01 & !x & 0x80…80` is set when `b` is zero, and that
+/// of `x - 0x20…20 & !x & 0x80…80` when `b` is below 0x20. A byte above a
+/// flagged byte can be flagged by the borrow, but the lowest flagged byte is
+/// always a match, so its position is the first match.
+fn stop(text: &[u8]) -> Option<usize> {
+    const ONES: u64 = u64::from_le_bytes([0x01; 8]);
+    const HIGH: u64 = u64::from_le_bytes([0x80; 8]);
+    let zero = |v: u64| v.wrapping_sub(ONES) & !v & HIGH;
+    let (words, rest) = text.as_chunks::<8>();
+    for (index, word) in words.iter().enumerate() {
+        let x = u64::from_le_bytes(*word);
+        let found = zero(x ^ (ONES * u64::from(b'"')))
+            | zero(x ^ (ONES * u64::from(b'\\')))
+            | (x.wrapping_sub(ONES * 0x20) & !x & HIGH);
+        if found != 0 {
+            return Some(index * 8 + found.trailing_zeros() as usize / 8);
+        }
+    }
+    let at = rest
+        .iter()
+        .position(|b| matches!(b, b'"' | b'\\' | 0x00..0x20))?;
+    Some(words.len() * 8 + at)
+}
+
 /// The unread rest of a line.
-struct Cursor<'a>(&'a [u8]);
+struct Cursor<'a>(&'a str);
 
 impl Cursor<'_> {
     /// Consume exactly `literal`.
-    fn tag(&mut self, literal: &[u8]) -> Option<()> {
+    fn tag(&mut self, literal: &str) -> Option<()> {
         self.0 = self.0.strip_prefix(literal)?;
         Some(())
     }
 
     /// The whole line has been read.
     fn end(&mut self) -> Option<()> {
-        self.tag(b"}")?;
+        self.tag("}")?;
         self.0.is_empty().then_some(())
     }
 
@@ -166,13 +200,13 @@ impl Cursor<'_> {
     /// than `0` followed by digits, no larger than `u64::MAX`. A fraction or an
     /// exponent leaves a byte that the next tag refuses.
     fn number(&mut self) -> Option<u64> {
-        let len = self.0.iter().take_while(|b| b.is_ascii_digit()).count();
-        let (digits, rest) = self.0.split_at(len);
-        if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+        let len = self.0.bytes().take_while(u8::is_ascii_digit).count();
+        let (digits, rest) = self.0.split_at_checked(len)?;
+        if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
             return None;
         }
         let mut value = 0u64;
-        for digit in digits {
+        for digit in digits.bytes() {
             value = value
                 .checked_mul(10)?
                 .checked_add(u64::from(digit - b'0'))?;
@@ -182,15 +216,41 @@ impl Cursor<'_> {
     }
 
     /// The rest of a string whose opening quote was consumed, through the
-    /// closing quote: printable ASCII other than `\`, so without escapes.
+    /// closing quote. Text that ends at a `"` without any `\` or control
+    /// character before it is the whole string, and its value is that text.
     fn text(&mut self) -> Option<String> {
-        let len = self
-            .0
-            .iter()
-            .position(|b| !(b' '..=b'~').contains(b) || matches!(b, b'"' | b'\\'))?;
-        let (text, rest) = self.0.split_at(len);
-        self.0 = rest.strip_prefix(b"\"")?;
-        std::str::from_utf8(text).ok().map(str::to_owned)
+        let (text, from) = self.0.split_at_checked(stop(self.0.as_bytes())?)?;
+        match from.strip_prefix('"') {
+            Some(rest) => {
+                self.0 = rest;
+                Some(text.to_owned())
+            }
+            None => self.escaped(),
+        }
+    }
+
+    /// The rest of a string with a `\` or a control character. Only the
+    /// escapes `\"` and `\\` are read; a string with another escape, or with a
+    /// control character, is left to `serde_json` (which refuses a control
+    /// character).
+    #[cold]
+    fn escaped(&mut self) -> Option<String> {
+        let mut value = String::new();
+        loop {
+            let (text, from) = self.0.split_at_checked(stop(self.0.as_bytes())?)?;
+            value.push_str(text);
+            let (escaped, after) = match from.as_bytes() {
+                [b'"', ..] => (None, from.get(1..)?),
+                [b'\\', b'"', ..] => (Some('"'), from.get(2..)?),
+                [b'\\', b'\\', ..] => (Some('\\'), from.get(2..)?),
+                _ => return None,
+            };
+            self.0 = after;
+            match escaped {
+                Some(c) => value.push(c),
+                None => return Some(value),
+            }
+        }
     }
 }
 
@@ -255,7 +315,7 @@ mod tests {
     }
 
     fn by_reader(line: &[u8]) -> Option<String> {
-        match read(line)? {
+        match read(std::str::from_utf8(line).ok()?)? {
             Line::Spend(entry) => serde_json::to_string(&entry).ok(),
             Line::Debit(debit) => serde_json::to_string(&debit).ok(),
             Line::Adopt(adopt) => serde_json::to_string(&adopt).ok(),
@@ -275,16 +335,26 @@ mod tests {
         Ok(())
     }
 
-    /// Printable ASCII other than `"` and `\\`: strings the reader reads.
+    /// Printable ASCII other than `"` and `\\`: strings without escapes.
     const PLAIN: &str = "[ !#-\\[\\]-~]{0,24}";
 
-    /// Any string; with `plain`, only strings that need no escape.
+    /// Strings with many `"` and `\`, which `serde_json` writes as escapes.
+    const QUOTED: &str = "[a-z \"\\\\]{0,16}";
+
+    /// Any text without a control character (U+0000 to U+001F): non-ASCII
+    /// text, DEL and the C1 controls included.
+    const TEXT: &str = "[^\\x00-\\x1f]{0,24}";
+
+    /// Any string; with `plain`, only strings the reader reads: those without
+    /// a control character.
     fn text(plain: bool) -> BoxedStrategy<String> {
         if plain {
-            return PLAIN.boxed();
+            return prop_oneof![2 => PLAIN, 1 => QUOTED, 1 => TEXT].boxed();
         }
         prop_oneof![
             4 => PLAIN,
+            2 => QUOTED,
+            2 => TEXT,
             2 => "[\\x00-\\x7f]{0,12}",
             1 => "[a-z0-9_:.+-]{0,12}",
             1 => "\\PC{0,8}",
@@ -472,14 +542,31 @@ mod tests {
             r#""prev""#,
             r#""receipt":{"caller_ref":"run-81/unit-a","targets":[{"target":"192.0.2.10:5060/udp","name":"sip.example.net","label":"sip"},{"target":"[2001:db8::1]:443/tcp","label":"edge"}]},"prev""#,
         );
-        for line in [&spend, &noted, &debit, &receipt] {
+        // Operator text as serde_json writes it: non-ASCII as it is, DEL and
+        // C1 controls as they are, `"` and `\` escaped.
+        let texts = [
+            noted.replace("retry 2", "retry 2 – café ✓ 再試行"),
+            noted.replace("retry 2", "\u{7f} and \u{85}"),
+            noted.replace("retry 2", r#"replay of \"login\" from C:\\tmp\\"#),
+            noted.replace("retry 2", r#"\"\\\""#),
+            receipt.replace("run-81/unit-a", r#"run \"81\" – unit\\a"#),
+        ];
+        for line in [&spend, &noted, &debit, &receipt].into_iter().chain(&texts) {
             assert!(by_reader(line.as_bytes()).is_some(), "{line}");
             assert_eq!(by_reader(line.as_bytes()), by_serde(line.as_bytes()));
         }
-        // Valid JSON in another spelling is left to serde_json.
+        let Some(Line::Spend(escaped)) = read(&texts[3]) else {
+            panic!("{}", texts[3]);
+        };
+        assert_eq!(escaped.note.as_deref(), Some(r#""\""#));
+        // Valid JSON in another spelling is left to serde_json, other escapes
+        // included.
         for other in [
             spend.replace(r#""n":1"#, r#""n": 1"#),
             spend.replace("calls", r"c\u0061lls"),
+            noted.replace("retry 2", r"retry\/2"),
+            noted.replace("retry 2", r"retry\n2"),
+            noted.replace("retry 2", r#"\"retry\u00e9\""#),
             spend.replace(r#","note":null"#, ""),
             receipt.replace(r#""caller_ref":"run-81/unit-a","#, r#""caller_ref":null,"#),
             receipt.replace(r#","name":"sip.example.net""#, r#","name":null"#),
@@ -496,6 +583,10 @@ mod tests {
             spend.replace(r#""n":1"#, r#""n":18446744073709551616"#),
             spend.replace(r#""n":1"#, r#""n":-1"#),
             spend.replace("calls", "cal\tls"),
+            noted.replace("retry 2", "retry \\\" 2\t"),
+            noted.replace("retry 2", r"retry 2\"),
+            noted.replace("retry 2", r"retry 2\x"),
+            noted.replace("retry 2", r"retry 2\u12"),
             debit.replace(r#""version":1"#, r#""version":4294967296"#),
             format!("{spend}}}"),
         ] {
@@ -519,6 +610,64 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn pass_digests_are_checked_on_every_line() {
+        // A ledger for pass `t` with one spend or debit per digest text.
+        let scan = |digests: &[&str]| {
+            let header = r#"{"hallpass_ledger":1,"pass_id":"t"}"#;
+            let mut tail = crate::Digest::of(header.as_bytes());
+            let mut text = format!("{header}\n");
+            for (seq, digest) in (1..).zip(digests) {
+                let line = if seq % 2 == 0 {
+                    format!(
+                        r#"{{"seq":{seq},"time":"2026-11-20T09:00:00Z","counter":"calls","n":1,"digest":"{digest}","note":null,"prev":"{tail}"}}"#
+                    )
+                } else {
+                    format!(
+                        r#"{{"seq":{seq},"time":"2026-11-20T09:00:00Z","event":"debit","version":1,"charges":[{{"counter":"calls","n":1}}],"digest":"{digest}","prev":"{tail}"}}"#
+                    )
+                };
+                tail = crate::Digest::of(line.as_bytes());
+                text.push_str(&line);
+                text.push('\n');
+            }
+            let path = std::path::Path::new("t");
+            super::super::parse_ledger(path, text.as_bytes(), "t", true, None).map(|parsed| {
+                let spends = parsed.entries.iter().map(|e| (e.seq, e.digest));
+                let debits = parsed.debits.iter().map(|d| (d.seq, d.digest));
+                let mut all: Vec<_> = spends.chain(debits).collect();
+                all.sort_unstable_by_key(|(seq, _)| *seq);
+                all.into_iter()
+                    .map(|(_, digest)| digest)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let (a, b) = (crate::Digest::of(b"a"), crate::Digest::of(b"b"));
+        let (a_text, b_text) = (a.to_string(), b.to_string());
+        let read = scan(&[&a_text, &a_text, &b_text, &b_text, &a_text]).expect("valid");
+        assert_eq!(read, [a, a, b, b, a]);
+        // A digest read before does not excuse a different text.
+        for bad in [
+            a_text.to_uppercase(),
+            a_text.replace("sha256:", "sha256 "),
+            format!("{a_text}0"),
+            a_text[..a_text.len() - 1].to_owned(),
+        ] {
+            for digests in [
+                vec![a_text.as_str(), bad.as_str()],
+                vec![a_text.as_str(), a_text.as_str(), bad.as_str()],
+                vec![
+                    a_text.as_str(),
+                    a_text.as_str(),
+                    a_text.as_str(),
+                    bad.as_str(),
+                ],
+            ] {
+                assert!(scan(&digests).is_err(), "{digests:?}");
+            }
+        }
     }
 
     #[test]
@@ -585,8 +734,23 @@ mod tests {
         }
     }
 
+    /// Bytes around every edge of the word-at-a-time scan, and any byte.
+    fn scan_bytes() -> impl Strategy<Value = Vec<u8>> {
+        let edge = proptest::sample::select(vec![
+            0x00, 0x01, 0x1f, 0x20, 0x21, b'"', 0x23, 0x5b, b'\\', 0x5d, 0x7f, 0x80, 0x9f, 0xa2,
+            0xdc, 0xfe, 0xff, b'a',
+        ]);
+        proptest::collection::vec(prop_oneof![3 => edge, 1 => any::<u8>()], 0..40)
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        #[test]
+        fn scan_stops_at_the_first_quote_backslash_or_control(bytes in scan_bytes()) {
+            let first = bytes.iter().position(|b| *b == b'"' || *b == b'\\' || *b < 0x20);
+            prop_assert_eq!(stop(&bytes), first);
+        }
 
         #[test]
         fn plain_lines_are_read_directly(

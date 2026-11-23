@@ -433,47 +433,75 @@ the ledger.
 Every `permits`, `status`, `spend` and spend preview verifies the whole ledger
 once: it reads every byte, hashes every line, checks each `seq` and `prev`,
 and decodes and validates every record. No call verifies twice. A line in the
-exact spelling hallpass writes is read directly (`src/ledger/written.rs`).
-Any other spelling goes to `serde_json`. Both accept the same lines with the
-same values, and property tests compare them.
+spelling hallpass writes is read directly (`src/ledger/written.rs`): keys in
+hallpass's order, no spaces, and strings whose only escapes are `\"` and
+`\\`. Every spend and debit line that hallpass writes has this spelling,
+whatever its note, caller reference or names say, because that text has no
+control characters. Any other spelling (an adoption, or a line that another
+program wrote) goes to `serde_json`. Both accept the same lines with the same
+values, and property tests compare them.
 
 `cargo test --release --test ledger_scale -- --ignored --nocapture` measures
-this. Its ledgers mix legacy spends, debits and debits with a caller reference
-and a recorded target (about 300 bytes a line). The numbers below are the best
-median of three runs on a loaded 32-core AMD Threadripper 9970X with SHA
-extensions. The ledger is on tmpfs, so the sync after each append costs
-nothing here. On a disk, add the sync time to each spend.
+this with two mixes of lines:
 
-Before and after this change, in milliseconds per call. `permits` and `spend`
-call the library; CLI `spend` starts the binary for each call. The last column
-is spends a second from 16 threads together.
+- **Plain** (about 300 bytes a line): half legacy spends, a quarter debits
+  and a quarter debits with a caller reference and a recorded target, with
+  whole-second times.
+- **Receipts** (about 490 bytes a line): every line is a debit of two
+  counters with a note, a caller reference and a recorded target with a
+  request name, as `spend --caller-ref REF --record-target --note NOTE`
+  writes it with the real clock, so times have fractions of a second. One
+  note in four has non-ASCII text and one in eight has quotation marks. The
+  test checks that its lines are, byte for byte, the lines that real spends
+  write.
 
-| Ledger lines | Size | Read and hash | `permits` | `spend` | CLI `spend` | 16 spenders |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 0.3 kB | 0.001 | 0.019 → 0.017 | 0.054 → 0.043 | 0.69 → 0.62 | 2,800 → 6,400 |
-| 1,000 | 0.3 MB | 0.17 | 1.6 → 0.46 | 1.6 → 0.47 | 2.6 → 1.1 | 460 → 1,400 |
-| 10,000 | 3.0 MB | 1.6 | 15.2 → 4.1 | 15.0 → 4.3 | 16.5 → 5.7 | 61 → 197 |
-| 100,000 | 30 MB | 18.9 | 154 → 46 | 149 → 47 | 152 → 47 | 6 → 21 |
+The numbers below are medians of three runs, alternating before and after
+bn-iyn, on a loaded 32-core AMD Threadripper 9970X with SHA extensions. The
+ledger is on tmpfs, so the sync after each append costs nothing here. On a
+disk, add the sync time to each spend.
 
-`permits` and `status` cost the same. On an ext4 NVMe disk, the syncs added
-about 7 ms to each spend, and 16 spenders reached 134 spends a second at 1
-line and 82 at 10,000 lines.
+In milliseconds per call. `permits` and `spend` call the library; CLI `spend`
+starts the binary for each call. For the receipts mix, both spends record a
+receipt with `--require-new-ref`. The last column is spends a second from 16
+threads together.
+
+| Mix | Ledger lines | Size | Read and hash | `permits` | `spend` | CLI `spend` | 16 spenders |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| plain | 1,000 | 0.3 MB | 0.17 | 0.44 → 0.36 | 0.48 → 0.40 | 1.4 → 1.3 | 1,360 → 1,580 |
+| plain | 10,000 | 3.0 MB | 1.7 | 4.2 → 3.3 | 4.2 → 3.2 | 6.5 → 4.7 | 194 → 247 |
+| plain | 100,000 | 30 MB | 18.7 | 43 → 36 | 42 → 34 | 46 → 37 | 23 → 28 |
+| receipts | 1,000 | 0.5 MB | 0.25 | 0.99 → 0.57 | 1.06 → 0.63 | 2.2 → 1.5 | 707 → 1,090 |
+| receipts | 10,000 | 4.9 MB | 2.7 | 10.2 → 5.8 | 9.9 → 5.9 | 12.1 → 7.4 | 92 → 159 |
+| receipts | 100,000 | 49 MB | 30.0 | 100 → 60 | 102 → 63 | 102 → 63 | 10 → 16 |
+
+`permits`, `status` and `receipt` cost the same. On an ext4 NVMe disk, the
+syncs added about 7 ms to each spend. Before bn-2n0, a plain call at 100,000
+lines took about 150 ms.
 
 "Read and hash" is the floor for a call that checks every byte: it reads the
-ledger and hashes each line, and decodes nothing. In a profile at 100,000
-lines before this change, the time went to decoding through an untagged serde enum, which buffered each
-line into an intermediate value (about 40%), to formatting the previous
-line's hash as text to compare it with `prev` (about 34%), to SHA-256 (about
-8%) and to hex parsing (about 5%). Now hashing and reading are about 40% of a
-call, and the rest is decoding and validation.
+ledger and hashes each line, and decodes nothing. It costs about 0.6 ms a
+MB. Before bn-iyn, a line with a string that had a non-ASCII character, a
+quotation mark or a backslash (in a note, for example) went to `serde_json`,
+and such a line cost about 1.6 times as much. At 29,533 receipt lines (15
+MB), a CLI call took about 40 ms when every note had a non-ASCII character
+and about 25 ms when every note was ASCII. Both now take about 19 to 21 ms.
+In a profile of the ASCII case before bn-iyn, SHA-256 took about 25% of a
+call, finding the end of each string and checking its UTF-8 one string at a
+time about 22%, the other validation (the set of charged counters, the note
+and reference checks, parsing the digest and the time) about 18%, and memory
+allocation about 8%. Now reading and hashing (with one UTF-8 check a line)
+are about 45% of a call, reading the fields about 16%, validation about 15%
+and allocation about 10%.
 
-**Practical size.** A call costs about 0.45 µs per ledger line, and a
-CLI call adds about 0.6 ms to start the process and load the pass. Up to
-10,000 lines, a call takes a few milliseconds. At 100,000 lines (30 MB), a call
-takes about 46 ms. Spends hold both locks while they verify, so the spends
-on one pass run one at a time: all callers together sustain about 20 spends
-a second. Cost grows linearly: 1,000,000 lines would take about half a second
-per call. Keep the ledger of one pass below about 100,000 lines.
+**Practical size.** The cost follows the size of the ledger more than its
+number of lines: a call costs about 1.2 ms per MB, that is about 0.35 µs per
+plain line and about 0.6 µs per receipt line. A CLI call adds about 0.7 ms
+to start the process and load the pass. Up to 10,000 lines, a call takes a
+few milliseconds. At 100,000 receipt lines (49 MB), a call takes about 60
+ms. Spends hold both locks while they verify, so the spends on one pass run
+one at a time: at that size all callers together sustain about 16 spends a
+second. Cost grows linearly: 1,000,000 receipt lines would take about 0.6 s
+per call. Keep the ledger of one pass below about 100,000 lines and 50 MB.
 
 **Batch with `--n`.** The cost depends on the number of lines, not on the
 amounts. A caller that counts every request at a high rate should spend once
@@ -497,7 +525,7 @@ not changed since. There are two ways, and neither is worth its cost:
 - Keep a digest of the verified prefix and its totals, for example beside the
   witness. Detection stays on every call, because the call still hashes every
   byte, so this saves only the decoding. The "read and hash" column shows the
-  most it can save: about 60% of a call. In exchange, ceiling decisions would
+  most it can save: about half of a call. In exchange, ceiling decisions would
   depend on a cached copy of the totals in the state directory instead of the
   ledger. A later release that tightens a validation rule would also not
   check the cached prefix again.

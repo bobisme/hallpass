@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Parsed, add, check_note, is_disguising};
+use super::{Parsed, add, check_note, has_control, is_disguising, longer_than};
 use crate::{Digest, HostName, MAX_CEILING, MAX_COUNTERS, Target, is_counter_name};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -98,12 +98,22 @@ pub(super) fn check_charges<'a>(
     if !(1..=MAX_COUNTERS).contains(&count) {
         return Err("a debit needs between 1 and MAX_COUNTERS charges");
     }
-    let mut seen = BTreeSet::new();
-    for (counter, amount) in charges {
+    // A debit usually charges a few counters: each of the first few is
+    // compared with those before it, without allocating; a set holds the rest.
+    let mut first = [""; 8];
+    let mut rest = BTreeSet::new();
+    for (index, (counter, amount)) in charges.enumerate() {
         if !is_counter_name(counter) || !(1..=MAX_CEILING).contains(&amount) {
             return Err("a charge counter or amount is invalid");
         }
-        if !seen.insert(counter) {
+        let repeated = if index < first.len() {
+            let repeated = first[..index].contains(&counter);
+            first[index] = counter;
+            repeated
+        } else {
+            first.contains(&counter) || !rest.insert(counter)
+        };
+        if repeated {
             return Err("a debit cannot charge a counter more than once");
         }
     }
@@ -111,9 +121,11 @@ pub(super) fn check_charges<'a>(
 }
 
 pub(super) fn valid_text(text: &str, max: usize) -> bool {
+    // The disguising characters are all outside ASCII.
     !text.trim().is_empty()
-        && text.chars().count() <= max
-        && !text.chars().any(|c| c.is_control() || is_disguising(c))
+        && !longer_than(text, max)
+        && !has_control(text)
+        && (text.is_ascii() || !text.chars().any(is_disguising))
 }
 
 /// How many distinct valid recorded targets one ledger scan remembers.
@@ -164,8 +176,8 @@ pub(super) fn parse_debit(
         line.charges.len(),
         line.charges.iter().map(|c| (c.counter.as_str(), c.amount)),
     )?;
-    let (Ok(digest), Ok(time)) = (
-        line.digest.parse::<Digest>(),
+    let (Some(digest), Ok(time)) = (
+        parsed.pass_digest(&line.digest),
         OffsetDateTime::parse(&line.time, &Rfc3339),
     ) else {
         return Err("the debit time or digest is invalid");
@@ -1036,6 +1048,133 @@ mod tests {
             for (idx, name) in names.into_iter().enumerate() {
                 let expected = initial[idx] + if fits { amounts.get(idx).copied().unwrap_or(0) } else { 0 };
                 prop_assert_eq!(view.tally.spent(name), expected);
+            }
+        }
+    }
+
+    // The validation that every ledger line passes has fast paths for ASCII
+    // text and for debits with few charges. Each must decide exactly as the
+    // definition it replaced, which these copies keep.
+
+    fn defined_valid_text(text: &str, max: usize) -> bool {
+        !text.trim().is_empty()
+            && text.chars().count() <= max
+            && !text.chars().any(|c| c.is_control() || is_disguising(c))
+    }
+
+    fn defined_note(note: &str) -> bool {
+        !note.chars().any(char::is_control) && note.chars().count() <= crate::MAX_NOTE
+    }
+
+    fn defined_charges(charges: &[(String, u64)]) -> Result<(), &'static str> {
+        if !(1..=MAX_COUNTERS).contains(&charges.len()) {
+            return Err("a debit needs between 1 and MAX_COUNTERS charges");
+        }
+        let mut seen = BTreeSet::new();
+        for (counter, amount) in charges {
+            if !is_counter_name(counter) || !(1..=MAX_CEILING).contains(amount) {
+                return Err("a charge counter or amount is invalid");
+            }
+            if !seen.insert(counter) {
+                return Err("a debit cannot charge a counter more than once");
+            }
+        }
+        Ok(())
+    }
+
+    fn defined_add(
+        totals: &mut std::collections::BTreeMap<String, u64>,
+        counter: &str,
+        n: u64,
+    ) -> Option<()> {
+        if !totals.contains_key(counter) {
+            totals.insert(counter.to_owned(), 0);
+        }
+        let total = totals.get_mut(counter)?;
+        *total = total.checked_add(n).filter(|t| *t <= MAX_CEILING)?;
+        Some(())
+    }
+
+    /// Text near the edge of every check: ASCII and its controls, the C1
+    /// controls, the disguising characters, other non-ASCII text and blanks.
+    fn edge_text() -> BoxedStrategy<String> {
+        prop_oneof![
+            "[ -~]{0,12}",
+            "[\\x00-\\x7f]{0,12}",
+            "[ a\\t\\x00\\x1f\\x7f\\x{80}\\x{85}\\x{9f}\\x{a0}\\x{61c}\\x{200e}\\x{2028}\\x{2029}\\x{202e}\\x{2066}\\x{2069}\\x{3000}é]{0,12}",
+            any::<String>(),
+        ]
+        .boxed()
+    }
+
+    /// Long notes around [`crate::MAX_NOTE`] characters, in one- and
+    /// multi-byte characters.
+    fn long_note() -> impl Strategy<Value = String> {
+        (
+            proptest::sample::select(vec!['a', 'é', '✓', '\u{1f600}']),
+            proptest::sample::select(vec!['a', 'é', '\u{85}', '\n']),
+            490_usize..510,
+            0_usize..510,
+        )
+            .prop_map(|(fill, other, len, at)| {
+                (0..len)
+                    .map(|i| if i == at { other } else { fill })
+                    .collect()
+            })
+    }
+
+    fn charge_list() -> impl Strategy<Value = Vec<(String, u64)>> {
+        let counter = prop_oneof![
+            8 => "[a-l]",
+            1 => "[a-z][a-z0-9]{0,2}",
+            1 => Just("Bad".to_owned()),
+            1 => Just(String::new()),
+        ];
+        let amount = prop_oneof![
+            8 => 1_u64..1000,
+            1 => Just(0),
+            1 => Just(MAX_CEILING),
+            1 => Just(MAX_CEILING + 1),
+        ];
+        prop_oneof![
+            4 => proptest::collection::vec((counter.clone(), amount.clone()), 0..=12),
+            1 => proptest::collection::vec((counter, amount), 60..=70),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4096))]
+
+        #[test]
+        fn text_checks_decide_as_defined(text in edge_text(), max in 0_usize..16) {
+            prop_assert_eq!(valid_text(&text, max), defined_valid_text(&text, max));
+            prop_assert_eq!(has_control(&text), text.chars().any(char::is_control));
+            prop_assert_eq!(longer_than(&text, max), text.chars().count() > max);
+            prop_assert_eq!(check_note(&text).is_ok(), defined_note(&text));
+        }
+
+        #[test]
+        fn long_notes_decide_as_defined(note in long_note()) {
+            prop_assert_eq!(check_note(&note).is_ok(), defined_note(&note));
+        }
+
+        #[test]
+        fn charge_checks_decide_as_defined(charges in charge_list()) {
+            let borrowed = charges.iter().map(|(c, n)| (c.as_str(), *n));
+            prop_assert_eq!(check_charges(charges.len(), borrowed), defined_charges(&charges));
+        }
+
+        #[test]
+        fn totals_add_as_defined(
+            steps in proptest::collection::vec(
+                ("[a-c]", prop_oneof![0_u64..5, Just(MAX_CEILING), Just(MAX_CEILING + 1), Just(u64::MAX)]),
+                0..12,
+            )
+        ) {
+            let (mut fast, mut defined) = (std::collections::BTreeMap::new(), std::collections::BTreeMap::new());
+            for (counter, n) in steps {
+                prop_assert_eq!(add(&mut fast, &counter, n), defined_add(&mut defined, &counter, n));
+                prop_assert_eq!(&fast, &defined);
             }
         }
     }
