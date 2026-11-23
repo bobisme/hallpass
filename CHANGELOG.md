@@ -65,6 +65,31 @@ Changes since commit d70c09f.
   (exit 1) instead of an `archive-missing` gap (exit 2).
 - **Library:** `Error::Insecure` has a new `advice` field, and
   `AddressError` has a new `NonStandardIpv4` variant.
+- **`ledger --json` times keep their fractional seconds.** Entry, debit and
+  adoption `time` values are now exactly as recorded (for example
+  `2026-11-23T16:36:15.36549262Z`), as `receipt` and `audit-receipts`
+  already gave them, so debits within one second keep their order. Ledgers
+  written with whole seconds are unchanged.
+- **`unknown-counter` comes before `required-counter-missing`.** A debit
+  that names a counter the pass does not have is refused as
+  `unknown-counter`, even when it also misses a required counter.
+- **`window.seconds_until_open` rounds up.** `seconds_remaining` and
+  `seconds_since_end` still round down. No value promises more time than
+  the decision allows.
+- **`diff` JSON `warnings` is no longer always empty.** It repeats the
+  message of each name-restriction overlap that NEW introduces.
+- **The reference caller's `handoff` judges only its own journal.** Debits
+  by other callers on a shared ledger are counted and never set the exit
+  code. A caller that relied on `handoff` flagging every unrecorded debit
+  must pass `--ref-prefix` with the references it owns.
+- **Text output:** multi-counter debits in the `ledger` table print one
+  row per charge. `verify-checkpoint` adds the relation when it differs
+  from the result.
+- **Library:** `CheckpointStatus` has new variants `Shorter` and `Foreign`
+  (a ledger of another pass is now `Foreign`, not `Mismatch`).
+  `Error::LedgerCorrupt` has a new field `last`. New items: `LockWait`,
+  `SpendRequest::on_lock_wait`, `rfc3339`, `span_left`, `span_until` and
+  `whole_seconds_up`.
 
 ### Added
 
@@ -90,9 +115,49 @@ Changes since commit d70c09f.
 - Library: `export_checkpoint_observed`, `CheckpointExport`,
   `WitnessRelation`, `review::name_overlap_warnings` and
   `review::NameOverlapWarning`.
+- `diff` prints what an introduced or removed destination grants (address
+  or network, protocol, ports, names or any name) with `[review required]`,
+  and warns when a new destination makes another destination's `names` list
+  have no effect. JSON adds `introduced_grants`, `removed_grants` and
+  `name_restriction_overlaps`.
+- `status` and `ledger` flag a counter spent past a lowered ceiling (`OVER
+  by N`); JSON adds `over_ceiling` and `over_by`.
+- A spend that waits more than about 2 s for the writer lock says so on
+  stderr, naming the holder process where the system allows. stdout stays
+  one JSON object.
+- `verify-checkpoint` JSON has `relation`, with the words `compare-backups`
+  uses; an older copy reads `shorter`.
+- `verify-approval` says why a signature failed: JSON adds `reason`
+  (`wrong-namespace`, `bytes-do-not-match`, `malformed-signature`,
+  `untrusted-key`, `wrong-principal` or `unknown`) and `next_step`. The
+  result and exit code are unchanged.
+- A `ledger-corrupt` error has `error.last_line`.
+- A relative `XDG_STATE_HOME`, which is ignored, gives a warning that names
+  the directory used instead.
+- The reference caller's `handoff` takes `--ref-prefix`, `--since` and
+  `--all`.
+- docs/INTEGRATING.md "Cost per call and batching": when one spend per unit
+  is fine, when to batch, and when to split an engagement across passes.
 
 ### Changed
 
+- Reconcile manifest errors name the row, `caller_ref`, field and escaped
+  value, and the canonical form where one exists.
+- The `lock-timeout` message says what to do next and that a crashed
+  holder releases the lock on its own.
+- A `ledger-corrupt` chain break names both lines. The advice to remove a
+  cut-short final line appears only for the last line; damage before the
+  end of the file gets advice to restore a backup found with
+  `compare-backups`.
+- Time left reads "less than 1 s" for a part second in an open window, and
+  time until the window opens rounds up.
+- The no-witness warning no longer says that the next spend records a
+  witness: only an allowed spend does.
+- Address and file error messages end with a next step.
+- docs/spec.md describes parser failures as they behave, PASS-FORMAT.md
+  says `hostname` must be a DNS name, `required_counters_v1` is explained
+  as applying to every debit, and playpen is introduced where it is first
+  mentioned.
 - `ledger` takes `--tail N` and `--since SEQ` to show only recent
   entries, with a `shown` marker in text and JSON. The whole chain is still
   verified, and totals cover the whole ledger.
