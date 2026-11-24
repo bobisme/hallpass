@@ -492,3 +492,6 @@
 1795480886410447	hallpass-dev	itc:AQ		item.assign	bn-2l8	{"action":"assign","agent":"hallpass-dev"}	blake3:GdCbm2ECibDNGEfWWEfTI5F8Wci4VCNBlKTvtJBxjG4
 1795480886478294	hallpass-dev	itc:AQ		item.move	bn-rzo	{"state":"doing"}	blake3:HB0MP4sexviNrXchJ_BDBpJehgUm8scMtyO2vKYb-G4
 1795480886484867	hallpass-dev	itc:AQ		item.assign	bn-rzo	{"action":"assign","agent":"hallpass-dev"}	blake3:9UzjVcmoCl8ZFOpEZUFh6LUyBk1RepJQ0iM0nDo3bnQ
+1795481469422735	hallpass-dev	itc:AQ		item.move	bn-2l8	{"state":"done"}	blake3:lGNdCPJkqTlfA59U7gJH609O8fE0XvlCegjStah9yCA
+1795481608086198	hallpass-dev	itc:AQ		item.move	bn-rzo	{"state":"done"}	blake3:lwT6esGprUi3O3yQKjSzCf7ehmDfXcDmdWrmJuQNXeI
+1795481693252459	hallpass-dev	itc:AQ		item.move	bn-6d1	{"state":"done"}	blake3:jGl0KByE2XhXXYz1oqiewq9dLv83EkYD9VYhEDVGhqo

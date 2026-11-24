@@ -187,8 +187,19 @@ fn conformance_check_prints_one_summary_line_and_leaves_no_bytecode() {
 #[test]
 fn the_minimal_caller_leaves_no_bytecode_in_the_docs_tree() {
     let case = Case::new();
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/minimal-caller/minimal_caller.py");
+    // Run copies laid out as in docs/, so the check does not depend on what
+    // earlier runs left in the checkout.
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    let tree = case.path("docs");
+    fs::create_dir_all(tree.join("minimal-caller")).expect("caller dir");
+    fs::create_dir_all(tree.join("conformance")).expect("conformance dir");
+    let script = tree.join("minimal-caller/minimal_caller.py");
+    fs::copy(docs.join("minimal-caller/minimal_caller.py"), &script).expect("copy caller");
+    fs::copy(
+        docs.join("conformance/check.py"),
+        tree.join("conformance/check.py"),
+    )
+    .expect("copy decoder");
     // Run it with bytecode writing otherwise allowed; the script itself must
     // switch it off before it imports the decoder.
     let source = fs::read_to_string(&script).expect("read script");
@@ -216,9 +227,9 @@ fn the_minimal_caller_leaves_no_bytecode_in_the_docs_tree() {
         .expect("run caller");
     eprintln!("{}", text(&out));
     assert!(
-        !Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/conformance/__pycache__")
-            .exists()
+        tree.join("conformance/check.py").exists()
+            && !tree.join("conformance/__pycache__").exists(),
+        "the caller wrote bytecode beside the decoder"
     );
 }
 
