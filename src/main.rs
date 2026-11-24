@@ -941,7 +941,7 @@ fn status_text(
         let _ = if spent > *total {
             writeln!(
                 text,
-                "  {name:<16} {total} total, {spent} spent, 0 left: OVER by {} (the ceiling was lowered below what is spent; nothing more can be spent)",
+                "  {name:<16} {total} total, {spent} spent, 0 left: OVER by {} (more is spent than the ceiling allows, for example because the ceiling was lowered after spending; nothing more can be spent)",
                 spent - total
             )
         } else {
@@ -2486,10 +2486,16 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
         }
         Format::Text | Format::Pretty => {
             for w in output.json["warnings"].as_array().into_iter().flatten() {
-                eprintln!(
-                    "hallpass: warning: {}",
-                    safe(w.as_str().unwrap_or_default())
-                );
+                let w = safe(w.as_str().unwrap_or_default());
+                // An evidence report already prints its warnings in its own text.
+                if output
+                    .text
+                    .lines()
+                    .any(|l| l.strip_prefix("Warning: ") == Some(w.as_ref()))
+                {
+                    continue;
+                }
+                eprintln!("hallpass: warning: {w}");
             }
             if output.code == ERROR {
                 eprint!("{}", output.text);

@@ -145,12 +145,14 @@ def _legacy_reply(code, stdout, expected, on_allowed, show_warning):
 
 
 def _run(cases, default_expected, inspect):
+    """Check every case; return how many passed."""
     for case in cases:
         calls, warnings = [], []
         action = inspect(case["exit"], case["stdout"], case.get("expected", default_expected),
                          lambda: calls.append(1), warnings.append)
         if (action, len(calls), warnings) != (case["action"], int(case["action"] == "proceed"), case.get("warnings", [])):
             raise SystemExit("unexpected action for " + case["id"])
+    return len(cases)
 
 
 if __name__ == "__main__":
@@ -158,7 +160,9 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--stdin-cases"]:
         _run(json.load(sys.stdin), None, inspect_reply)
     else:
+        passed = 0
         for name, version, matcher in [("cases-v2.json", 2, _legacy_reply), ("cases.json", 3, inspect_reply)]:
             corpus = json.loads(Path(__file__).with_name(name).read_text())
             assert corpus["version"] == version
-            _run(corpus["cases"], corpus["expected"], matcher)
+            passed += _run(corpus["cases"], corpus["expected"], matcher)
+        print(f"{passed} cases passed")

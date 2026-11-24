@@ -1962,12 +1962,16 @@ fn caller_kit_consumes_genuine_production_decisions() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/conformance/check.py");
     assert!(
         Command::new("python3")
+            .arg("-B")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(&script)
             .status()
             .expect("run offline client corpus")
             .success()
     );
     let mut reference = Command::new("python3")
+        .arg("-B")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(script)
         .arg("--stdin-cases")
         .stdin(Stdio::piped())

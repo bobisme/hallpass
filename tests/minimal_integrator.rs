@@ -53,6 +53,8 @@ fn caller(dir: &Path, to: &str, reference: &str) -> (Option<i32>, String, String
     let home = dir.join("home");
     let output = Command::new("python3")
         .arg("-I")
+        .arg("-B")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(script)
         .args(["--rehearsal", PASSFILE, to, reference])
         .current_dir(dir)

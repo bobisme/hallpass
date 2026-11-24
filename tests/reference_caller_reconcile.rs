@@ -63,6 +63,8 @@ impl Shift {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reference-caller/caller.py");
         let out = Command::new("python3")
             .arg("-I")
+            .arg("-B")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(&script)
             .args(args)
             .current_dir(self.root.path())

@@ -23,8 +23,14 @@ impl std::str::FromStr for NamedTarget {
         let (literal, name) = text
             .split_once('@')
             .map_or((text, None), |(addr, name)| (addr, Some(name)));
+        let target = literal.parse()?;
+        if name == Some("") {
+            return Err(format!(
+                "the name after `@` is empty; drop the `@`, or write the name after it, for example `{literal}@app.example.com`"
+            ));
+        }
         Ok(Self {
-            target: literal.parse()?,
+            target,
             name: name.map(str::parse).transpose()?,
         })
     }

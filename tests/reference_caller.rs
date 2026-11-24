@@ -87,6 +87,8 @@ impl Shift {
         let mut command = Command::new("python3");
         command
             .arg("-I")
+            .arg("-B")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(script)
             .args(args)
             .current_dir(self.dir.path())

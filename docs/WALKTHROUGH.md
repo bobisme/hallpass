@@ -491,7 +491,9 @@ hallpass will not count from zero.
 ```
 
 Leave it like that. The full message also offers `hallpass adopt` for a
-ledger that is "really lost". This ledger is not lost, it moved. An
+ledger that is "really lost", and says that a ledger moved to another
+account on purpose must not be adopted there. This ledger is not lost, it
+moved. An
 adoption on the old account would start a new ledger there that carries only
 bytes 48 and requests 2. That ledger would not see anything the colleague
 spends, so it would be a second budget again. After a move, the old account

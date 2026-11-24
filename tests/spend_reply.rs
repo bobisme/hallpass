@@ -531,6 +531,8 @@ fn the_reference_decoder_accepts_genuine_replies() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/conformance/check.py");
     let mut reference = Command::new("python3")
         .arg("-I")
+        .arg("-B")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(script)
         .arg("--stdin-cases")
         .stdin(Stdio::piped())

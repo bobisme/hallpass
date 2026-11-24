@@ -348,6 +348,8 @@ fn the_reference_caller_sends_again_after_a_moved_ledger_is_adopted() {
         let home = root.path().join(home);
         let out = Command::new("python3")
             .arg("-I")
+            .arg("-B")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(&script)
             .args(args)
             .current_dir(root.path())

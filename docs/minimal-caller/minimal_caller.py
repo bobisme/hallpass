@@ -9,6 +9,7 @@ The work is a print. Replace do_work() with the one unit that sends traffic.
 import json, os, subprocess, sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # keep __pycache__ out of the docs tree
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "conformance"))
 from check import inspect_reply  # the strict decoder INTEGRATING.md requires
 
