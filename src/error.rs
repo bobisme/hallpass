@@ -64,6 +64,19 @@ pub enum Error {
         /// What to check once the mode is fixed, in words, without a full stop.
         advice: &'static str,
     },
+    /// Any user can rename or delete files in the directory that holds the pass.
+    #[error(
+        "{} has mode {mode:04o}: any user can write it and it lacks the sticky bit, so another user can rename or delete the pass, its ledger and its lock file there, or put an older copy of the pass back; run `chmod o-w {}` (or `chmod +t {}` if the directory must stay shared), then check that the pass is the one the owner approved. Nothing was recorded.",
+        path.display(),
+        path.display(),
+        path.display()
+    )]
+    SharedDirectory {
+        /// The directory.
+        path: PathBuf,
+        /// Its permission bits.
+        mode: u32,
+    },
     /// A mutable approval must be controlled by the caller or system administrator.
     #[error("{} is owned by UID {owner}; use an approval owned by effective UID {effective} or root after verifying its content", path.display())]
     UntrustedOwner {
@@ -258,6 +271,7 @@ impl Error {
             Self::NotRegular { .. } => "not-regular-file",
             Self::TooLarge { .. } => "too-large",
             Self::Insecure { .. } => "insecure-permissions",
+            Self::SharedDirectory { .. } => "shared-directory",
             Self::Invalid { .. } => "invalid-pass",
             Self::UntrustedOwner { .. } => "untrusted-owner",
             Self::LedgerCorrupt { .. } => "ledger-corrupt",

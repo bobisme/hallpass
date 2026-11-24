@@ -472,7 +472,9 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
     match error {
         Error::WitnessNotUpdated { .. } => Some("recorded"),
         Error::AppendUncertain { .. } => Some("uncertain"),
-        Error::LockTimeout { .. } | Error::Usage(_) => Some("not-recorded"),
+        Error::LockTimeout { .. } | Error::Usage(_) | Error::SharedDirectory { .. } => {
+            Some("not-recorded")
+        }
         Error::WitnessUnavailable { detail, .. }
             if !detail.contains("was recorded in the ledger") =>
         {
@@ -633,6 +635,7 @@ fn check(file: &Path, clock: &Clock) -> Output {
             warnings.extend(overlaps.iter().map(|w| w.message.clone()));
             let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
             warnings.extend(window.iter().map(|w| w.message.clone()));
+            warnings.extend(hallpass::shared_directory_warning(file));
             Output {
                 code: OK,
                 json: json!({
@@ -1949,7 +1952,7 @@ fn preview_adopt(file: &Path) -> Output {
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,")}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
@@ -2006,7 +2009,7 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
             "carried": a.carried,
             "previous": a.previous.as_ref().map(witnessed_json),
             "totals": outcome.totals,
-            "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,"),
+            "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>(),
         }),
         text,
     }

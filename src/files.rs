@@ -290,6 +290,67 @@ pub fn writable_directory(path: &Path) -> Result<(), Error> {
     .map_err(|e| Error::io(path, &std::io::Error::from(e)))
 }
 
+/// A warning about a shared pass directory.
+///
+/// It fires when the directory that holds the pass (and so its ledger and
+/// lock file) lets other users create, rename or delete entries in it. The
+/// file-mode checks cannot see this: a user who can write the directory can
+/// `rename` a file over the pass, the ledger or the lock without writing to
+/// them. A directory with the sticky bit (like `/tmp`) restricts that to the
+/// owner of the entry, so it raises no warning. Group write counts, as it does
+/// for the pass file, whatever the group's members are.
+///
+/// `None` when the directory is not shared, cannot be inspected, or is
+/// sticky.
+#[must_use]
+pub fn shared_directory_warning(pass: &Path) -> Option<String> {
+    let dir = match pass.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mode = fs::metadata(dir).ok()?.mode();
+    shared_directory_mode_warning(dir, mode)
+}
+
+/// Refuse to append when any user can rename or delete files in the
+/// directory that holds the pass: no write bit for others without the sticky
+/// bit. Another user could put the operator's own older revision of the pass
+/// over the current one, which the owner and mode checks accept.
+pub fn refuse_world_writable_directory(pass: &Path) -> Result<(), Error> {
+    let dir = match pass.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let Ok(meta) = fs::metadata(dir) else {
+        return Ok(());
+    };
+    let mode = meta.mode();
+    if mode & 0o002 != 0 && mode & 0o1000 == 0 {
+        return Err(Error::SharedDirectory {
+            path: dir.to_path_buf(),
+            mode: mode & 0o7777,
+        });
+    }
+    Ok(())
+}
+
+fn shared_directory_mode_warning(dir: &Path, mode: u32) -> Option<String> {
+    if mode & 0o022 == 0 || mode & 0o1000 != 0 {
+        return None;
+    }
+    let who = if mode & 0o002 != 0 {
+        "any user"
+    } else {
+        "users in its group"
+    };
+    Some(format!(
+        "the directory {} (mode {:04o}) holds the pass, its ledger and its lock file, and {who} can rename or delete them there without the sticky bit, which the file-mode checks do not see; run `chmod go-w {}`",
+        dir.display(),
+        mode & 0o7777,
+        dir.display()
+    ))
+}
+
 fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> Result<(), Error> {
     if owner != effective && owner != 0 {
         return Err(Error::UntrustedOwner {

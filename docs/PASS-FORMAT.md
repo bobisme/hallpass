@@ -65,7 +65,7 @@ requests = 500
   `\"` and `\\` are accepted; a single-quoted string has no escapes.
 - **The file** must be UTF-8, at most 1 MiB, a regular file (not a symbolic
   link), owned by the effective user or root, and not writable by group or others (mode 0600 or 0644; `init`
-  writes 0600). Its last line must end with a newline: a last line without
+  writes 0600). The directory that holds it should not be writable by group or others unless it has the sticky bit. If others can write it, `spend`, `adopt` and `reconcile-references` are refused (`chmod o-w DIR`); if only the group can, commands warn. Its last line must end with a newline: a last line without
   one may be a save cut short. `init` writes the newline. A file modified in
   the last quarter second is read twice; see [Changing a
   pass](#changing-a-pass).

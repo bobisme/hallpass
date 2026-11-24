@@ -583,6 +583,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the pass or ledger path is a symbolic link (also if swapped in while opening) | `symlink` |
 | the path is not a regular file | `not-regular-file` |
 | the pass is larger than 1 MiB | `too-large` |
+| `spend` (not `--dry-run`), `adopt` (not `--preview`) or `reconcile-references`, when the directory that holds the pass can be written by others and lacks the sticky bit | `shared-directory` |
 | the pass is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
 | the pass belongs to a user other than the effective user or root | `untrusted-owner` |
 | the pass does not validate (every problem listed), changed while it was read, or does not end with a newline | `invalid-pass` |
@@ -606,7 +607,7 @@ ledger. After `witness-not-updated`, `error.recording` is `recorded` and the
 JSON error contains `seq` and `ledger`. A `ledger-append-uncertain` error
 includes the ledger path and `recording = "uncertain"`. Both exit 1. Inspect
 the ledger and reconcile before retrying. `lock-timeout` and
-`witness-unavailable` have `recording = "not-recorded"`: the attempt appended
+`witness-unavailable` and `shared-directory` have `recording = "not-recorded"`: the attempt appended
 no entry to the ledger. So does every `usage` error, whether clap or hallpass
 found it, because arguments are checked before any write. So does every error
 of a command that never appends to a ledger (for example `ledger`, `check`,
@@ -916,10 +917,35 @@ it was recognized (null otherwise). Help and version requests return their own c
 
 Warnings (no witness yet, a ledger extended past its witness or moved, a
 witness that could not be checked, a debit that checked no destination, a
-decision clock earlier than the latest ledger event, a destination whose
+decision clock earlier than the latest ledger event, a directory holding the pass that group or others can write without the sticky bit (see below), a destination whose
 `names` another destination defeats, declared breadth beyond a comparison
 point) go to standard error as
 `hallpass: warning: ...` in text output, and into `warnings` in JSON.
+
+**Shared directory.** Someone who can write the directory that holds the
+pass, and so its ledger and lock file, can `rename` or delete files there
+without writing to them, which the file-mode checks do not see. This includes
+putting the operator's own older revision of the pass over the current one:
+it has the right owner and mode and the same id, so an unpinned spend would
+run under the older approval. When the directory has a group or other write
+bit and no sticky bit (mode 1000):
+
+- If others can write it (`o+w`), `spend` (not `--dry-run`), `adopt` (not
+  `--preview`) and `reconcile-references` are refused with error
+  `shared-directory` before anything is recorded (`recording =
+  "not-recorded"`). The fix is `chmod o-w DIR`, or `chmod +t DIR` if the
+  directory must stay shared. This is a new refusal (compatibility change).
+- Every other command that reads the pass (`check`, `status`, `ledger`,
+  `permits`, `spend --dry-run`, `adopt --preview`) warns, and so does every
+  command, writing or not, when only the group can write (`chmod go-w DIR`).
+  A group-writable directory is common under `umask 002`, so it is not
+  refused. Group write counts whoever the group's members are, as for a pass
+  file.
+
+A directory with the sticky bit (`/tmp`, mode 1777) raises neither. Only the
+directory that holds the pass is checked, not its parents. The state directory
+is not covered by this rule: it is already refused unless it has no group or
+other bit (`witness-unavailable`, fix `chmod 700`).
 
 `ledger` is read-only. It takes the same shared lock as `status`, verifies
 the whole chain, compares it with the witness, and lists each entry

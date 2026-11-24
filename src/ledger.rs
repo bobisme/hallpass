@@ -1200,7 +1200,8 @@ fn visit_view(
         ),
         Ok(w) => compare(&loaded.path, &path, parsed.as_ref(), w.as_ref(), state, id)?,
     };
-    let warnings = warnings(&witness, moved.as_ref(), id, false);
+    let mut warnings = warnings(&witness, moved.as_ref(), id, false);
+    warnings.extend(crate::files::shared_directory_warning(&loaded.path));
     let exists = parsed.is_some();
     let parsed = parsed.unwrap_or_else(|| Parsed {
         pass_id: id.clone(),
@@ -1650,6 +1651,7 @@ fn lock_for_writing_notifying(
     on_wait: Option<fn(&crate::files::LockWait)>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
+    crate::files::refuse_world_writable_directory(pass_path)?;
     if let Some(token) = guard {
         check_token_shape(token, pass_path)?;
     }
@@ -2132,6 +2134,7 @@ fn prepare_witness(
         // new, not because it came from somewhere else.
         warnings.clear();
     }
+    warnings.extend(crate::files::shared_directory_warning(pass_path));
     if !preserve_unanchored && (status != WitnessStatus::Matches || moved.is_some()) {
         state.write(
             id,

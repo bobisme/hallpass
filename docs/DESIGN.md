@@ -360,6 +360,25 @@ witness catches them.
   pass replaced by `mv` meanwhile is read as it was when it was opened.
   The status-change time is not used: `chmod` and `mv` change it without
   changing the bytes.
+- The directory that holds the pass, the ledger and the lock is checked
+  for write by group or others without the sticky bit, because the file
+  modes do not stop a `rename` into such a directory. The attack that
+  matters is not a stranger's file, which the owner check refuses: it is
+  the operator's own older revision (`eng.pass.toml.old`, a backup, an
+  archived copy) moved over the current pass by another user. It has the
+  right owner, mode 0600 and the same id, and the ledger beside it matches,
+  so an unpinned spend would run under an older, wider approval. The same
+  user can unlink the pass and ledger or take the lock file. So a directory
+  that any user can write, without the sticky bit, fails closed: `spend`,
+  `adopt` and `reconcile-references` are refused (`shared-directory`, fix
+  `chmod o-w DIR` or `chmod +t DIR`) and the read-only commands warn. This
+  is a compatibility change. A directory only the group can write is a
+  warning, not a refusal: team directories under umask 002 are common, and
+  the group is usually the team. Group write is warned about whatever the
+  group's members, as for the pass file, because a group of one cannot be
+  told from a larger one cheaply. The state directory is held to a stricter
+  rule: it is refused unless mode 0700 (see The witness). Parent
+  directories are not checked.
 - A pass whose last byte is not a newline is refused. A cut inside a line
   can still parse and change the approval (`ports = 443` read as
   `ports = 44`). TOML does not require the newline, so a pass saved by an
