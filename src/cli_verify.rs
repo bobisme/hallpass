@@ -1,8 +1,14 @@
 //! Verify a detached approval signature using the installed OpenSSH verifier,
 //! for `verify-approval` and for the audits' `--allowed-signers`.
+use std::cell::Cell;
+use std::collections::hash_map::RandomState;
+use std::fs::{DirBuilder, OpenOptions};
+use std::hash::{BuildHasher as _, Hasher as _};
 use std::io::{self, Read as _, Write as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{OK, Output, REFUSED, error_output, quoted, safe};
 use hallpass::evidence::{Recheck, Reverify, SignatureToCheck};
@@ -32,8 +38,7 @@ fn input_path(path: &Path) -> Result<PathBuf, Error> {
     Ok(full)
 }
 
-/// The bytes of a signature or trust file, read once through the same path
-/// that the verifier is given.
+/// The bytes of a signature or trust file, read once.
 fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
     let full = input_path(path)?;
     let io = |e: &io::Error| Error::Io {
@@ -52,8 +57,9 @@ fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-/// The signature and trust file as they were before and after verification.
-/// A change in between means the record could name bytes ssh-keygen never saw.
+/// The signature and trust file, read once. The verifier gets copies of
+/// these bytes, so what `--archive` records is exactly what it verified, even
+/// if a file changes on disk meanwhile.
 struct Inputs {
     signature: Vec<u8>,
     trust: Vec<u8>,
@@ -66,32 +72,131 @@ impl Inputs {
             trust: read_input(trust, MAX_TRUST_BYTES)?,
         })
     }
+
+    fn verify(&self, bytes: &[u8], principal: &str) -> Result<Result<(), Why>, Error> {
+        Verifier::new(&self.trust)?.verify(bytes, &self.signature, principal)
+    }
 }
 
 /// Retain the verified bytes and the signature that verified over them.
 fn retain(
     bytes: &[u8],
-    before: &Inputs,
-    signature: &Path,
-    trust: &Path,
+    inputs: &Inputs,
     principal: &str,
     directory: &Path,
 ) -> Result<(Digest, ArchivedSignature), Error> {
-    let after = Inputs::read(signature, trust)?;
-    if after.signature != before.signature || after.trust != before.trust {
-        return Err(Error::Usage(
-            "the signature or trusted signers file changed while it was verified; nothing was recorded for it. Run verify-approval again".into(),
-        ));
-    }
     let digest = hallpass::archive_pass_bytes(bytes, directory)?;
     let record = hallpass::archive_verified_signature(
         directory,
         digest,
-        &before.signature,
+        &inputs.signature,
         principal,
-        Digest::of(&before.trust),
+        Digest::of(&inputs.trust),
     )?;
     Ok((digest, record))
+}
+
+/// A private (0700) temporary directory for the verifier's input files,
+/// removed when dropped. Each file in it is written from bytes hallpass has
+/// already read, so ssh-keygen reads exactly those bytes, whatever happens
+/// to the original files meanwhile.
+struct Scratch {
+    dir: PathBuf,
+    files: Cell<u64>,
+}
+
+impl Scratch {
+    fn new() -> Result<Self, Error> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir();
+        let failed = |path: &Path, e: &io::Error| Error::Io {
+            path: path.to_owned(),
+            message: format!(
+                "cannot create a private temporary directory for the signature verifier ({e}); set TMPDIR to a directory this user can write"
+            ),
+        };
+        // An absolute name also keeps a TMPDIR that starts with "-" from
+        // reading as an option to ssh-keygen.
+        let base = std::path::absolute(&base).map_err(|e| failed(&base, &e))?;
+        for _ in 0..100 {
+            // A random part keeps another user from taking every name in
+            // advance in a shared TMPDIR, which would stop verification.
+            let random = RandomState::new().build_hasher().finish();
+            let dir = base.join(format!(
+                "hallpass-verify-{}-{}-{random:016x}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            // A new directory only: one left by another process is skipped.
+            match DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {
+                    return Ok(Self {
+                        dir,
+                        files: Cell::new(0),
+                    });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => (),
+                Err(e) => return Err(failed(&dir, &e)),
+            }
+        }
+        Err(failed(
+            &base,
+            &io::Error::from(io::ErrorKind::AlreadyExists),
+        ))
+    }
+
+    /// A new private file in the directory, holding `bytes`.
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, Error> {
+        let n = self.files.get();
+        self.files.set(n + 1);
+        let path = self.dir.join(format!("{name}-{n}"));
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| file.write_all(bytes))
+            .map_err(|e| Error::Io {
+                path: path.clone(),
+                message: format!("writing the signature verifier's input: {e}"),
+            })?;
+        Ok(path)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// `ssh-keygen -Y verify` with a trusted signers file given as bytes.
+struct Verifier {
+    scratch: Scratch,
+    trust: PathBuf,
+}
+
+impl Verifier {
+    fn new(trust: &[u8]) -> Result<Self, Error> {
+        let scratch = Scratch::new()?;
+        let trust = scratch.write("allowed_signers", trust)?;
+        Ok(Self { scratch, trust })
+    }
+
+    /// Verify `signature` over `bytes` for `principal`. ssh-keygen reads
+    /// `bytes` on its standard input and a copy of `signature` from the
+    /// private directory.
+    fn verify(
+        &self,
+        bytes: &[u8],
+        signature: &[u8],
+        principal: &str,
+    ) -> Result<Result<(), Why>, Error> {
+        let signature = self.scratch.write("signature", signature)?;
+        let verdict = verified(bytes, &signature, &self.trust, principal);
+        let _ = std::fs::remove_file(&signature);
+        verdict
+    }
 }
 
 /// Why a signature did not verify, as far as ssh-keygen's output shows.
@@ -197,8 +302,8 @@ pub struct SignatureArgs {
 impl SignatureArgs {
     /// Run `audit`, verifying every recorded signature again when
     /// `--allowed-signers` was given. The trusted signers file is read once
-    /// here, and again after each verification; a change between those reads
-    /// is an error.
+    /// here: the verifier gets a copy of those bytes, and the audit reports
+    /// their digest.
     pub fn reverifying<T>(
         &self,
         audit: impl FnOnce(Option<Reverify<'_>>) -> Result<T, Error>,
@@ -212,20 +317,20 @@ impl SignatureArgs {
                 "provide a nonblank single-line signer principal".into(),
             ));
         }
-        let trust = input_path(trust)?;
-        let before = read_input(&trust, MAX_TRUST_BYTES)?;
+        let trust = read_input(trust, MAX_TRUST_BYTES)?;
+        // Made at the first recorded signature, so that an audit with none
+        // needs no temporary directory.
+        let mut verifier: Option<Verifier> = None;
         let mut check = |signed: &SignatureToCheck<'_>| {
-            let verdict = verified(signed.bytes, signed.signature, &trust, signed.principal)?;
-            if read_input(&trust, MAX_TRUST_BYTES)? != before {
-                return Err(Error::Usage(
-                    "the trusted signers file changed while the audit used it; run the audit again"
-                        .into(),
-                ));
-            }
+            let verifier = match &mut verifier {
+                Some(verifier) => verifier,
+                None => verifier.insert(Verifier::new(&trust)?),
+            };
+            let verdict = verifier.verify(signed.bytes, signed.signature, signed.principal)?;
             Ok(verdict.map_or_else(|why| Recheck::Rejected(why.code()), |()| Recheck::Verified))
         };
         audit(Some(Reverify {
-            allowed_signers: Digest::of(&before),
+            allowed_signers: Digest::of(&trust),
             principal,
             check: &mut check,
         }))
@@ -248,12 +353,6 @@ fn classify(stderr: &str, signature: &Path, trust: &Path, principal: &str) -> Wh
     {
         return Why::Malformed;
     }
-    let Ok(trust) = input_path(trust) else {
-        return Why::Unknown;
-    };
-    let Ok(signature) = input_path(signature) else {
-        return Why::Unknown;
-    };
     let found = Command::new("ssh-keygen")
         .args(["-Y", "find-principals", "-f"])
         .arg(trust)
@@ -276,6 +375,8 @@ fn classify(stderr: &str, signature: &Path, trust: &Path, principal: &str) -> Wh
     }
 }
 
+/// Run ssh-keygen over `bytes`, with the signature and trusted signers files
+/// that a [`Verifier`] wrote.
 fn verified(
     bytes: &[u8],
     signature: &Path,
@@ -291,9 +392,9 @@ fn verified(
     verifier
         .args(["-Y", "verify", "-n", NAMESPACE, "-I", principal])
         .arg("-f")
-        .arg(input_path(trust)?)
+        .arg(trust)
         .arg("-s")
-        .arg(input_path(signature)?)
+        .arg(signature)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -360,21 +461,20 @@ pub fn verify_approval(
         Ok(value) => value,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
-    // With --archive, read the inputs before ssh-keygen does, to record them.
-    let before = match archive.map(|_| Inputs::read(signature, trust)).transpose() {
+    // Read the inputs once: ssh-keygen verifies copies of these bytes, and
+    // --archive records them.
+    let inputs = match Inputs::read(signature, trust) {
         Ok(inputs) => inputs,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
-    match verified(&bytes, signature, trust, principal) {
+    match inputs.verify(&bytes, principal) {
         Ok(Ok(())) => {
-            let (digest, record) = match (archive, &before) {
-                (Some(directory), Some(before)) => {
-                    match retain(&bytes, before, signature, trust, principal, directory) {
-                        Ok((digest, record)) => (digest, Some(record)),
-                        Err(e) => return error_output("verify-approval", Some(path), &e),
-                    }
-                }
-                _ => (loaded.digest, None),
+            let (digest, record) = match archive {
+                Some(directory) => match retain(&bytes, &inputs, principal, directory) {
+                    Ok((digest, record)) => (digest, Some(record)),
+                    Err(e) => return error_output("verify-approval", Some(path), &e),
+                },
+                None => (loaded.digest, None),
             };
             let mut warnings = Vec::new();
             if let Some(ArchivedSignature::KeptEarlier(kept)) = &record {

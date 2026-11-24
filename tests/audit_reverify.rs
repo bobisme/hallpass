@@ -698,7 +698,7 @@ fn reverification_needs_a_usable_ssh_keygen_and_a_readable_trust_file() {
 }
 
 #[test]
-fn a_trust_file_that_changes_during_reverification_is_an_error() {
+fn a_trust_file_that_changes_during_reverification_does_not_change_the_result() {
     if !have_ssh_keygen() {
         return;
     }
@@ -707,17 +707,20 @@ fn a_trust_file_that_changes_during_reverification_is_an_error() {
     env.write("p.toml", &pass());
     env.sign_and_record("owner", "p.toml");
     env.spend();
+    let trust = Digest::of(&fs::read(env.path("trust")).expect("trust")).to_string();
     let real = Command::new("sh")
         .args(["-c", "command -v ssh-keygen"])
         .output()
         .expect("find ssh-keygen");
     let real = String::from_utf8(real.stdout).expect("path");
+    // The file given trusts no key by the time ssh-keygen runs. ssh-keygen
+    // reads a copy of the bytes the audit read first (bn-3c4).
     env.shim(&format!(
-        "#!/bin/sh\nprintf '# edited\\n' >> '{}'\nexec '{}' \"$@\"\n",
+        "#!/bin/sh\nprintf '# trusts no key\\n' > '{}'\nexec '{}' \"$@\"\n",
         env.path("trust").display(),
         real.trim()
     ));
-    let reply = env.json(
+    let audit = env.json(
         &[
             "audit-charges",
             "p.toml",
@@ -725,11 +728,13 @@ fn a_trust_file_that_changes_during_reverification_is_an_error() {
             "--allowed-signers",
             "trust",
         ],
-        1,
+        0,
     );
-    assert!(
-        text_of(&reply["error"]["message"]).contains("changed while the audit used it"),
-        "{reply}"
+    assert_eq!(audit["result"], "complete", "{audit}");
+    assert_eq!(audit["signatures"]["allowed_signers"], trust.as_str());
+    assert_eq!(
+        fs::read(env.path("trust")).expect("trust"),
+        b"# trusts no key\n"
     );
 }
 
@@ -794,10 +799,7 @@ fn each_digest_is_verified_once_for_the_principal_required() {
         seen.borrow_mut().clear();
         let mut check = |s: &SignatureToCheck<'_>| {
             assert_eq!(Digest::of(s.bytes), s.digest);
-            assert_eq!(
-                fs::read(s.signature).map(|b| Digest::of(&b)).ok(),
-                Some(s.approval.signature)
-            );
+            assert_eq!(Digest::of(s.signature), s.approval.signature);
             seen.borrow_mut().push((s.digest, s.principal.to_owned()));
             Ok(Recheck::Verified)
         };
@@ -864,25 +866,30 @@ fn a_rejection_is_a_gap_and_a_verifier_error_ends_the_audit() {
 }
 
 #[test]
-fn a_signature_that_changes_while_it_is_verified_is_an_error() {
+fn a_signature_replaced_while_it_is_verified_does_not_change_the_result() {
+    // The verifier gets the signature the audit read with the record, not
+    // the file (bn-3c4). A later change to the file is not what it verifies,
+    // and not an error of this audit either.
     let lib = Library::new();
     let mut swap = |s: &SignatureToCheck<'_>| {
-        fs::remove_file(s.signature).expect("remove");
-        fs::write(s.signature, b"another signature").expect("swap");
-        fs::set_permissions(s.signature, fs::Permissions::from_mode(0o600)).expect("private");
+        let path = lib.env.archive_file(&s.digest.to_string(), ".sig");
+        fs::remove_file(&path).expect("remove");
+        fs::write(&path, b"another signature").expect("swap");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private");
+        assert_eq!(Digest::of(s.signature), s.approval.signature);
         Ok(Recheck::Verified)
     };
-    let error = lib
+    let audit = lib
         .charges(Some(Reverify {
             allowed_signers: Digest::of(b"auditor"),
             principal: None,
             check: &mut swap,
         }))
-        .expect_err("changed");
-    assert!(
-        error.to_string().contains("changed while it was verified"),
-        "{error}"
-    );
+        .expect("audit");
+    assert_eq!(audit.result, "complete");
+    // The next audit reads the replaced files, and refuses them.
+    let error = lib.charges(None).expect_err("damaged");
+    assert!(error.to_string().contains("damaged"), "{error}");
 }
 
 #[test]

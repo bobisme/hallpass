@@ -63,11 +63,11 @@ pub fn audit_charges(
 
 /// [`audit_charges`], verifying every recorded signature again with
 /// `reverify` when it is given, as
-/// [`audit_receipts_with`](super::evidence::audit_receipts_with) does.
+/// [`audit_receipts_with`](super::evidence::audit_receipts_with) does:
+/// after the ledger lock is released, over the bytes read under it.
 ///
 /// # Errors
-/// As [`audit_charges`], and any error of `reverify.check`, or a signature
-/// or record that changed while it was verified.
+/// As [`audit_charges`], and any error of `reverify.check`.
 pub fn audit_charges_with(
     loaded: &LoadedPass,
     state: &StateDir,
@@ -106,7 +106,7 @@ pub fn audit_charges_with(
             ),
         };
         debits += 1;
-        revisions.note(digest, seq, &mut gaps)?;
+        revisions.note(digest, seq)?;
         if cache.as_ref().is_none_or(|(key, _)| *key != digest) {
             cache = Some((
                 digest,
@@ -137,7 +137,8 @@ pub fn audit_charges_with(
         }
         Ok(())
     })?;
-    let (revisions, signatures) = revisions.report();
+    // The ledger lock is released: verify the signatures now.
+    let (revisions, signatures) = revisions.finish(&mut gaps)?.report();
     // `complete` needs a signature this audit verified over every revision used.
     let result = if mismatches.count > 0 {
         "mismatch"

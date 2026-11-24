@@ -2264,19 +2264,22 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
     }
 }
 
+/// The commands that read the clock, and so honour the test clock. The
+/// "Test clock" section of `docs/spec.md` lists the same names, which
+/// `tests/doc_lists.rs` checks: keep each name on a line of its own.
+const CLOCK_COMMANDS: &[&str] = &[
+    "status",
+    "check",
+    "permits",
+    "spend",
+    "capacity",
+    "adopt",
+    "reconcile-references",
+    "lint",
+];
+
 fn command_clock(command: &Command) -> Result<Clock, Error> {
-    let needs_clock = matches!(
-        command,
-        Command::Status { .. }
-            | Command::Check { .. }
-            | Command::Permits { .. }
-            | Command::Spend { .. }
-            | Command::Capacity(_)
-            | Command::Adopt { .. }
-            | Command::ReconcileReferences { .. }
-            | Command::Lint { .. }
-    );
-    if needs_clock {
+    if CLOCK_COMMANDS.contains(&command.name()) {
         clock()
     } else {
         Ok(Clock {

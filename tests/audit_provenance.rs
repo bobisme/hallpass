@@ -398,7 +398,7 @@ fn a_signature_record_is_never_replaced_or_downgraded() {
 }
 
 #[test]
-fn verify_approval_records_nothing_when_its_inputs_change_during_verification() {
+fn verify_approval_records_the_inputs_it_verified_when_they_change_during_verification() {
     if !have_ssh_keygen() {
         return;
     }
@@ -406,6 +406,8 @@ fn verify_approval_records_nothing_when_its_inputs_change_during_verification() 
     env.owner("owner", OWNER, "trust");
     env.write("p.toml", &pass());
     env.sign("owner", "p.toml");
+    let trust = Digest::of(&fs::read(env.path("trust")).expect("trust"));
+    let signature = Digest::of(&fs::read(env.path("p.toml.sig")).expect("signature"));
     let real = Command::new("sh")
         .args(["-c", "command -v ssh-keygen"])
         .output()
@@ -443,13 +445,17 @@ fn verify_approval_records_nothing_when_its_inputs_change_during_verification() 
         ])
         .output()
         .expect("verify");
+    // ssh-keygen verified copies of the bytes read before the edit (bn-3c4),
+    // so the record names those bytes.
     let reply: Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert_eq!(out.status.code(), Some(1), "{reply}");
-    assert!(
-        text_of(&reply["error"]["message"]).contains("changed while it was verified"),
-        "{reply}"
+    assert_eq!(out.status.code(), Some(0), "{reply}");
+    assert_eq!(reply["approval"]["allowed_signers"], trust.to_string());
+    assert_eq!(reply["approval"]["signature"], signature.to_string());
+    assert_ne!(
+        Digest::of(&fs::read(env.path("trust")).expect("trust")),
+        trust
     );
-    assert_eq!(fs::read_dir(env.path("arch")).expect("archive").count(), 0);
+    assert_eq!(fs::read_dir(env.path("arch")).expect("archive").count(), 3);
 }
 
 #[test]

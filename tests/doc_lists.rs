@@ -1,11 +1,13 @@
 //! Keeps the reference lists of `docs/spec.md` in step with the code: the
-//! refusal codes, the error codes, the command table and the JSON fields.
+//! refusal codes, the error codes, the command table, the JSON fields and
+//! the commands that honour the test clock.
 //!
 //! The codes are read from the `match` in `RefusalCode::as_str` and in
 //! `Error::code`. Both matches are exhaustive, so the compiler keeps them
 //! complete, and a new code fails this test until the spec lists it. The
-//! commands come from `hallpass help --format json`, and the JSON fields
-//! from real replies.
+//! commands come from `hallpass help --format json`, the JSON fields from
+//! real replies, and the test-clock commands from `CLOCK_COMMANDS` in
+//! `src/main.rs`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -15,6 +17,7 @@ use hallpass::{Error, RefusalCode};
 const SPEC: &str = include_str!("../docs/spec.md");
 const DECISION_RS: &str = include_str!("../src/decision.rs");
 const ERROR_RS: &str = include_str!("../src/error.rs");
+const MAIN_RS: &str = include_str!("../src/main.rs");
 
 /// The text of the spec without its fenced code blocks.
 fn prose(text: &str) -> String {
@@ -143,6 +146,45 @@ fn error_codes() -> BTreeSet<String> {
     codes
 }
 
+/// The names in `CLOCK_COMMANDS`, the commands `command_clock` gives the
+/// clock to.
+fn clock_commands() -> BTreeSet<String> {
+    let start = MAIN_RS
+        .find("const CLOCK_COMMANDS: &[&str] = &[\n")
+        .expect("`CLOCK_COMMANDS` in src/main.rs");
+    let body = &MAIN_RS[start..];
+    let lines: Vec<&str> = body[..body.find("];").expect("end of the list")]
+        .lines()
+        .skip(1)
+        .collect();
+    let names: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        names.len(),
+        lines.len(),
+        "keep each name of `CLOCK_COMMANDS` on a line of its own: {lines:?}"
+    );
+    names
+}
+
+#[test]
+fn command_clock_gives_the_clock_to_the_listed_commands_only() {
+    let names = clock_commands();
+    assert!(names.contains("spend"), "{names:?}");
+    let start = MAIN_RS
+        .find("fn command_clock(")
+        .expect("`command_clock` in src/main.rs");
+    let body = &MAIN_RS[start..];
+    let body = &body[..body.find("\n}\n").expect("end of the function")];
+    assert!(
+        body.contains("CLOCK_COMMANDS.contains(&command.name())"),
+        "`command_clock` decides by `CLOCK_COMMANDS`: {body}"
+    );
+}
+
 #[test]
 fn the_spec_lists_every_refusal_code_and_no_other() {
     let codes = refusal_codes();
@@ -180,7 +222,7 @@ mod cli {
 
     use serde_json::Value;
 
-    use super::{code_words, section};
+    use super::{clock_commands, code_words, section};
 
     /// A pass with a named destination that a nameless one overlaps, so that
     /// `check` and `status` report a name-restriction overlap.
@@ -260,6 +302,27 @@ bytes = 100
         assert_eq!(
             table, commands,
             "the command table of docs/spec.md differs from `hallpass help`"
+        );
+    }
+
+    #[test]
+    fn the_test_clock_lists_every_command_that_reads_the_clock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let commands = commands(dir.path());
+        let clock = clock_commands();
+        for name in &clock {
+            assert!(
+                commands.contains(name),
+                "`CLOCK_COMMANDS` names {name}, which is not a command"
+            );
+        }
+        let listed: BTreeSet<String> = code_words(&section("### Test clock"))
+            .into_iter()
+            .filter(|word| commands.contains(word))
+            .collect();
+        assert_eq!(
+            listed, clock,
+            "the \"Test clock\" section of docs/spec.md differs from `CLOCK_COMMANDS`"
         );
     }
 

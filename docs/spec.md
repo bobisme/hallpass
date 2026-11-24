@@ -873,8 +873,10 @@ audits report every revision the ledger used with its provenance. With
 `ssh-keygen -Y verify` again over each recorded revision's archived bytes and
 signature with FILE, and report it `signature-verified` or
 `signature-rejected`. They are `complete` only when every revision used is
-`signature-verified`, so never without `--allowed-signers`.
-[EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
+`signature-verified`, so never without `--allowed-signers`. They run
+`ssh-keygen` after they release the ledger lock, over copies of the bytes
+they read under it. [EVIDENCE.md](EVIDENCE.md) gives their results, exit
+codes and fields.
 
 ## Command line
 
@@ -1215,9 +1217,9 @@ included). The whole-second rule above is about window times only.
 ### Test clock
 
 `HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` replaces "now" for `status`,
-`permits`, `spend`, `capacity`, `adopt`, `reconcile-references` and `lint`,
-only in debug builds and
-builds with the `test-clock` feature. When used, a warning goes to standard
+`check`, `permits`, `spend`, `capacity`, `adopt`, `reconcile-references` and
+`lint`, the commands that read the clock, only in debug builds and builds
+with the `test-clock` feature. When used, a warning goes to standard
 error and `test_clock` is `true`. Release builds ignore it and say so on
 standard error.
 
@@ -1252,6 +1254,8 @@ Crate `hallpass` (re-exports `time`):
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |
 | `archive_provenance` (`Provenance`, `SignedApproval`), `archive_verified_signature` (`ArchivedSignature`), `APPROVAL_NAMESPACE`, `MAX_SIGNATURE_BYTES` | signature records beside archived bytes; recording one does not verify anything |
 | modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |
+| `evidence::audit_receipts`, `evidence::audit_charges` (`ReceiptAudit`, `ChargeAudit`) | replay the ledger against the archived revisions; signature records are read, not verified again, so the result is never `complete` |
+| `evidence::audit_receipts_with`, `evidence::audit_charges_with`, `Reverify { allowed_signers, principal, check }`, `SignatureToCheck`, `Recheck`, `SignatureCheck` | the same audits, verifying each recorded signature again. `check` runs once per digest, after the ledger lock is released, and gets a `SignatureToCheck { digest, bytes, signature, approval, principal }` with the archived bytes and signature as read under the lock (bytes, not paths). It returns `Recheck::Verified` or `Recheck::Rejected(reason)`; an error ends the audit. Without a `Reverify` an audit is never `complete`. `SignatureCheck` (the reply's `signatures`) says whether the audit verified again, and against which `allowed_signers` digest |
 | `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `display_quoted(text) -> String` | operator text as one double-quoted value, each character escaped once |

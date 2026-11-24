@@ -73,7 +73,7 @@ fn destination(dir: &Path, digest: Digest) -> PathBuf {
 }
 
 /// Where the archive keeps the detached signature of `digest` (`DIGEST.sig`).
-pub fn signature_path(dir: &Path, digest: Digest) -> PathBuf {
+fn signature_path(dir: &Path, digest: Digest) -> PathBuf {
     dir.join(format!("{digest}.sig"))
 }
 
@@ -318,14 +318,43 @@ fn damaged_record(path: &Path, why: &str) -> Error {
 /// If the directory, the bytes, the record or the signature file is unusable,
 /// insecure or damaged.
 pub fn archive_provenance(dir: &Path, digest: Digest) -> Result<Provenance, Error> {
+    Ok(match read_revision(dir, digest)? {
+        None => Provenance::Missing,
+        Some(ArchivedRevision { signed: None, .. }) => Provenance::Unsigned,
+        Some(ArchivedRevision {
+            signed: Some((approval, _)),
+            ..
+        }) => Provenance::SignatureRecorded(approval),
+    })
+}
+
+/// One archived revision, as one read of the archive found it.
+pub struct ArchivedRevision {
+    /// The exact bytes, checked against their digest.
+    pub bytes: Vec<u8>,
+    /// The signature record and the bytes of the `.sig` file beside it,
+    /// checked against the record's `signature` digest. None without a record.
+    pub signed: Option<(SignedApproval, Vec<u8>)>,
+}
+
+/// Read the archived revision `digest` once: its bytes, and its signature
+/// record with the signature the record names. None when the archive does
+/// not hold the bytes. The audits verify these bytes again, not the files.
+///
+/// # Errors
+/// As [`archive_provenance`].
+pub fn read_revision(dir: &Path, digest: Digest) -> Result<Option<ArchivedRevision>, Error> {
     let _directory_file = directory(dir)?;
     if !present(&destination(dir, digest))? {
-        return Ok(Provenance::Missing);
+        return Ok(None);
     }
-    retrieve_pass(dir, digest)?;
+    let bytes = retrieve_pass(dir, digest)?;
     let path = record_path(dir, digest);
     if !present(&path)? {
-        return Ok(Provenance::Unsigned);
+        return Ok(Some(ArchivedRevision {
+            bytes,
+            signed: None,
+        }));
     }
     let advice = "check that verify-approval wrote this signature record";
     let raw = read_private(&path, MAX_SIGNATURE_BYTES, advice)?;
@@ -363,7 +392,10 @@ pub fn archive_provenance(dir: &Path, digest: Digest) -> Result<Provenance, Erro
             "the .sig file beside it is not the signature it records",
         ));
     }
-    Ok(Provenance::SignatureRecorded(approval))
+    Ok(Some(ArchivedRevision {
+        bytes,
+        signed: Some((approval, signature)),
+    }))
 }
 
 /// What [`archive_verified_signature`] left in the archive.

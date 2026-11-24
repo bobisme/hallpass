@@ -286,7 +286,15 @@ witness catches them.
   that order, so they cannot deadlock. The witness lock serializes writers
   of the same id across different ledgers (copies), which the ledger lock
   alone cannot. Readers take only a shared ledger lock and read the
-  witness, which is replaced atomically by rename.
+  witness, which is replaced atomically by rename. A reader holds the lock
+  only while it reads. The audits with `--allowed-signers` read each signed
+  revision's archived bytes, record and signature into memory under the
+  lock (a pass is at most 1 MiB, a signature at most 64 KiB), release it,
+  and only then run `ssh-keygen`, once per digest. Before, they ran it under
+  the lock, so every spend on the pass waited for it. `ssh-keygen` gets
+  copies of those bytes and of the trusted signers file, read once, in a
+  private temporary directory, so it verifies exactly what the audit read
+  and reports; a file swapped out and back meanwhile changes nothing.
 - **A ledger without a witness** (a pass brought from another machine or
   user, or a ledger from 0.1) is accepted with a warning, and `spend`
   records a witness for it, even when the spend is then refused. Refusing
@@ -399,10 +407,11 @@ witness catches them.
 
 ## The test clock
 
-`HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` sets "now" for `status`, `permits`
-and `spend`. It is honoured only by debug builds (`cargo build`, `cargo
-test`) and by builds with the `test-clock` feature; a release build prints
-that it ignores the variable and uses the real clock. When it is honoured,
+`HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` sets "now" for the commands that
+read the clock, which [spec.md](spec.md#test-clock) lists. It is honoured
+only by debug builds (`cargo build`, `cargo test`) and by builds with the
+`test-clock` feature; a release build prints that it ignores the variable
+and uses the real clock. When it is honoured,
 every command prints a warning on standard error and the JSON output says
 `"test_clock": true`. The name says what it is, so nobody sets it by
 accident. To run the integration tests against a release build use

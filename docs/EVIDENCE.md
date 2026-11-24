@@ -1,6 +1,6 @@
 # Reading accounting evidence
 
-These commands read local files under shared ledger locks. They produce historical evidence. Sending a unit of work still requires the caller's normal authorization and accounting decision.
+These commands read local files under shared ledger locks. They produce historical evidence. Sending a unit of work still requires the caller's normal authorization and accounting decision. The audits release the lock before they verify signatures, so a spend never waits for `ssh-keygen`.
 
 ## Reconcile a lost spend response
 
@@ -169,23 +169,35 @@ re-verification (`signature-rejected`). `corroborated` counts every kind;
 read each detail's `provenance`.
 
 With `--allowed-signers`, each digest is verified once, however many lines
-used it. The audit reads FILE before the first verification and again after
-each one, and reads the signature and its record again after each one; a
-change between those reads is an error (exit 1). A missing or unreadable FILE
-is an error. So is an `ssh-keygen` that cannot run, or that prints its usage
-instead of verifying, when a revision has a record to verify: an unusable
-verifier is never a pass.
+used it. The audit reads the ledger under the shared ledger lock, and with it
+the archived bytes of each revision used, its record and the `.sig` file the
+record names, checked against each other. It keeps these bytes in memory and
+releases the lock. Then it runs `ssh-keygen`, so spends on the pass do not
+wait for it. The audit reads FILE once, before it reads the ledger.
+`ssh-keygen` reads the archived bytes on standard input, and copies of the
+signature and of FILE from a private (0700) temporary directory, which the
+audit writes from the bytes it read and removes afterwards. So `ssh-keygen`
+verifies exactly the bytes that the audit reports, against the FILE whose
+digest `signatures.allowed_signers` gives, even if a file changes on disk
+meanwhile. The result describes the archive and FILE as the audit read them.
+A missing or unreadable FILE is an error (exit 1). So is a temporary
+directory that cannot be created (set `TMPDIR` to a directory you can
+write), and an `ssh-keygen` that cannot run, or that prints its usage instead
+of verifying, when a revision has a record to verify: an unusable verifier
+is never a pass.
 
 ### Revisions and their provenance
 
 `archive` stores the exact pass bytes and nothing else.
 `verify-approval --archive` stores them only after `ssh-keygen -Y verify`
-accepted the owner's signature over exactly those bytes, and keeps two files
-beside them: `DIGEST.sig`, the signature, and `DIGEST.approval`, one JSON line
-with `version`, `digest`, `namespace`, `principal`, `allowed_signers` (the
-digest of the trusted signers file it verified against) and `signature` (the
-digest of `DIGEST.sig`). Every archive file is created once and never
-replaced. Each digest has one provenance:
+accepted the owner's signature over exactly those bytes. It reads the
+signature and the trusted signers file once, and `ssh-keygen` verifies
+private copies of those bytes, so what it records is what was verified. It
+keeps two files beside the bytes: `DIGEST.sig`, the signature, and
+`DIGEST.approval`, one JSON line with `version`, `digest`, `namespace`,
+`principal`, `allowed_signers` (the digest of the trusted signers file it
+verified against) and `signature` (the digest of `DIGEST.sig`). Every archive
+file is created once and never replaced. Each digest has one provenance:
 
 | `provenance` | Meaning |
 | --- | --- |
