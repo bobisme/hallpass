@@ -201,18 +201,33 @@ exit 0
 
 Every call (`permits`, `status`, `spend`, a preview) verifies the whole ledger
 before it answers, so a call costs more as the ledger grows: about 1.2 ms per
-MB, plus about 0.7 ms to start the process. Spends on one pass also run one at
-a time, so more workers do not add throughput. The numbers are in
-[DESIGN.md, Cost per call](DESIGN.md#cost-per-call). Eight writers, for
-example, fell from about 2,400 spends a second on a small ledger to about 44
-a second at 42,000 lines.
+MB, plus about 0.7 ms to start the process. A read-only call on a small ledger
+takes about 0.7 ms.
 
-- **One spend per unit is fine** when units are not frequent (a few a second
-  at most) and the pass will hold fewer than about 10,000 lines for the
-  engagement: each call takes a few milliseconds. This is what the reference
-  caller does.
-- **Batch** when units are small and many, or when the ledger would pass about
-  100,000 lines or 50 MB. Spend once for a group: `--n 50`, or a larger
+A spend also appends one line and syncs it to disk (fsync), and the sync
+dominates. On the ext4 NVMe home disk (not tmpfs), a CLI spend on a small
+ledger took about 15 ms (14 to 16 ms in three runs; 25 to 30 ms while the
+disk was busy). So one process does about 60 spends a second at best (62 to
+66 in three runs), and 35 to 40 on a busy disk. Spends on one pass also run
+one at a time, so more workers do not add throughput: 8 writers on a small
+ledger did 62 to 71 spends a second, and on ext4 they got slower as the
+ledger grew, to 40 to 51 a second at 10,000 lines and 12 to 13 at 100,000
+lines. Each of the 8 waits for the other seven, so a spend takes about 8
+times as long (p50 about 110 ms on a small ledger, about 0.6 s at 100,000
+lines). Figures measured on tmpfs, which has no real sync, are much higher
+(about 2,400 spends a second for 8 writers on a small ledger) and are not
+what a real disk gives. All the numbers, with the setup, are in
+[DESIGN.md, Cost per call](DESIGN.md#cost-per-call).
+
+- **One spend per unit is fine** when units are not frequent (about 10 a
+  second at most, well under the 35 to 60 a second one process can do) and
+  the pass will hold fewer than about 10,000 lines for the engagement: each
+  spend takes about 15 to 20 ms on ext4 (about 22 ms at 10,000 lines). This
+  is what the reference caller does.
+- **Batch** when units are small and many, when they come faster than about
+  30 a second (one process syncs at most 35 to 60 spends a second on this
+  disk, and the sync cost does not depend on the amount), or when the ledger
+  would pass about 100,000 lines or 50 MB. Spend once for a group: `--n 50`, or a larger
   `--charge COUNTER=N` for the group, immediately before the first send of
   the group. Size the groups so that the whole engagement stays below about
   100,000 lines.

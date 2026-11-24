@@ -505,10 +505,11 @@ this with two mixes of lines:
 
 The numbers below are medians of three runs, alternating before and after
 bn-iyn, on a loaded 32-core AMD Threadripper 9970X with SHA extensions. The
-ledger is on tmpfs, so the sync after each append costs nothing here. On a
-disk, add the sync time to each spend.
+ledger is on tmpfs, so the sync after each append costs nothing here. These
+are not the figures for a real disk: see "On a real disk" below, where a
+spend costs about 15 ms more.
 
-In milliseconds per call. `permits` and `spend` call the library; CLI `spend`
+In milliseconds per call, all on tmpfs. `permits` and `spend` call the library; CLI `spend`
 starts the binary for each call. For the receipts mix, both spends record a
 receipt with `--require-new-ref`. The last column is spends a second from 16
 threads together.
@@ -522,9 +523,41 @@ threads together.
 | receipts | 10,000 | 4.9 MB | 2.7 | 10.2 → 5.8 | 9.9 → 5.9 | 12.1 → 7.4 | 92 → 159 |
 | receipts | 100,000 | 49 MB | 30.0 | 100 → 60 | 102 → 63 | 102 → 63 | 10 → 16 |
 
-`permits`, `status` and `receipt` cost the same. On an ext4 NVMe disk, the
-syncs added about 7 ms to each spend. Before bn-2n0, a plain call at 100,000
-lines took about 150 ms.
+`permits`, `status` and `receipt` cost the same. Before bn-2n0, a plain call
+at 100,000 lines took about 150 ms (tmpfs).
+
+**On a real disk.** A spend appends one line and then syncs it (fsync), and
+the sync dominates. The figures below were measured on 2026-11-23 with a
+release build of the CLI, on the ext4 home disk (an NVMe drive, `/dev/nvme1n1p1`,
+not tmpfs), with `XDG_STATE_HOME` on the same disk. The machine was loaded
+by other builds (load average 26 to 41 on 64 CPUs), and the disk was shared.
+Ledgers of 10,000 and 100,000 lines were synthesized (one line of about 430
+bytes each, 4.3 MB and 43 MB, the receipts style) and adopted. Each row is
+three runs, shown as the lowest and highest of the three medians. Each run
+times 30 `permits` calls, 40 plain `spend` calls and 40 guarded spends
+(`--caller-ref REF --require-new-ref`), then 100 more guarded spends in a
+row from one process, then 8 processes with 25 guarded spends each. All are
+CLI calls. Times are in milliseconds, throughputs in spends a second.
+
+| Ledger lines | `permits` | `spend` | guarded `spend` | 1 process | 8 processes | 8 processes, p50 | 8 processes, p99 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (small) | 0.7 to 0.8 | 14.2 to 15.4 | 15.2 to 15.8 | 62 to 66 | 62 to 71 | 110 to 116 | 127 to 489 |
+| 10,000 | 6.0 to 18.5 | 20.7 to 22.2 | 21.7 to 21.8 | 44 to 49 | 40 to 51 | 148 to 171 | 239 to 602 |
+| 100,000 | 47 to 48 | 64 to 72 | 71 to 81 | 11 to 15 | 12 to 13 | 573 to 621 | 906 to 1,560 |
+
+Read-only calls match the tmpfs figures (one run of `permits` at 10,000 lines
+read 18.5 ms because of the load; the other two read 6 ms). A spend costs
+about 15 ms more than a read: the sync. The sync time varies with what else
+the disk is doing. The best spend took 13 to 15 ms in every run, and a
+second set of runs on the same ledger, made while the disk was busy, gave 24
+to 30 ms. So plan for about 15 ms a spend, and 30 ms on a busy disk: one
+process does about 60 spends a second at best, and 35 to 40 on a busy disk.
+In one run of 3,000 guarded spends in a row on a small ledger (the
+evaluator's `perf.py real 3000`, same disk, loaded), the total was 74.8 s,
+which is 40 spends a second (25 ms a spend). Spends on one pass run one at a
+time, so 8 processes get the same total as one (40 to 70 a second on a small
+ledger), and each waits for the other seven: the p50 is about 8 times the
+cost of one spend.
 
 "Read and hash" is the floor for a call that checks every byte: it reads the
 ledger and hashes each line, and decodes nothing. It costs about 0.6 ms a
@@ -544,11 +577,11 @@ and allocation about 10%.
 **Practical size.** The cost follows the size of the ledger more than its
 number of lines: a call costs about 1.2 ms per MB, that is about 0.35 µs per
 plain line and about 0.6 µs per receipt line. A CLI call adds about 0.7 ms
-to start the process and load the pass. Up to 10,000 lines, a call takes a
-few milliseconds. At 100,000 receipt lines (49 MB), a call takes about 60
+to start the process and load the pass. Up to 10,000 lines, a read-only call takes a
+few milliseconds, and a spend about 20 ms on the ext4 disk. At 100,000 receipt lines (49 MB), a call takes about 60
 ms. Spends hold both locks while they verify, so the spends on one pass run
-one at a time: at that size all callers together sustain about 16 spends a
-second. Cost grows linearly: 1,000,000 receipt lines would take about 0.6 s
+one at a time: on tmpfs, all callers together sustain about 16 spends a
+second at that size, and on the ext4 disk about 12 (see "On a real disk"). Cost grows linearly: 1,000,000 receipt lines would take about 0.6 s
 per call. Keep the ledger of one pass below about 100,000 lines and 50 MB.
 
 **Waiting for the lock.** With no `--lock-timeout-ms`, a spend that finds
@@ -563,8 +596,10 @@ can lose many races in a row. Before bn-mti the CLI always polled, even with
 no limit, because it always set the notice callback.
 
 Latency of one CLI `spend`, with 8 writer processes each making 50 spends
-against one pass (a release build, ext4, receipts-style lines; the script is
-the evaluator's `race.py`):
+against one pass (an earlier run on the same ext4 home disk, not repeated
+here; a release build, receipts-style lines; the script is the evaluator's
+`race.py`). For the current blocking-lock numbers, see the table above: at
+100,000 lines the p50 is about 0.6 s and the total about 12 spends a second.
 
 | Ledger lines | Waiting | p50 | p99 | max | Spends a second |
 |---:|---|---:|---:|---:|---:|
@@ -580,8 +615,8 @@ call): at 100,000 lines, 8 x 63 ms is about 500 ms.
 
 **Choosing `--lock-timeout-ms`.** Set it above the expected wait, which is
 (writers on this pass x cost of one call) with a margin of several times
-that. For 8 writers at 100,000 lines that wait is about 0.6 s, so 5,000 ms
-is safe. Because a bounded wait polls, its worst case is longer than the
+that. For 8 writers at 100,000 lines that wait is about 0.6 s (measured p50
+0.57 to 0.62 s, p99 0.9 to 1.6 s on the ext4 disk), so 5,000 ms is safe. Because a bounded wait polls, its worst case is longer than the
 figure above, so a limit close to the typical wait can give a spurious
 `lock-timeout`; nothing is recorded when it does, and the caller can run the
 command again. If every writer can wait, leave the limit off: that is the
