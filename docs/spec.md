@@ -709,14 +709,14 @@ timestamp with an offset; `now` is refused.
 
 ### Proving endpoint containment
 
-`hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID and open windows. Each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
+`hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID. When NEW admits nothing at the instant (it is revoked, or its window does not cover the instant), the endpoint result is `contained` with reason `new-admits-nothing`: every endpoint NEW admits, none, is admitted by OLD, whether or not OLD is open. When OLD admits nothing and NEW is open, containment cannot be shown and the endpoint result is `inconclusive` with reason `old-closed-new-open`. Otherwise both windows are open and each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
 
 The endpoint proof gives `containment.endpoint_result`: `contained` certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` by exhibiting a new allowance. `containment.counterexamples` lists up to eight such allowances, at most one per
 distinct widened destination rule and port range, and `more_counterexamples`
 is true when more may exist (the cap or the sampling bound was reached).
 `containment.example` keeps the first of them. Otherwise the endpoint result is `inconclusive`, with a reason such as a work limit or coverage that would require combining old rules.
 
-The overall verdict, `result` at the top level and `containment.result`, also covers the rest of the pass. `containment.loosenings` lists each non-endpoint change that gives NEW more authority, as `{field, before, after}` with the field named as in `changes`: a later `approval.valid_until`, an earlier `approval.valid_from`, a higher `ceilings.NAME`, a new `ceilings.NAME` for a counter NEW does not require every debit to charge (a counter without a ceiling cannot be spent, so removing a ceiling narrows), a counter dropped from `required_counters_v1`, `require_target_v1` turned off, `approval.revoked` turned off, and any change of `approval.owner` or `approval.operator`. A change that only narrows is not listed. The overall verdict is `contained` (exit 0) only when the endpoint result is `contained` and `loosenings` is empty. It is `expanded` when the endpoint result is `expanded`, and `widened` when `loosenings` is not empty and the endpoints are not shown to be expanded; an `inconclusive` endpoint result with no loosenings stays `inconclusive`. Every verdict other than `contained` exits 2, so a gate can rely on the exit code alone. Before this verdict covered the whole pass, `result` and `containment.result` reported the endpoint result only: a revision that kept the endpoints could be `contained` while it extended the window or raised a ceiling. Read `endpoint_result` for the old meaning. Invalid input exits 1. Label attribution, other instants and costs are outside the endpoint proof. See the accompanying declared-field diff for every edit.
+The overall verdict, `result` at the top level and `containment.result`, also covers the rest of the pass. `containment.loosenings` lists each non-endpoint change that gives NEW more authority, as `{field, before, after}` with the field named as in `changes`: a later `approval.valid_until`, an earlier `approval.valid_from`, a higher `ceilings.NAME`, a new `ceilings.NAME` for a counter NEW does not require every debit to charge (a counter without a ceiling cannot be spent, so removing a ceiling narrows), a counter dropped from `required_counters_v1`, `require_target_v1` turned off, `approval.revoked` turned off, and any change of `approval.owner` or `approval.operator`. A change that only narrows is not listed. The overall verdict is `contained` (exit 0) only when the endpoint result is `contained` and `loosenings` is empty. It is `expanded` when the endpoint result is `expanded`, and `widened` when `loosenings` is not empty and the endpoints are not shown to be expanded; an `inconclusive` endpoint result with no loosenings stays `inconclusive`. Every verdict other than `contained` exits 2, so a gate can rely on the exit code alone. A pure revocation is therefore `contained` (exit 0), while a revocation that also raises a ceiling is `widened`. Before this verdict covered the whole pass, `result` and `containment.result` reported the endpoint result only: a revision that kept the endpoints could be `contained` while it extended the window or raised a ceiling. Read `endpoint_result` for the old meaning. Invalid input exits 1. Label attribution, other instants and costs are outside the endpoint proof. See the accompanying declared-field diff for every edit.
 
 ### Name overlaps and declared breadth
 
@@ -748,6 +748,17 @@ hallpass that predates it, as any unknown key is.
 IPv4 and IPv6. Duplicate and nested service rules count once. One IPv4 `/8`
 and one IPv6 `/64` are documented consumer comparison points; they are
 advisory only and do not change existing validation caps.
+
+### Window warnings
+
+The window is the owner's decision, so an implausible one is a warning and never a refusal; exit codes do not change. `check`, `status` and `lint` warn, each with a code in `window_warnings` (list of `{code, message}`; each message is also in `warnings`):
+
+- `window-too-long`: `valid_until` is more than 90 days after `valid_from`. A security-test engagement runs for days or weeks and a quarter is the longest ordinary one, so a longer window is more often a typo (`2062` for `2026`) than a plan. This needs no clock.
+- `window-ended`: the clock is at or after `valid_until`, so every request is refused as `expired`. Skipped for a revoked pass.
+- `window-starts-far-ahead`: `valid_from` is more than 30 days after the clock. Skipped for a revoked pass.
+
+`status` and `lint` use the decision clock. `check` uses the same clock: the real time, or in a debug build (or one with the `test-clock` feature) the time in `HALLPASS_UNSAFE_TEST_CLOCK`. `check` reports it as `now` and `test_clock`. `diff` lists the same warnings for NEW as `new_window_warnings`, each message also in `warnings` with the prefix `NEW revision:`; it knows no clock, so `window-ended` and `window-starts-far-ahead` appear only with `--at`, judged at that instant, and `window-too-long` always appears. A warning that a window is long is judged on the window alone, not on a change: it shows even when the diff did not touch the window.
+
 
 ### Consumer coverage
 
@@ -960,6 +971,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **init**: no more fields.
 - **check**: `digest`, `pass_id`, `require_target`, `problems` (empty),
   `breadth` `{ipv4, ipv6}` (declared address counts as decimal strings),
+  `now`, `test_clock`, `window_warnings` (see "Window warnings"),
   `name_restriction_overlaps` (list of `{code, named_label, unnamed_label,
   acknowledged, message}`, one per pair that `lint` reports, and one with
   code `overlap-acknowledgement-unmatched` for each acknowledgement that
@@ -975,7 +987,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   spent}`), `ledger` `{path, exists, entries, adoptions, witness,
   moved_from}` (`witness` is `fresh`, `matches`, `extended`, `missing` or
   `not-checked`; `moved_from` the path the witness last saw, or null),
-  `name_restriction_overlaps` (as in `check`, but `warnings` leaves out the
+  `window_warnings` (as in `check`), `name_restriction_overlaps` (as in `check`, but `warnings` leaves out the
   messages of acknowledged pairs), `refusal`.
 - **permits**: `digest`, `pass_id`, `now`, `test_clock`, `target`
   (normalized, the first target), `name` (normalized, or null), `label` (or
@@ -1086,6 +1098,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `removed_grants` (one `{label, scope, network, protocol, ports, names,
   hostname, whole_network_approved, overlap_acknowledged}` per introduced or removed destination;
   `scope` is `address` or `network`; empty `names` means any name),
+  `new_window_warnings` (as `window_warnings` in `check`, for NEW),
   `name_restriction_overlaps` (as in `check`, limited to overlaps that
   NEW introduces; their messages are also in `warnings`, acknowledged or
   not, so the reviewer sees what the owner accepted),
@@ -1093,7 +1106,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   requested.
 - **consumer-coverage**: `pass_id`, `digest`, `declared`,
   `require_target`, `findings` (each with its `code`).
-- **lint**: `digest`, `findings`, `truncated`.
+- **lint**: `digest`, `findings`, `truncated`, `window_warnings` (as in "Window warnings").
 - **test-pass**: `cases` (the suite path), `digest`, `results`,
   `mismatches`; `mutation_strength` with `--strength`.
 - **approval-id**: `id`, `owner`, `reference`.

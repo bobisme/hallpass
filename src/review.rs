@@ -556,6 +556,68 @@ pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
     report
 }
 
+/// The longest approval window that raises no warning: 90 days.
+///
+/// A written
+/// authorization for a security test normally covers an engagement of days or
+/// weeks; a quarter is the longest ordinary engagement, and a longer window is
+/// more often a typo (`2062` for `2026`) than a plan. The owner may still
+/// approve one.
+pub const LONG_WINDOW_DAYS: i64 = 90;
+/// How far ahead of the instant a window may open without a warning: 30 days.
+pub const FAR_START_DAYS: i64 = 30;
+
+/// A warning about an implausible approval window. Advice only: the window is
+/// the owner's decision, so none of these refuses anything.
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowWarning {
+    /// `window-too-long`, `window-ended` or `window-starts-far-ahead`.
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Warnings about the approval window of `pass`, judged at `now` when given.
+///
+/// `window-too-long` needs no clock. `window-ended` and
+/// `window-starts-far-ahead` need `now` and are skipped for a revoked pass,
+/// which is already refused by name.
+#[must_use]
+pub fn window_warnings(pass: &Pass, now: Option<OffsetDateTime>) -> Vec<WindowWarning> {
+    let a = &pass.approval;
+    let mut out = Vec::new();
+    let length = a.valid_until - a.valid_from;
+    if length > Duration::days(LONG_WINDOW_DAYS) {
+        out.push(WindowWarning {
+            code: "window-too-long",
+            message: format!(
+                "the approval window is {} days long, more than the {LONG_WINDOW_DAYS} days that raise no warning; check valid_from and valid_until against the owner's written approval for a typo",
+                length.whole_days()
+            ),
+        });
+    }
+    if let Some(now) = now.filter(|_| !a.revoked) {
+        if now >= a.valid_until {
+            out.push(WindowWarning {
+                code: "window-ended",
+                message: format!(
+                    "the approval window ended at {} and every request is refused as expired; check valid_until, or get a new written approval",
+                    exact_stamp(a.valid_until)
+                ),
+            });
+        } else if a.valid_from - now > Duration::days(FAR_START_DAYS) {
+            out.push(WindowWarning {
+                code: "window-starts-far-ahead",
+                message: format!(
+                    "the approval window opens at {}, {} days after now, more than the {FAR_START_DAYS} days that raise no warning; check valid_from for a typo",
+                    exact_stamp(a.valid_from),
+                    (a.valid_from - now).whole_days()
+                ),
+            });
+        }
+    }
+    out
+}
+
 /// One pair of destinations where a nameless rule defeats a `names` list.
 #[derive(Clone, Debug, Serialize)]
 pub struct NameOverlapWarning {

@@ -1,4 +1,4 @@
-//! Sufficient proof of zero-duration endpoint containment between two open approvals.
+//! Sufficient proof of zero-duration endpoint containment at an instant.
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -156,8 +156,16 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
     if old.id != new.id {
         return report;
     }
-    if !old.window_at(at).is_valid() || !new.window_at(at).is_valid() {
-        report.reason = "both-windows-must-be-open";
+    if !new.window_at(at).is_valid() {
+        // NEW admits nothing at this instant, so every endpoint it admits (none)
+        // is admitted by OLD, whether or not OLD is open.
+        report.result = "contained";
+        report.endpoint_result = "contained";
+        report.reason = "new-admits-nothing";
+        return report;
+    }
+    if !old.window_at(at).is_valid() {
+        report.reason = "old-closed-new-open";
         return report;
     }
     let original: BTreeMap<_, _> = old

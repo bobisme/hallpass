@@ -134,7 +134,7 @@ A targetless debit returns `target-required` after digest and window checks.
 | `reference` | yes | where the written approval is, for example "email of 2026-11-18" (text, at most 200) |
 | `operator` | yes | who runs the test (text, at most 200) |
 | `valid_from` | yes | the first instant the pass is valid (inclusive) |
-| `valid_until` | yes | the first instant it is no longer valid (exclusive); must be later than `valid_from` |
+| `valid_until` | yes | the first instant it is no longer valid (exclusive); must be later than `valid_from`. `check`, `status` and `lint` warn (exit codes unchanged) about a window longer than 90 days, one that has ended, or one that opens more than 30 days ahead |
 | `revoked` | yes | `true` or `false`. Write `false` explicitly |
 | `revoked_reason` | no | text, at most 500; only with `revoked = true` |
 

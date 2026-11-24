@@ -619,7 +619,7 @@ fn init(file: &Path) -> Output {
     }
 }
 
-fn check(file: &Path) -> Output {
+fn check(file: &Path, clock: &Clock) -> Output {
     match hallpass::load(file) {
         Ok(loaded) => {
             let breadth = hallpass::review::breadth(&loaded.pass);
@@ -631,10 +631,15 @@ fn check(file: &Path) -> Output {
             let overlaps = hallpass::review::name_overlap_warnings(&loaded.pass);
             let mut warnings = hallpass::review::breadth_warnings(&breadth);
             warnings.extend(overlaps.iter().map(|w| w.message.clone()));
+            let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
+            warnings.extend(window.iter().map(|w| w.message.clone()));
             Output {
                 code: OK,
                 json: json!({
                     "command": "check",
+                    "now": stamp(clock.now),
+                    "test_clock": clock.test,
+                    "window_warnings": window,
                     "result": "ok",
                     "file": file.display().to_string(),
                     "digest": loaded.digest.to_string(),
@@ -739,9 +744,12 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
         .filter(|w| w.code == "overlap-acknowledgement-unmatched")
         .map(|w| w.message)
         .collect();
+    let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
+    let mut stale = stale;
+    stale.extend(window.iter().map(|w| w.message.clone()));
     Output {
         code: OK,
-        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":stale}),
+        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":stale,"window_warnings":window}),
         text,
     }
 }
@@ -1093,6 +1101,8 @@ fn status_with_clock(
     let breadth = hallpass::review::breadth(pass);
     let mut warnings = view.warnings.clone();
     warnings.extend(hallpass::review::breadth_warnings(&breadth));
+    let window_warnings = hallpass::review::window_warnings(pass, Some(now));
+    warnings.extend(window_warnings.iter().map(|w| w.message.clone()));
     let overlaps = hallpass::review::name_overlap_warnings(pass);
     let mut text = status_text(file, &loaded, tally, &state, refusal.as_ref());
     status_overlaps(&overlaps, &mut warnings, &mut text);
@@ -1127,6 +1137,7 @@ fn status_with_clock(
             "unlisted_spends": unlisted,
             "ledger": ledger_json(&view),
             "warnings": warnings,
+            "window_warnings": window_warnings,
             "name_restriction_overlaps": overlaps,
             "refusal": refusal.as_ref().map(refusal_json),
         }),
@@ -2224,6 +2235,7 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
     let needs_clock = matches!(
         command,
         Command::Status { .. }
+            | Command::Check { .. }
             | Command::Permits { .. }
             | Command::Spend { .. }
             | Command::Capacity(_)
@@ -2252,7 +2264,7 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Help { topic } => cli_help::help(topic.as_deref(), format),
         Command::Version => cli_help::version(),
         Command::Init { file } => init(file),
-        Command::Check { file } => check(file),
+        Command::Check { file } => check(file, &clock),
         Command::Rehearse { file, scenario } => rehearse(file, scenario),
         Command::Capacity(unit) => cli_debit::run_capacity(unit, &clock),
         Command::Status { file } => status(file, &clock),

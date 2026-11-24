@@ -354,11 +354,13 @@ fn containment_cli_requires_open_windows_and_replays_expanded_edges() {
         command(dir, &args, 2)["containment"]["reason"],
         "different-pass-id"
     );
+    // NEW opens after the instant, so it admits nothing there; the later end
+    // is still a loosening, which the overall verdict reports.
     write_pass(dir, "new", &BASE.replace("2026-11-20", "2026-11-21"));
-    assert_eq!(
-        command(dir, &args, 2)["containment"]["reason"],
-        "both-windows-must-be-open"
-    );
+    let moved = command(dir, &args, 2);
+    assert_eq!(moved["containment"]["reason"], "new-admits-nothing");
+    assert_eq!(moved["containment"]["endpoint_result"], "contained");
+    assert_eq!(moved["containment"]["result"], "widened");
     assert!(!dir.join("state").exists());
 }
 

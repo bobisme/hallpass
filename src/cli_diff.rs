@@ -200,6 +200,17 @@ pub fn review_diff(args: &DiffArgs) -> Output {
         Err(e) => return error_output("diff", Some(new), &e),
     };
     let mut output = field_output(&a, &b);
+    // NEW's window: the length needs no clock; ended or far-future windows are
+    // judged at --at, the only instant diff knows.
+    let window = hallpass::review::window_warnings(&b.pass, review_at);
+    output.json["new_window_warnings"] = json!(window);
+    if let Some(list) = output.json["warnings"].as_array_mut() {
+        list.extend(
+            window
+                .iter()
+                .map(|w| json!(format!("NEW revision: {}", w.message))),
+        );
+    }
     if *budget_impact && let Err(error) = budget(&a, &b, &mut output) {
         return error_output("diff", Some(old), &error);
     }
