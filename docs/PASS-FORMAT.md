@@ -56,14 +56,33 @@ requests = 500
   bidirectional control reorders the text around it, and most of the
   others are invisible, so an owner or reference could read as something
   other than the bytes the owner approved, and two passes that differ
-  could look the same. `--note` refuses them too. A pass that holds one
-  fails to load, with the field and the character named, for example
-  `approval.owner: contains a Unicode format character (U+200B)`.
+  could look the same. Two more groups are refused for the same reason:
+  - the other invisible characters: every default-ignorable code point
+    of Unicode 16.0 (`Default_Ignorable_Code_Point`). Beyond the format
+    characters, these are the combining grapheme joiner (U+034F), the
+    Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), two Khmer inherent
+    vowels (U+17B4, U+17B5), the variation selectors (U+180B to U+180F,
+    U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the code points reserved as
+    ignorable (U+2065, U+FFF0 to U+FFF8 and the rest of U+E0000 to
+    U+E0FFF);
+  - every space other than the ASCII space U+0020 (general category Zs):
+    the no-break space (U+00A0), U+1680, the en, em and other fixed-width
+    spaces (U+2000 to U+200A), U+202F, U+205F and the ideographic space
+    (U+3000). Each looks like a plain space.
+
+  `--note` refuses them too. A pass that holds one fails to load, with
+  the field and the character named, for example:
+  - `approval.owner: contains a Unicode format character (U+200B)`;
+  - `name: contains an invisible character (U+3164)`;
+  - `approval.reference: contains a look-alike space (U+00A0)`.
+
   Right-to-left text itself (Arabic, Hebrew) is accepted: only the
-  controls are refused. This refusal is new after 0.2.0; a pass written
-  earlier that holds such a character must be re-approved without it.
-  Text output escapes these characters as `\u{...}` wherever it shows
-  caller- or pass-supplied text; JSON carries the exact text.
+  controls are refused. These refusals are new
+  after 0.2.0; a pass written earlier that holds such a character must be
+  re-approved without it. `hallpass approval-id` applies the same rules to
+  `--owner` and `--reference`, so it never prints an id that no pass can
+  carry. Text output escapes these characters as `\u{...}` wherever it
+  shows caller- or pass-supplied text; JSON carries the exact text.
 - **Numbers** (`format`, ports, ceilings) are plain decimal digits. TOML's
   other spellings are refused: `0x10`, `0o17`, `0b110`, `1_000`, `+6`. A
   reviewer who reads `0x10` as 10 would approve less than the 16 a tool
@@ -446,7 +465,7 @@ edit it. It is JSON Lines:
 | destinations | 1024 |
 | counters | 64 |
 | ceiling total | 10^12 |
-| note on a spend | 500 characters, one line: no control characters, line separators or Unicode format characters (such as bidirectional controls and zero-width characters) |
+| note on a spend | 500 characters, one line: no control characters, line separators, Unicode format characters (such as bidirectional controls and zero-width characters), other invisible characters or spaces other than the ASCII space |
 
 ### Versioned debit records
 
@@ -468,9 +487,10 @@ previous ledger line, respectively.
 The note and receipt are optional. The receipt is present only if the caller
 opts in. A new caller reference is nonblank, at most 128 characters, has
 no leading or trailing spaces, and holds no control character, line or
-paragraph separator or Unicode format character (the characters a pass
-text field refuses), so a reference cannot differ from another only by a
-format character or a surrounding space. A reader still
+paragraph separator, Unicode format character, other invisible character
+or space other than the ASCII space (the characters a pass text field
+refuses), so a reference cannot differ from another only by a character
+that does not show or a look-alike space. A reader still
 accepts a reference recorded under the earlier rule, which
 refused only control characters, line separators and bidirectional
 controls. The target list is optional and records the approved literals and

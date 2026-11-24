@@ -230,8 +230,31 @@ const fn kind(value: &Value) -> &'static str {
     }
 }
 
-/// Free text: printable, without line separators or Unicode format
-/// characters ([`crate::ledger::is_disguising`]), no surrounding spaces, 1 to
+/// The most characters `approval.owner` and `approval.reference` may hold.
+const MAX_APPROVAL_TEXT: usize = 200;
+
+/// Every problem `owner` and `reference` would have as `approval.owner` and
+/// `approval.reference` of a pass, with those fields, as [`Pass::parse`]
+/// reports them. Empty when a pass can hold both. `approval-id` checks its
+/// input with this, so it never gives an id for an owner or reference that
+/// no pass can hold.
+pub fn approval_identity_problems(owner: &str, reference: &str) -> Vec<Problem> {
+    [("approval.owner", owner), ("approval.reference", reference)]
+        .into_iter()
+        .filter_map(|(field, text)| {
+            check_text(text, MAX_APPROVAL_TEXT)
+                .err()
+                .map(|message| Problem {
+                    field: field.to_owned(),
+                    message,
+                })
+        })
+        .collect()
+}
+
+/// Free text: printable, without line separators, Unicode format
+/// characters, other invisible characters or spaces other than the ASCII
+/// space ([`crate::ledger::is_disguising`]), no surrounding spaces, 1 to
 /// `max` characters.
 fn check_text(text: &str, max: usize) -> Result<(), String> {
     if text.trim().is_empty() {
@@ -456,8 +479,8 @@ fn parse_approval(w: &mut Walker, table: &Table) -> Option<Approval> {
             "revoked_reason",
         ],
     );
-    let owner = w.text(t, p, "owner", 200);
-    let reference = w.text(t, p, "reference", 200);
+    let owner = w.text(t, p, "owner", MAX_APPROVAL_TEXT);
+    let reference = w.text(t, p, "reference", MAX_APPROVAL_TEXT);
     let operator = w.text(t, p, "operator", 200);
     let valid_from = w.instant(t, p, "valid_from");
     let valid_until = w.instant(t, p, "valid_until");

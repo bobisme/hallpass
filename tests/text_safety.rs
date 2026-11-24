@@ -333,10 +333,17 @@ fn new_references_refuse_leading_and_trailing_spaces() {
         let (code, value) = case.json(&["spend", &pass, "calls", "--caller-ref", text]);
         assert_eq!(code, 1, "{text:?}: {value}");
         let message = value["error"]["message"].as_str().expect("message");
-        assert!(
-            message.starts_with("the caller reference has leading or trailing spaces"),
-            "{message}"
+        // Since bn-2gh a look-alike space is refused anywhere, and named.
+        let expected = text.chars().find(|c| !c.is_ascii()).map_or_else(
+            || "the caller reference has leading or trailing spaces".to_owned(),
+            |c| {
+                format!(
+                    "the caller reference contains a look-alike space ({})",
+                    code_point(c)
+                )
+            },
         );
+        assert!(message.starts_with(&expected), "{message}");
     }
     // A space inside a reference, and a note's surrounding spaces, are fine.
     let (code, value) = case.json(&[
@@ -609,7 +616,8 @@ fn a_reference_reconciliation_written_earlier_with_format_characters_still_reads
     assert_eq!(recorded["reason"], reason);
 }
 
-// The table of format characters.
+// The table of format characters, invisible characters and look-alike
+// spaces.
 
 /// Every code point of general category Cf in Unicode 16.0 outside the Tags
 /// block, one by one, from `UnicodeData.txt`.
@@ -626,10 +634,42 @@ const FORMAT_OUTSIDE_TAGS: [u32; 73] = [
     0x1d17a,
 ];
 
+/// Every `Default_Ignorable_Code_Point` of Unicode 16.0, as the inclusive
+/// ranges of `DerivedCoreProperties.txt` (4174 code points; Perl's
+/// `\p{Default_Ignorable_Code_Point}` of Unicode 16.0 gives the same).
+/// Python's `unicodedata` has no such property.
+const DEFAULT_IGNORABLE: [(u32, u32); 17] = [
+    (0x00ad, 0x00ad),
+    (0x034f, 0x034f),
+    (0x061c, 0x061c),
+    (0x115f, 0x1160),
+    (0x17b4, 0x17b5),
+    (0x180b, 0x180f),
+    (0x200b, 0x200f),
+    (0x202a, 0x202e),
+    (0x2060, 0x206f),
+    (0x3164, 0x3164),
+    (0xfe00, 0xfe0f),
+    (0xfeff, 0xfeff),
+    (0xffa0, 0xffa0),
+    (0xfff0, 0xfff8),
+    (0x1bca0, 0x1bca3),
+    (0x1d173, 0x1d17a),
+    (0xe0000, 0xe0fff),
+];
+
+/// Every code point of general category Zs in Unicode 16.0, one by one,
+/// from Python's `unicodedata` (`unidata_version` 16.0.0).
+const SPACE_SEPARATORS: [u32; 17] = [
+    0x0020, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, //
+    0x2007, 0x2008, 0x2009, 0x200a, 0x202f, 0x205f, 0x3000,
+];
+
 /// What text output must escape: control characters, the line and
 /// paragraph separators, every format character and the whole Tags block
 /// (U+E0001 and U+E0020 to U+E007F are format characters; the rest of it is
-/// reserved for more tags).
+/// reserved for more tags), every default-ignorable code point (bn-2gh) and
+/// every space separator but the ASCII space (bn-2gh).
 fn must_escape(c: char) -> bool {
     let n = u32::from(c);
     c.is_control()
@@ -637,6 +677,10 @@ fn must_escape(c: char) -> bool {
         || n == 0x2029
         || FORMAT_OUTSIDE_TAGS.contains(&n)
         || (0xe0000..=0xe007f).contains(&n)
+        || DEFAULT_IGNORABLE
+            .iter()
+            .any(|&(first, last)| (first..=last).contains(&n))
+        || (n != 0x20 && SPACE_SEPARATORS.contains(&n))
 }
 
 #[test]
@@ -650,8 +694,12 @@ fn the_escaped_characters_are_exactly_the_known_list() {
         let escaped = format!("\\u{{{:04x}}}", u32::from(c));
         if must_escape(c) {
             assert_eq!(shown, escaped, "{}", code_point(c));
-            // Rust's own Unicode tables agree that it is not printable.
-            assert_ne!(c.escape_debug().to_string(), text, "{}", code_point(c));
+            // Rust's own Unicode tables agree that it is not printable, but
+            // for the Hangul fillers: letters (Lo) to Rust, which show
+            // nothing or a blank.
+            if !matches!(c, '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}') {
+                assert_ne!(c.escape_debug().to_string(), text, "{}", code_point(c));
+            }
         } else {
             assert_eq!(shown, text, "{}", code_point(c));
         }

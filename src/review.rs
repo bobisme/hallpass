@@ -1,7 +1,7 @@
 //! Read-only approval review helpers. These intentionally make no ledger or
 //! authorization changes: review output is evidence for an owner, never a
 //! permission to spend.
-use crate::{Decision, HostName, LoadedPass, Pass, Target, stamp};
+use crate::{Decision, HostName, LoadedPass, Pass, Problem, Target, stamp};
 use serde::Serialize;
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::BTreeSet;
@@ -696,8 +696,25 @@ pub struct Breadth {
 }
 
 /// Derive the stable format-1 approval identifier from its written identity.
-#[must_use]
-pub fn approval_id(owner: &str, reference: &str) -> String {
+///
+/// `owner` and `reference` are checked first, as `approval.owner` and
+/// `approval.reference` of a pass are checked when it loads, so an id is
+/// only given for an owner and reference that a pass can hold.
+///
+/// # Errors
+///
+/// Every problem with `owner` or `reference`, with its field
+/// (`approval.owner` or `approval.reference`) and the message
+/// [`Pass::parse`] gives for it: empty, longer than 200 characters, leading
+/// or trailing spaces, a control character, or a character that can make
+/// text display as something else (a line separator, a Unicode format
+/// character, another invisible character or a space other than the ASCII
+/// space), named with its code point.
+pub fn approval_id(owner: &str, reference: &str) -> Result<String, Vec<Problem>> {
+    let problems = crate::pass::approval_identity_problems(owner, reference);
+    if !problems.is_empty() {
+        return Err(problems);
+    }
     let mut h = Sha256::new();
     h.update(b"hallpass/approval/v1\0");
     h.update(owner.as_bytes());
@@ -708,7 +725,7 @@ pub fn approval_id(owner: &str, reference: &str) -> String {
     for byte in digest {
         let _ = write!(hex, "{byte:02x}");
     }
-    format!("hp1-{}", &hex[..52])
+    Ok(format!("hp1-{}", &hex[..52]))
 }
 #[must_use]
 pub fn breadth(pass: &Pass) -> Breadth {

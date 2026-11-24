@@ -130,7 +130,7 @@ fn guide(name: &str) -> Guide {
             &[
                 "hallpass --format json approval-id --owner 'Example Corp' --reference 'approval-42'",
             ],
-            "Use the id in revisions of the same written approval. Preserve the owner and reference strings exactly. Distinct approvals need distinct identities and budgets.",
+            "Use the id in revisions of the same written approval. Preserve the owner and reference strings exactly. They follow the rules of approval.owner and approval.reference: an owner or reference a pass could not hold, such as one with a zero-width or no-break space, is a usage error that names the field and the character, and no id is printed. Distinct approvals need distinct identities and budgets.",
         ),
         _ => return history_guide(name),
     };

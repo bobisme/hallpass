@@ -878,12 +878,29 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
     output
 }
 
+/// The id for an owner and reference, or a usage error when a pass could not
+/// hold them: each problem names the option, its pass field and what is
+/// wrong, as `check` does, and JSON lists them under `problems`.
 fn approval_id(owner: &str, reference: &str) -> Output {
-    let id = hallpass::review::approval_id(owner, reference);
-    Output {
-        code: OK,
-        json: json!({"command":"approval-id","result":"ok","id":id,"owner":owner,"reference":reference,"warnings":[]}),
-        text: format!("{id}\n"),
+    match hallpass::review::approval_id(owner, reference) {
+        Ok(id) => Output {
+            code: OK,
+            json: json!({"command":"approval-id","result":"ok","id":id,"owner":owner,"reference":reference,"warnings":[]}),
+            text: format!("{id}\n"),
+        },
+        Err(problems) => {
+            let mut message = String::new();
+            for p in &problems {
+                let flag = p.field.strip_prefix("approval.").unwrap_or(&p.field);
+                let _ = write!(message, "--{flag} ({}) {}. ", p.field, p.message);
+            }
+            message.push_str(
+                "A pass with this owner and reference would not load, so no id was printed",
+            );
+            let mut output = error_output("approval-id", None, &Error::Usage(message));
+            output.json["problems"] = problems_json(&problems);
+            output
+        }
     }
 }
 

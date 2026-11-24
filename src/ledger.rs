@@ -225,13 +225,12 @@ pub fn ledger_path(pass_path: &Path) -> PathBuf {
 }
 
 /// The Unicode format characters (general category Cf in Unicode 16.0), as
-/// inclusive ranges of code points, with the rest of the Tags block (U+E0000
-/// and U+E0002 to U+E001F, not assigned yet). They include the zero-width
-/// space, joiners and word joiner, the soft hyphen, the byte order mark, the
+/// inclusive ranges of code points. They include the zero-width space,
+/// joiners and word joiner, the soft hyphen, the byte order mark, the
 /// bidirectional controls, the interlinear annotation controls and the tag
 /// characters: most are invisible, and the others change how the text around
 /// them is shown.
-const FORMAT_CHARACTERS: [(u32, u32); 20] = [
+const FORMAT_CHARACTERS: [(u32, u32); 21] = [
     (0x00ad, 0x00ad),
     (0x0600, 0x0605),
     (0x061c, 0x061c),
@@ -251,25 +250,77 @@ const FORMAT_CHARACTERS: [(u32, u32); 20] = [
     (0x13430, 0x1343f),
     (0x1bca0, 0x1bca3),
     (0x1d173, 0x1d17a),
-    (0xe0000, 0xe007f),
+    (0xe0001, 0xe0001),
+    (0xe0020, 0xe007f),
 ];
+
+/// The default-ignorable code points (`Default_Ignorable_Code_Point` in
+/// `DerivedCoreProperties.txt` of Unicode 16.0), as inclusive ranges. A
+/// viewer that does not support one shows nothing for it. Most are also
+/// format characters; the others are the combining grapheme joiner (U+034F),
+/// the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), two Khmer inherent
+/// vowels (U+17B4, U+17B5), the variation selectors (U+180B to U+180F,
+/// U+FE00 to U+FE0F, U+E0100 to U+E01EF) and code points reserved as
+/// ignorable (U+2065, U+FFF0 to U+FFF8 and the rest of U+E0000 to U+E0FFF).
+const DEFAULT_IGNORABLE: [(u32, u32); 17] = [
+    (0x00ad, 0x00ad),
+    (0x034f, 0x034f),
+    (0x061c, 0x061c),
+    (0x115f, 0x1160),
+    (0x17b4, 0x17b5),
+    (0x180b, 0x180f),
+    (0x200b, 0x200f),
+    (0x202a, 0x202e),
+    (0x2060, 0x206f),
+    (0x3164, 0x3164),
+    (0xfe00, 0xfe0f),
+    (0xfeff, 0xfeff),
+    (0xffa0, 0xffa0),
+    (0xfff0, 0xfff8),
+    (0x1bca0, 0x1bca3),
+    (0x1d173, 0x1d17a),
+    (0xe0000, 0xe0fff),
+];
+
+/// The space separators (general category Zs in Unicode 16.0) other than
+/// the ASCII space U+0020, as inclusive ranges: the no-break space, the
+/// Ogham space mark, the en, em and other fixed-width spaces, the narrow
+/// no-break space, the medium mathematical space and the ideographic space.
+/// Each looks like a plain space, or like nothing.
+const SPACE_SEPARATORS: [(u32, u32); 6] = [
+    (0x00a0, 0x00a0),
+    (0x1680, 0x1680),
+    (0x2000, 0x200a),
+    (0x202f, 0x202f),
+    (0x205f, 0x205f),
+    (0x3000, 0x3000),
+];
+
+/// Whether code point `c` is in one of the inclusive ranges of `table`.
+fn in_table(table: &[(u32, u32)], c: u32) -> bool {
+    table
+        .iter()
+        .any(|&(first, last)| (first..=last).contains(&c))
+}
 
 /// Characters that can make text display as something other than its
 /// characters, beyond control characters: the Unicode line and paragraph
-/// separators (some viewers break lines at them) and every Unicode format
-/// character ([`FORMAT_CHARACTERS`]). A bidirectional control reorders the
-/// text around it; a zero-width or tag character is invisible, so text that
-/// holds one looks like text that does not. New notes, reasons and caller
-/// references and pass text may not contain them, and text output escapes
-/// them.
+/// separators (some viewers break lines at them), every Unicode format
+/// character ([`FORMAT_CHARACTERS`]), every default-ignorable code point
+/// ([`DEFAULT_IGNORABLE`]) and every space other than the ASCII space
+/// ([`SPACE_SEPARATORS`]). A bidirectional control reorders the text around
+/// it; a zero-width, tag or other ignorable character is invisible, and a
+/// no-break or em space looks like a plain space, so text that holds one
+/// looks like text that does not. New notes, reasons and caller references
+/// and pass text may not contain them, and text output escapes them.
 pub fn is_disguising(c: char) -> bool {
     let c = u32::from(c);
-    c >= 0xad
+    c >= 0xa0
         && (c == 0x2028
             || c == 0x2029
-            || FORMAT_CHARACTERS
-                .iter()
-                .any(|&(first, last)| (first..=last).contains(&c)))
+            || in_table(&FORMAT_CHARACTERS, c)
+            || in_table(&DEFAULT_IGNORABLE, c)
+            || in_table(&SPACE_SEPARATORS, c))
 }
 
 /// The disguising characters refused before every format character was: the
@@ -291,24 +342,29 @@ const fn is_line_or_bidi_control(c: char) -> bool {
 }
 
 /// A disguising character for a message: what it is and its code point, as
-/// in "a bidirectional text control (U+202E)".
+/// in "a bidirectional text control (U+202E)" or "a look-alike space
+/// (U+00A0)".
 pub fn describe_disguising(c: char) -> String {
+    let n = u32::from(c);
     let kind = match c {
         '\u{2028}' => "a line separator",
         '\u{2029}' => "a paragraph separator",
         c if is_line_or_bidi_control(c) => "a bidirectional text control",
-        _ => "a Unicode format character",
+        _ if in_table(&FORMAT_CHARACTERS, n) => "a Unicode format character",
+        _ if in_table(&SPACE_SEPARATORS, n) => "a look-alike space",
+        _ => "an invisible character",
     };
-    format!("{kind} (U+{:04X})", u32::from(c))
+    format!("{kind} (U+{n:04X})")
 }
 
 /// `text` made safe to print on a terminal as part of one line.
 ///
-/// Control characters, line and paragraph separators and Unicode format
+/// Control characters, line and paragraph separators, Unicode format
 /// characters (bidirectional controls, zero-width and tag characters, the
-/// soft hyphen and the others of [`is_disguising`]) are written as
-/// `\u{…}`, and a backslash as `\\`, so the escaping cannot be forged
-/// either. Other text is unchanged.
+/// soft hyphen), the other invisible characters (variation selectors, the
+/// Hangul fillers) and the spaces other than the ASCII space (the others of
+/// [`is_disguising`]) are written as `\u{…}`, and a backslash as `\\`, so
+/// the escaping cannot be forged either. Other text is unchanged.
 #[must_use]
 pub fn display_safe(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.chars().any(|c| c == '\\' || needs_escape(c)) {
@@ -378,8 +434,9 @@ fn longer_than(text: &str, max: usize) -> bool {
 
 /// Check a note before it is recorded: one plain line, at most
 /// [`MAX_NOTE`] characters, without control characters or the disguising
-/// characters of [`is_disguising`] (line separators and Unicode format
-/// characters, such as bidirectional controls and zero-width characters).
+/// characters of [`is_disguising`] (line separators, Unicode format
+/// characters such as bidirectional controls and zero-width characters,
+/// other invisible characters and look-alike spaces).
 fn check_new_note(note: &str) -> Result<(), String> {
     if let Some(c) = note.chars().find(|c| is_disguising(*c)) {
         return Err(format!(
@@ -3560,8 +3617,31 @@ mod tests {
         assert_eq!(display_safe("a\u{200b}b"), "a\\u{200b}b");
         assert_eq!(display_safe("\u{feff}a\u{ad}"), "\\u{feff}a\\u{00ad}");
         assert_eq!(display_safe("t\u{e0065}"), "t\\u{e0065}");
+        // So do the other invisible characters and the look-alike spaces;
+        // the ASCII space stays a space.
+        assert_eq!(display_safe("a\u{34f}b\u{fe0f}"), "a\\u{034f}b\\u{fe0f}");
+        assert_eq!(display_safe("\u{3164}x\u{e0100}"), "\\u{3164}x\\u{e0100}");
+        assert_eq!(display_safe("a\u{a0}b c\u{2003}"), "a\\u{00a0}b c\\u{2003}");
         // A quote needs no escape outside quotes.
         assert_eq!(display_safe("a\"b"), "a\"b");
+    }
+
+    #[test]
+    fn describe_disguising_names_the_kind_of_character() {
+        for (c, shown) in [
+            ('\u{2028}', "a line separator (U+2028)"),
+            ('\u{202e}', "a bidirectional text control (U+202E)"),
+            ('\u{200b}', "a Unicode format character (U+200B)"),
+            ('\u{e0001}', "a Unicode format character (U+E0001)"),
+            ('\u{a0}', "a look-alike space (U+00A0)"),
+            ('\u{3000}', "a look-alike space (U+3000)"),
+            ('\u{34f}', "an invisible character (U+034F)"),
+            ('\u{fe0f}', "an invisible character (U+FE0F)"),
+            ('\u{e0000}', "an invisible character (U+E0000)"),
+        ] {
+            assert!(is_disguising(c), "{shown}");
+            assert_eq!(describe_disguising(c), shown);
+        }
     }
 
     #[test]

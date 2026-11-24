@@ -216,8 +216,14 @@ tool that pinned the old digest, which is the point.
   (which can make text display as something else, as in "Trojan Source"),
   and after 0.2.0 no other Unicode format character either (zero-width and
   tag characters, the soft hyphen, the byte order mark: invisible, so two
-  texts that differ look the same). New caller references and reasons
-  follow the same rule. Reading keeps the earlier, looser rules (for
+  texts that differ look the same). Nor may it contain another
+  default-ignorable character (the combining grapheme joiner, the
+  variation selectors, the Hangul fillers) or a space other than the
+  ASCII space (the no-break, em and ideographic spaces, which look like a
+  plain space). New caller references and reasons follow the same rule,
+  and so do pass text fields and `approval-id`. The tables are written by
+  hand from Unicode 16.0, with no dependency, and a test pins them to
+  lists taken from Python's `unicodedata` and `DerivedCoreProperties.txt`. Reading keeps the earlier, looser rules (for
   notes the 0.1 rule), so an older ledger stays readable. Text output escapes every such
   character as `\u{...}` (and `\` as `\\`, so an escape cannot be
   faked), and a quoted value also escapes its quotes, once; JSON keeps the

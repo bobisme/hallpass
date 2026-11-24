@@ -126,9 +126,10 @@ pub(super) fn check_charges<'a>(
 /// Check a recorded caller reference, or one to look up: nonblank, at most
 /// `max` characters, without a control character, line separator or
 /// bidirectional control. This is the rule references were written under
-/// before every Unicode format character and surrounding spaces were
-/// refused, so a ledger written earlier stays readable and its references
-/// can still be looked up. A new reference must pass [`check_new_reference`].
+/// before every Unicode format character, invisible character, look-alike
+/// space and surrounding space was refused, so a ledger written earlier
+/// stays readable and its references can still be looked up. A new
+/// reference must pass [`check_new_reference`].
 pub(super) fn valid_text(text: &str, max: usize) -> bool {
     // The disguising characters are all outside ASCII.
     !text.trim().is_empty()
@@ -139,10 +140,12 @@ pub(super) fn valid_text(text: &str, max: usize) -> bool {
 
 /// Check a caller reference before it is recorded: nonblank, at most
 /// [`MAX_CALLER_REF`] characters, without a control character, without a
-/// disguising character ([`is_disguising`]: a line separator or a Unicode
-/// format character such as U+200B or U+202E) and without leading or
-/// trailing spaces. Two references that differ only in such characters
-/// could look the same. The error says what is wrong, after "the reference".
+/// disguising character ([`is_disguising`]: a line separator, a Unicode
+/// format character such as U+200B or U+202E, another invisible character
+/// such as U+034F or U+FE0F, or a look-alike space such as U+00A0) and
+/// without leading or trailing spaces. Two references that differ only in
+/// such characters could look the same. The error says what is wrong, after
+/// "the reference".
 pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("is blank".to_owned());
@@ -168,7 +171,7 @@ pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
 /// The rule of [`check_new_reference`], as a sentence for a message.
 pub(super) fn new_reference_rule() -> String {
     format!(
-        "A caller reference is nonblank, at most {MAX_CALLER_REF} characters, without leading or trailing spaces, control characters, line separators or Unicode format characters"
+        "A caller reference is nonblank, at most {MAX_CALLER_REF} characters, without leading or trailing spaces, control characters, line separators, Unicode format characters, other invisible characters or spaces other than the ASCII space"
     )
 }
 
@@ -1160,7 +1163,7 @@ mod tests {
         prop_oneof![
             "[ -~]{0,12}",
             "[\\x00-\\x7f]{0,12}",
-            "[ a\\t\\x00\\x1f\\x7f\\x{80}\\x{85}\\x{9f}\\x{a0}\\x{ad}\\x{61c}\\x{200b}\\x{200e}\\x{2028}\\x{2029}\\x{202e}\\x{2066}\\x{2069}\\x{3000}\\x{feff}\\x{e0065}é]{0,12}",
+            "[ a\\t\\x00\\x1f\\x7f\\x{80}\\x{85}\\x{9f}\\x{a0}\\x{ad}\\x{34f}\\x{61c}\\x{2003}\\x{200b}\\x{200e}\\x{2028}\\x{2029}\\x{202e}\\x{2066}\\x{2069}\\x{3000}\\x{3164}\\x{fe0f}\\x{feff}\\x{e0065}\\x{e0100}é]{0,12}",
             any::<String>(),
         ]
         .boxed()

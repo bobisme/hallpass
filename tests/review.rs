@@ -75,9 +75,10 @@ expected = "name-required"
 
 #[test]
 fn approval_id_is_stable_and_namespaced() {
-    let a = review::approval_id("owner", "approval #1");
-    assert_eq!(a, review::approval_id("owner", "approval #1"));
-    assert_ne!(a, review::approval_id("other", "approval #1"));
+    let id = |owner, reference| review::approval_id(owner, reference).expect("an id");
+    let a = id("owner", "approval #1");
+    assert_eq!(a, id("owner", "approval #1"));
+    assert_ne!(a, id("other", "approval #1"));
     assert!(a.starts_with("hp1-"));
 }
 

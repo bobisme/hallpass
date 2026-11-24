@@ -203,7 +203,14 @@ request name follows the destination rules.
    bidirectional controls (U+061C, U+200E, U+200F, U+202A-U+202E,
    U+2066-U+2069), the zero-width characters (U+200B-U+200D, U+2060,
    U+FEFF), the soft hyphen (U+00AD) and the interlinear annotation
-   controls (U+FFF9-U+FFFB). Failure is a usage error that names the
+   controls (U+FFF9-U+FFFB). The note may not hold any other
+   default-ignorable code point of Unicode 16.0 either: the combining
+   grapheme joiner (U+034F), the Hangul fillers (U+115F, U+1160, U+3164,
+   U+FFA0), U+17B4 and U+17B5, the variation selectors (U+180B-U+180F,
+   U+FE00-U+FE0F, U+E0100-U+E01EF) and the reserved U+2065,
+   U+FFF0-U+FFF8 and U+E0000-U+E0FFF. Nor may it hold a space other than
+   the ASCII space (general category Zs: U+00A0, U+1680, U+2000-U+200A,
+   U+202F, U+205F, U+3000). Failure is a usage error that names the
    character. (Reading a ledger accepts notes that only avoid control
    characters, the 0.1 rule.)
    A name without a target, a negative `needed`, and a `now` outside the
@@ -323,8 +330,9 @@ fields that tell the kinds apart, so the adoption line is unchanged.
 
 A new caller reference is nonblank, at most 128 characters, without
 leading or trailing spaces, and holds no control character and none of the
-characters a note refuses (line separators and Unicode format characters):
-two references that differ only in those could look the same. Reading a
+characters a note refuses (line separators, Unicode format characters,
+other invisible characters and spaces other than the ASCII space): two
+references that differ only in those could look the same. Reading a
 ledger, and looking a reference up with `receipt` or a `reconcile`
 manifest, applies the earlier rule (nonblank, at most 128 characters, no
 control character, line separator or bidirectional control), so a
@@ -443,7 +451,7 @@ raised ceiling in the pass, or a new pass). Then the witness records the
 new last line. The reason follows the note rules and is required.
 (Reading a ledger accepts a recorded reason under the earlier rule, which
 refused line separators and bidirectional controls but not the other
-format characters.) With
+format characters, invisible characters or look-alike spaces.) With
 nothing to adopt (the ledger matches its witness, or there is neither a
 ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
@@ -934,7 +942,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `consumer-coverage` | `covered` | `gaps` | invalid declaration or pass |
 | `lint` | the report, with or without findings | never | invalid pass |
 | `test-pass` | every case matched; with `--strength`, `complete` | a mismatch; with `--strength`, survivors, partial analysis or a failed baseline | invalid pass or suite |
-| `approval-id` | the ID is printed | never | bad arguments |
+| `approval-id` | the ID is printed | never | bad arguments, including an owner or reference that a pass could not hold (the text rules of PASS-FORMAT.md) |
 
 `check` does not judge the window; `status` does.
 
@@ -1173,7 +1181,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **lint**: `digest`, `findings`, `truncated`, `window_warnings` (as in "Window warnings").
 - **test-pass**: `cases` (the suite path), `digest`, `results`,
   `mismatches`; `mutation_strength` with `--strength`.
-- **approval-id**: `id`, `owner`, `reference`.
+- **approval-id**: `id`, `owner`, `reference`. When `--owner` or
+  `--reference` holds text that `approval.owner` or `approval.reference`
+  may not hold, the usage error lists each problem under `problems` as
+  `{field, message}`, as `check` does.
 
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is

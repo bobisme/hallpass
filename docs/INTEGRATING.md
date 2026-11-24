@@ -681,6 +681,10 @@ request the actual approval time instead of guessing one.
 For example, run `hallpass approval-id --owner "Pat Owner" --reference
 "Change 9812 / Voice edge (approved)"` and copy the printed ID into the pass.
 Keep the reference exactly as written when revising destinations or ceilings.
+`approval-id` checks the owner and reference with the pass text rules
+(PASS-FORMAT.md, "General rules") and prints no ID for text a pass could
+not hold, such as a zero-width space or a no-break space. In Rust,
+`hallpass::review::approval_id` returns the same problems as an error.
 If that message omits the start instant, obtain it from the owner before
 issuing the pass.
 
