@@ -427,6 +427,115 @@ underlying contracts, see
 and [Reconcile a run manifest](EVIDENCE.md#reconcile-a-run-manifest).
 
 Hand over the journal, the outbox, the pass with its ledger, the archive and
-the handoff output. For a copy of the ledger state that a second account can
-verify, add a checkpoint:
+the handoff output, but not as a copy: to another account the files must
+move and be adopted. [Step 9](#9-hand-the-pass-to-another-account) shows
+how. For a copy of the ledger state that a second account can verify, add a
+checkpoint:
 [Retaining and checking history](../README.md#retaining-and-checking-history).
+
+## 9. Hand the pass to another account
+
+The witness that catches a lost or rewound ledger lives in the state
+directory of the account that spent. A colleague on another account has
+another state directory, so the pass arrives there without a witness. This
+step plays the colleague with a second `XDG_STATE_HOME`. It shows what goes
+wrong with a copy and what to do instead.
+
+A copy first. Each copy is checked against the state directory of the
+account that reads it:
+
+```sh
+cd "$work"
+mkdir copy
+cp engagement.pass.toml engagement.pass.toml.ledger copy/
+(cd copy && XDG_STATE_HOME="$work/colleague-state" hallpass status engagement.pass.toml | tail -n 1)
+hallpass status engagement.pass.toml | tail -n 1
+rm -r copy
+```
+
+```text
+Ledger: 2 line(s) after the header, chain verified, NO WITNESS yet (see the warning)
+Ledger: 2 line(s) after the header, chain verified, the witness matches
+```
+
+The original still matches its witness, so it is still spendable. The copy
+has no witness, so its guarded spends are refused until it is adopted, and
+after the adoption it counts on its own. Two such copies are two budgets for
+one approval. Do not hand over a copy. Either keep the same account, the
+same `XDG_STATE_HOME` and the same `HOME`, or move the files and adopt them
+on the new account, as follows.
+
+Copy the journal, the outbox, the pass and the archive, and move the
+ledger. The ledger holds the count, so it must exist once:
+
+```sh
+mkdir colleague
+cp -r shift.jsonl outbox.jsonl engagement.pass.toml approval-archive colleague/
+mv engagement.pass.toml.ledger colleague/
+```
+
+The old account keeps its copy of the pass, but the ledger is gone, so it
+is refused: its witness remembers two ledger lines, and hallpass
+will not count from zero:
+
+```sh
+if hallpass status engagement.pass.toml >refusal.txt 2>&1; then echo "still spendable"; else echo "refused, exit $?"; fi
+grep -o -e 'the ledger [^ ]* for pass `[^`]*` is missing' -e 'says hallpass recorded [0-9]* ledger line(s) for this pass id (spent: [^)]*)' -e 'hallpass will not count from zero\.' refusal.txt
+```
+
+```text
+refused, exit 1
+the ledger engagement.pass.toml.ledger for pass `web-2026-11` is missing
+says hallpass recorded 2 ledger line(s) for this pass id (spent: bytes 48, requests 2)
+hallpass will not count from zero.
+```
+
+Leave it like that. The full message also offers `hallpass adopt` for a
+ledger that is "really lost". This ledger is not lost, it moved. An
+adoption on the old account would start a new ledger there that carries only
+bytes 48 and requests 2. That ledger would not see anything the colleague
+spends, so it would be a second budget again. After a move, the old account
+does not run `adopt` and does not spend on this pass.
+
+On the new account, a guarded spend is refused until the ledger is adopted.
+The caller reports `reference-inconclusive` and sends nothing:
+
+```sh
+cd colleague
+export XDG_STATE_HOME="$work/colleague-state"
+python3 "$caller" run shift.jsonl engagement.pass.toml shift-2/unit-1 --rehearsal \
+    --to 192.0.2.10:443/tcp@app.example.org --charge requests=1 --charge bytes=1 --duration 5 || echo "exit $?"
+```
+
+```text
+shift-2/unit-1: refused reference-inconclusive, nothing sent
+exit 2
+```
+
+Preview the adoption, then adopt with the token that the preview printed. The
+ledger moved with the pass, so it is the complete history. The adoption keeps
+every line and carries nothing, and it records the reason in the ledger:
+
+```sh
+hallpass adopt engagement.pass.toml --preview 2>/dev/null | sed 's/Token: .*/Token: TOKEN/'
+token=$(hallpass --format json adopt engagement.pass.toml --preview 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+hallpass adopt engagement.pass.toml --reason "pass moved to the colleague's account" --token "$token" 2>/dev/null
+```
+
+```text
+ADOPTION PREVIEW: no-witness for web-2026-11 at sequence 2. Present: bytes 48, requests 2. Carry: nothing. Projected: bytes 48, requests 2. Token: TOKEN
+ADOPTED: engagement.pass.toml.ledger for pass web-2026-11 (the ledger had no witness). Recorded as ledger entry 3 with the reason "pass moved to the colleague's account". Carried from the witness: nothing. Spent now: bytes 48, requests 2.
+```
+
+The colleague now spends from the same count, and the adoption is entry 3
+in the ledger. The refused unit stays in the journal, so the next unit has a
+new reference:
+
+```sh
+python3 "$caller" run shift.jsonl engagement.pass.toml shift-2/unit-2 --rehearsal \
+    --to 192.0.2.10:443/tcp@app.example.org --charge requests=1 --charge bytes=1 --duration 5
+```
+
+```text
+shift-2/unit-2: debit seq 4 verified, unit sent, completion recorded
+```

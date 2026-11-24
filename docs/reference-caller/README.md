@@ -95,6 +95,16 @@ by other callers or without a reference, not judged; use --all to list them.`
   sequence number.
 - `--all`: list the other debits, as `other: not judged` rows.
 
+## Handing a pass to another account
+
+`handoff` output and the journal can be copied. The ledger must be moved,
+not copied: a copy on an account with another state directory has no
+witness, so every `run` there is refused as `reference-inconclusive` until
+`hallpass adopt`, and the old copy would stay spendable as a second budget.
+After a move, the old account is refused and must not run `adopt` or spend.
+[Step 9 of the walkthrough](../WALKTHROUGH.md#9-hand-the-pass-to-another-account)
+shows the commands and what they print.
+
 ## After a lost ledger
 
 When the ledger is lost or replaced and an operator adopts it, the lost

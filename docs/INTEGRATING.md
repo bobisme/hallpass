@@ -260,6 +260,14 @@ a second at 42,000 lines.
   a spend on a nonempty ledger without a witness is refused as
   `reference-inconclusive` until `hallpass adopt` records the ledger as it
   stands (only when it is the complete history).
+- **Hand a pass to another account by moving the ledger, not copying it.**
+  A copy used under another `XDG_STATE_HOME` has no witness, so its guarded
+  spends are `reference-inconclusive` until `hallpass adopt`, and the
+  original stays spendable: two budgets for one approval. Move the ledger
+  to the new account and adopt it there. The old account, whose witness
+  remains, is then refused as `ledger-missing`; it must not run `adopt` or
+  spend on that pass. The commands and their output are in
+  [step 9 of the walkthrough](WALKTHROUGH.md#9-hand-the-pass-to-another-account).
 - **Keep the ledger beside the pass.** `PASS.ledger` is the count. Do not
   copy the pass elsewhere to "start fresh". While the original ledger is
   intact, the copy is refused as `ledger-elsewhere`, and `adopt` refuses it

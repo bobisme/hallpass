@@ -3,7 +3,9 @@
 //! the checkout root. A `text` block that follows an `sh` block with only
 //! blank lines between them is that block's expected standard output. Then
 //! the ledger, the journal and the outbox are checked: two debits, the
-//! narrowed totals and the caller outcome of each unit.
+//! narrowed totals and the caller outcome of each unit. Step 9 moves the
+//! pass to a second directory with a second state directory; the checks look
+//! there.
 //!
 //! The walkthrough pins `HALLPASS_UNSAFE_TEST_CLOCK` itself (debug builds, or
 //! `--features test-clock`) and keeps its state in a fresh temporary
@@ -165,13 +167,19 @@ fn run_walkthrough() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn the_walkthrough_runs_as_written() {
     let (dir, work) = run_walkthrough();
+    // Step 9 moves everything to the colleague's directory and state.
+    let work = work.join("colleague");
     let work = work.as_path();
+    let state = work
+        .parent()
+        .expect("work directory")
+        .join("colleague-state");
     let home = dir.path().join("home");
     let ledger = Command::new(BIN)
         .args(["--format", "json", "ledger", "engagement.pass.toml"])
         .current_dir(work)
         .env("HOME", &home)
-        .env("XDG_STATE_HOME", work.join("state"))
+        .env("XDG_STATE_HOME", &state)
         .output()
         .expect("ledger");
     let ledger: Value = serde_json::from_slice(&ledger.stdout).expect("ledger JSON");
@@ -188,7 +196,17 @@ fn the_walkthrough_runs_as_written() {
             )
         })
         .collect();
-    assert_eq!(debits, [(1, "shift-1/unit-1"), (2, "shift-1/unit-3")]);
+    assert_eq!(
+        debits,
+        [
+            (1, "shift-1/unit-1"),
+            (2, "shift-1/unit-3"),
+            (4, "shift-2/unit-2")
+        ]
+    );
+    let adoptions = ledger["adoptions"].as_array().expect("adoptions");
+    assert_eq!(adoptions.len(), 1, "{ledger}");
+    assert_eq!(adoptions[0]["seq"], 3);
     let totals: Vec<(&str, u64, u64)> = ledger["totals"]
         .as_array()
         .expect("totals")
@@ -201,7 +219,7 @@ fn the_walkthrough_runs_as_written() {
             )
         })
         .collect();
-    assert_eq!(totals, [("bytes", 48, 60), ("requests", 2, 5)]);
+    assert_eq!(totals, [("bytes", 49, 60), ("requests", 3, 5)]);
 
     let journal = lines(&work.join("shift.jsonl"));
     let sent = ["intent", "spend debited", "callback-start", "callback-done"];
@@ -211,6 +229,11 @@ fn the_walkthrough_runs_as_written() {
         ["intent", "spend refused pass-changed"]
     );
     assert_eq!(outcomes(&journal, "shift-1/unit-3"), sent);
+    assert_eq!(outcomes(&journal, "shift-2/unit-2"), sent);
+    assert_eq!(
+        outcomes(&journal, "shift-2/unit-1"),
+        ["intent", "spend refused reference-inconclusive"]
+    );
     let pins: Vec<&Value> = journal.iter().filter(|r| r["event"] == "pin").collect();
     assert_eq!(pins.len(), 2);
     assert_ne!(pins[0]["digest"], pins[1]["digest"]);
@@ -229,7 +252,7 @@ fn the_walkthrough_runs_as_written() {
         .iter()
         .map(|line| line["ref"].as_str().expect("ref"))
         .collect();
-    assert_eq!(refs, ["shift-1/unit-1", "shift-1/unit-3"]);
+    assert_eq!(refs, ["shift-1/unit-1", "shift-1/unit-3", "shift-2/unit-2"]);
 }
 
 #[test]
