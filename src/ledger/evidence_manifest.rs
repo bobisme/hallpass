@@ -1,6 +1,6 @@
 //! Bounded, local manifests reconciled against a single verified history scan.
 use super::evidence::DETAIL_LIMIT;
-use super::{VerifiedEvent, debit, display_safe, visit_view};
+use super::{VerifiedEvent, debit, display_quoted, visit_view};
 use crate::{Digest, Error, HostName, LoadedPass, StateDir, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,10 +169,10 @@ fn read_manifest(path: &Path, id: &str) -> Result<Manifest, Error> {
     }
     if manifest.pass_id != id {
         return Err(Error::Usage(format!(
-            "manifest field pass_id is \"{}\" but this pass is \"{}\"; reconcile needs the manifest written for this pass. Use the pass it names, or a manifest for \"{}\"",
-            display_safe(&manifest.pass_id),
-            display_safe(id),
-            display_safe(id)
+            "manifest field pass_id is {} but this pass is {}; reconcile needs the manifest written for this pass. Use the pass it names, or a manifest for {}",
+            display_quoted(&manifest.pass_id),
+            display_quoted(id),
+            display_quoted(id)
         )));
     }
     if !(1..=MAX_MANIFEST_ROWS).contains(&manifest.units.len()) {
@@ -200,9 +200,9 @@ fn row_error(
     fix: &str,
 ) -> Error {
     Error::Usage(format!(
-        "manifest row {row} (caller_ref \"{}\"): {field} {problem}: \"{}\"; {fix}",
-        display_safe(caller_ref),
-        display_safe(value)
+        "manifest row {row} (caller_ref {}): {field} {problem}: {}; {fix}",
+        display_quoted(caller_ref),
+        display_quoted(value)
     ))
 }
 

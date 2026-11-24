@@ -213,11 +213,15 @@ tool that pinned the old digest, which is the point.
 - **Notes are operator text** and end up on terminals. A note is one line
   without control characters; since 0.2 a new note may also not contain
   the Unicode line and paragraph separators or bidirectional controls
-  (which can make text display as something else, as in "Trojan Source").
-  Reading keeps the 0.1 rule, so a ledger written by 0.1 stays readable.
-  Text output escapes every such character as `\u{...}` (and `\` as `\\`,
-  so an escape cannot be faked); JSON keeps the exact text, as JSON
-  escaping already makes it one line.
+  (which can make text display as something else, as in "Trojan Source"),
+  and after 0.2.0 no other Unicode format character either (zero-width and
+  tag characters, the soft hyphen, the byte order mark: invisible, so two
+  texts that differ look the same). New caller references and reasons
+  follow the same rule. Reading keeps the earlier, looser rules (for
+  notes the 0.1 rule), so an older ledger stays readable. Text output escapes every such
+  character as `\u{...}` (and `\` as `\\`, so an escape cannot be
+  faked), and a quoted value also escapes its quotes, once; JSON keeps the
+  exact text, as JSON escaping already makes it one line.
 - **Edits**: the spent amount of a counter is the sum over all entries with
   that name, whatever their digest. Raising a total takes effect; no edit
   resets the count. Changing the pass `id` makes the ledger foreign and is

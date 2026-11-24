@@ -224,11 +224,60 @@ pub fn ledger_path(pass_path: &Path) -> PathBuf {
     pass_path.with_file_name(name)
 }
 
-/// Characters a note may not contain when it is written, beyond control
-/// characters: the Unicode line and paragraph separators (some viewers break
-/// lines at them) and the bidirectional formatting controls (they reorder how
-/// the text around them is displayed, so a note could disguise itself).
-pub const fn is_disguising(c: char) -> bool {
+/// The Unicode format characters (general category Cf in Unicode 16.0), as
+/// inclusive ranges of code points, with the rest of the Tags block (U+E0000
+/// and U+E0002 to U+E001F, not assigned yet). They include the zero-width
+/// space, joiners and word joiner, the soft hyphen, the byte order mark, the
+/// bidirectional controls, the interlinear annotation controls and the tag
+/// characters: most are invisible, and the others change how the text around
+/// them is shown.
+const FORMAT_CHARACTERS: [(u32, u32); 20] = [
+    (0x00ad, 0x00ad),
+    (0x0600, 0x0605),
+    (0x061c, 0x061c),
+    (0x06dd, 0x06dd),
+    (0x070f, 0x070f),
+    (0x0890, 0x0891),
+    (0x08e2, 0x08e2),
+    (0x180e, 0x180e),
+    (0x200b, 0x200f),
+    (0x202a, 0x202e),
+    (0x2060, 0x2064),
+    (0x2066, 0x206f),
+    (0xfeff, 0xfeff),
+    (0xfff9, 0xfffb),
+    (0x110bd, 0x110bd),
+    (0x110cd, 0x110cd),
+    (0x13430, 0x1343f),
+    (0x1bca0, 0x1bca3),
+    (0x1d173, 0x1d17a),
+    (0xe0000, 0xe007f),
+];
+
+/// Characters that can make text display as something other than its
+/// characters, beyond control characters: the Unicode line and paragraph
+/// separators (some viewers break lines at them) and every Unicode format
+/// character ([`FORMAT_CHARACTERS`]). A bidirectional control reorders the
+/// text around it; a zero-width or tag character is invisible, so text that
+/// holds one looks like text that does not. New notes, reasons and caller
+/// references and pass text may not contain them, and text output escapes
+/// them.
+pub fn is_disguising(c: char) -> bool {
+    let c = u32::from(c);
+    c >= 0xad
+        && (c == 0x2028
+            || c == 0x2029
+            || FORMAT_CHARACTERS
+                .iter()
+                .any(|&(first, last)| (first..=last).contains(&c)))
+}
+
+/// The disguising characters refused before every format character was: the
+/// line and paragraph separators and the bidirectional controls. Reading a
+/// ledger checks a recorded caller reference or reason against this set
+/// only, so a line written earlier, which may hold another format character,
+/// stays readable.
+const fn is_line_or_bidi_control(c: char) -> bool {
     matches!(
         c,
         '\u{2028}'
@@ -241,28 +290,70 @@ pub const fn is_disguising(c: char) -> bool {
     )
 }
 
+/// A disguising character for a message: what it is and its code point, as
+/// in "a bidirectional text control (U+202E)".
+pub fn describe_disguising(c: char) -> String {
+    let kind = match c {
+        '\u{2028}' => "a line separator",
+        '\u{2029}' => "a paragraph separator",
+        c if is_line_or_bidi_control(c) => "a bidirectional text control",
+        _ => "a Unicode format character",
+    };
+    format!("{kind} (U+{:04X})", u32::from(c))
+}
+
 /// `text` made safe to print on a terminal as part of one line.
 ///
-/// Control characters, line separators and bidirectional controls are
-/// written as `\u{…}`, and a backslash as `\\`, so the escaping cannot be
-/// forged either. Other text is unchanged.
+/// Control characters, line and paragraph separators and Unicode format
+/// characters (bidirectional controls, zero-width and tag characters, the
+/// soft hyphen and the others of [`is_disguising`]) are written as
+/// `\u{…}`, and a backslash as `\\`, so the escaping cannot be forged
+/// either. Other text is unchanged.
 #[must_use]
 pub fn display_safe(text: &str) -> std::borrow::Cow<'_, str> {
-    let unsafe_char = |c: char| c == '\\' || c.is_control() || is_disguising(c);
-    if !text.chars().any(unsafe_char) {
+    if !text.chars().any(|c| c == '\\' || needs_escape(c)) {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 8);
+    push_escaped(&mut out, text, false);
+    std::borrow::Cow::Owned(out)
+}
+
+/// `text` as one quoted value in a line of text output, escaped once.
+///
+/// The value is in double quotes. A double quote inside is written as `\"`,
+/// and everything else is escaped as [`display_safe`] escapes it. Each
+/// character is escaped once, so the value cannot end its quotes early or
+/// pass for more than one value, and undoing the escapes (`\"`, `\\` and
+/// `\u{…}`) gives `text` back.
+#[must_use]
+pub fn display_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    push_escaped(&mut out, text, true);
+    out.push('"');
+    out
+}
+
+/// Whether [`display_safe`] writes `c` as `\u{…}`.
+fn needs_escape(c: char) -> bool {
+    c.is_control() || is_disguising(c)
+}
+
+/// Append `text` to `out` escaped once: a backslash as `\\`, with `quote` a
+/// double quote as `\"`, and each character of [`needs_escape`] as `\u{…}`.
+fn push_escaped(out: &mut String, text: &str, quote: bool) {
     for c in text.chars() {
         if c == '\\' {
             out.push_str("\\\\");
-        } else if unsafe_char(c) {
+        } else if quote && c == '"' {
+            out.push_str("\\\"");
+        } else if needs_escape(c) {
             let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
         } else {
             out.push(c);
         }
     }
-    std::borrow::Cow::Owned(out)
 }
 
 /// Whether `text` has a control character (`char::is_control`). ASCII text,
@@ -286,14 +377,15 @@ fn longer_than(text: &str, max: usize) -> bool {
 }
 
 /// Check a note before it is recorded: one plain line, at most
-/// [`MAX_NOTE`] characters, without control characters, line separators or
-/// bidirectional controls.
+/// [`MAX_NOTE`] characters, without control characters or the disguising
+/// characters of [`is_disguising`] (line separators and Unicode format
+/// characters, such as bidirectional controls and zero-width characters).
 fn check_new_note(note: &str) -> Result<(), String> {
-    if note.chars().any(is_disguising) {
-        return Err(
-            "the note contains a line separator or a bidirectional text control, which can make it display as something else; write one plain line"
-                .to_owned(),
-        );
+    if let Some(c) = note.chars().find(|c| is_disguising(*c)) {
+        return Err(format!(
+            "the note contains {}, which can make it display as something else; write one plain line without it",
+            describe_disguising(c)
+        ));
     }
     check_note(note)
 }
@@ -816,8 +908,8 @@ fn unknown_event(line: &[u8]) -> Option<String> {
     let event = value.get("event")?.as_str()?;
     (!KNOWN_EVENTS.contains(&event)).then(|| {
         format!(
-            "the line is a complete record of an event this hallpass does not know (\"{}\"), perhaps written by a newer hallpass: read this ledger with that one",
-            display_safe(event)
+            "the line is a complete record of an event this hallpass does not know ({}), perhaps written by a newer hallpass: read this ledger with that one",
+            display_quoted(event)
         )
     })
 }
@@ -862,7 +954,7 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         return Err(bad);
     };
     if line.event != "adopt"
-        || check_reason(&line.reason).is_err()
+        || !valid_recorded_reason(&line.reason)
         || !valid_totals(&line.carried)
         || line.carried.values().any(|n| *n == 0)
     {
@@ -903,12 +995,23 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
     })
 }
 
-/// Check an adoption reason: required, and a note in every other way.
+/// Check a new adoption reason: required, and a new note in every other way.
 fn check_reason(reason: &str) -> Result<(), String> {
     if reason.trim().is_empty() {
         return Err("the reason is empty; say why the ledger is being adopted".to_owned());
     }
     check_new_note(reason).map_err(|m| m.replace("the note", "the reason"))
+}
+
+/// Check a recorded adoption or reconciliation reason: nonblank, printable,
+/// at most [`MAX_NOTE`] characters, without a line separator or
+/// bidirectional control. This is the rule reasons were written under
+/// before every Unicode format character was refused, so a ledger written
+/// earlier stays readable; a new reason must pass [`check_reason`].
+fn valid_recorded_reason(reason: &str) -> bool {
+    !reason.trim().is_empty()
+        && !reason.chars().any(is_line_or_bidi_control)
+        && check_note(reason).is_ok()
 }
 
 fn check_private(path: &Path, file: &fs::File) -> Result<(), Error> {
@@ -3453,6 +3556,47 @@ mod tests {
         assert_eq!(display_safe("x\u{2028}y"), "x\\u{2028}y");
         // An escaped-looking note cannot pass for an escape.
         assert_eq!(display_safe("\\u{000a}"), "\\\\u{000a}");
+        // Invisible format characters show.
+        assert_eq!(display_safe("a\u{200b}b"), "a\\u{200b}b");
+        assert_eq!(display_safe("\u{feff}a\u{ad}"), "\\u{feff}a\\u{00ad}");
+        assert_eq!(display_safe("t\u{e0065}"), "t\\u{e0065}");
+        // A quote needs no escape outside quotes.
+        assert_eq!(display_safe("a\"b"), "a\"b");
+    }
+
+    #[test]
+    fn display_quoted_escapes_each_character_once() {
+        assert_eq!(display_quoted("plain"), "\"plain\"");
+        assert_eq!(display_quoted("q\"uote"), "\"q\\\"uote\"");
+        assert_eq!(display_quoted("back\\slash"), "\"back\\\\slash\"");
+        assert_eq!(display_quoted("a\u{200b}\n"), "\"a\\u{200b}\\u{000a}\"");
+        assert_eq!(display_quoted(""), "\"\"");
+    }
+
+    /// Undo [`display_quoted`]: the text between the quotes, with `\"`,
+    /// `\\` and `\u{…}` decoded; `None` for anything else.
+    fn unquote(shown: &str) -> Option<String> {
+        let inner = shown.strip_prefix('"')?.strip_suffix('"')?;
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return None,
+                '\\' => match chars.next()? {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'u' => {
+                        let rest = chars.as_str().strip_prefix('{')?;
+                        let end = rest.find('}')?;
+                        out.push(char::from_u32(u32::from_str_radix(&rest[..end], 16).ok()?)?);
+                        chars = rest[end + 1..].chars();
+                    }
+                    _ => return None,
+                },
+                c => out.push(c),
+            }
+        }
+        Some(out)
     }
 
     proptest::proptest! {
@@ -3460,6 +3604,13 @@ mod tests {
         fn display_safe_is_one_plain_line(text in ".*") {
             let shown = display_safe(&text);
             proptest::prop_assert!(!shown.chars().any(|c| c.is_control() || is_disguising(c)));
+        }
+
+        #[test]
+        fn display_quoted_is_one_value_that_decodes_back(text in ".*") {
+            let shown = display_quoted(&text);
+            proptest::prop_assert!(!shown.chars().any(|c| c.is_control() || is_disguising(c)));
+            proptest::prop_assert_eq!(unquote(&shown), Some(text));
         }
     }
 

@@ -11,15 +11,15 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::{
-    Adoption, Parsed, VerifiedEvent, WitnessStatus, append, check_clock, check_new_note,
-    check_reason, compare, debit, evidence, exists, ledger_path, lock_for_writing, prepare_witness,
-    read_view, refused_spend, rfc3339,
+    Adoption, Parsed, VerifiedEvent, WitnessStatus, append, check_clock, check_new_note, compare,
+    debit, evidence, exists, ledger_path, lock_for_writing, prepare_witness, read_view,
+    refused_spend, rfc3339, valid_recorded_reason,
 };
 use crate::files::{load, open_no_follow};
 use crate::witness::Witnessed;
 use crate::{
     Digest, Error, LoadedPass, MAX_CALLER_REF, Refusal, RefusalCode, SpendRequest, StateDir,
-    display_safe, request::check_revision_window, stamp,
+    display_quoted, display_safe, request::check_revision_window, stamp,
 };
 
 /// The most caller references one reference reconciliation may list.
@@ -89,10 +89,35 @@ pub(super) struct ReconcileLine {
     pub(super) prev: String,
 }
 
-/// Check a reconciliation's reason and reference list: at most
-/// [`MAX_RECONCILED_REFERENCES`] references, each a valid caller reference,
-/// none twice. The message names the first bad entry (counted from 1).
-fn check_references(references: &[String]) -> Result<(), String> {
+/// Check the reference list of a new reconciliation: at most
+/// [`MAX_RECONCILED_REFERENCES`] references, each a new caller reference
+/// ([`debit::check_new_reference`]), none twice. The message names the first
+/// bad entry (counted from 1).
+fn check_new_references(references: &[String]) -> Result<(), String> {
+    check_reference_list(references, |reference| {
+        debit::check_new_reference(reference)
+            .map_err(|problem| format!("{problem}. {}", debit::new_reference_rule()))
+    })
+}
+
+/// Check the reference list of a recorded reconciliation as
+/// [`check_new_references`] does, with each reference checked as a recorded
+/// caller reference ([`debit::valid_text`]), so a line written earlier stays
+/// readable.
+fn check_recorded_references(references: &[String]) -> Result<(), String> {
+    check_reference_list(references, |reference| {
+        if debit::valid_text(reference, MAX_CALLER_REF) {
+            Ok(())
+        } else {
+            Err("is not a recorded caller reference".to_owned())
+        }
+    })
+}
+
+fn check_reference_list(
+    references: &[String],
+    check: impl Fn(&str) -> Result<(), String>,
+) -> Result<(), String> {
     if references.len() > MAX_RECONCILED_REFERENCES {
         return Err(format!(
             "the list has {} references, more than the {MAX_RECONCILED_REFERENCES} one reconciliation may hold",
@@ -101,18 +126,18 @@ fn check_references(references: &[String]) -> Result<(), String> {
     }
     let mut seen = BTreeSet::new();
     for (index, reference) in references.iter().enumerate() {
-        if !debit::valid_text(reference, MAX_CALLER_REF) {
+        if let Err(problem) = check(reference) {
             return Err(format!(
-                "reference {} (\"{}\") is not a caller reference: it must be nonblank, at most {MAX_CALLER_REF} characters and free of controls",
+                "reference {} ({}) is not a caller reference: it {problem}",
                 index + 1,
-                display_safe(reference)
+                display_quoted(reference)
             ));
         }
         if !seen.insert(reference.as_str()) {
             return Err(format!(
-                "reference {} (\"{}\") is listed twice; list each reference once",
+                "reference {} ({}) is listed twice; list each reference once",
                 index + 1,
-                display_safe(reference)
+                display_quoted(reference)
             ));
         }
     }
@@ -134,8 +159,8 @@ pub(super) fn parse_reconcile(
         return Err(bad);
     };
     if line.event != RECONCILE_EVENT
-        || check_reason(&line.reason).is_err()
-        || check_references(&line.references).is_err()
+        || !valid_recorded_reason(&line.reason)
+        || check_recorded_references(&line.references).is_err()
     {
         return Err(bad);
     }
@@ -341,12 +366,12 @@ pub fn read_reference_list(path: &Path, pass_id: &str) -> Result<Vec<String>, Er
     }
     if list.pass_id != pass_id {
         return Err(usage(format!(
-            "is for pass \"{}\", but this pass is \"{}\"; use the list written for this pass",
-            display_safe(&list.pass_id),
-            display_safe(pass_id)
+            "is for pass {}, but this pass is {}; use the list written for this pass",
+            display_quoted(&list.pass_id),
+            display_quoted(pass_id)
         )));
     }
-    check_references(&list.references).map_err(usage)?;
+    check_new_references(&list.references).map_err(usage)?;
     Ok(list.references)
 }
 
@@ -410,7 +435,7 @@ pub fn reconcile_references(
         ));
     }
     check_new_note(reason).map_err(|m| nothing_recorded(&m.replace("the note", "the reason")))?;
-    check_references(references).map_err(|m| nothing_recorded(&m))?;
+    check_new_references(references).map_err(|m| nothing_recorded(&m))?;
     if !exists(&ledger_path(pass_path))? {
         // A lost ledger is `ledger-missing` (adopt it first); with no
         // ledger and no witnessed line, nothing was ever adopted.

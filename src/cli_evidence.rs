@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use hallpass::{StateDir, evidence};
 use serde_json::{Value, json};
 
-use super::{ERROR, OK, Output, REFUSED, error_output, safe};
+use super::{ERROR, OK, Output, REFUSED, error_output, quoted, safe};
 
 fn output(cmd: &str, file: &Path, code: u8, mut value: Value, text: String) -> Output {
     value["command"] = json!(cmd);
@@ -25,9 +25,9 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
         Err(e) => return error_output("receipt", Some(file), &e),
     };
     let mut text = format!(
-        "Receipt {} for {:?}. {} matches. Witness {}. Adoptions {}.\n",
+        "Receipt {} for {}. {} matches. Witness {}. Adoptions {}.\n",
         report.result,
-        safe(reference),
+        quoted(reference),
         report.match_count,
         report.witness,
         report.adoption_count
@@ -187,7 +187,7 @@ fn revisions_text(text: &mut String, revisions: &evidence::RevisionGroup) {
             |a| {
                 format!(
                     "signature-verified for principal {} with trusted signers {}",
-                    safe(&format!("{:?}", a.principal)),
+                    quoted(&a.principal),
                     a.allowed_signers
                 )
             },
@@ -386,7 +386,7 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
             text,
             "  {:<12} {}{}",
             row.result,
-            safe(&row.caller_ref),
+            quoted(&row.caller_ref),
             match row.candidate_count {
                 0 => String::new(),
                 1 => format!(
@@ -414,7 +414,7 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
         for d in &row.differences {
             let show = |v: &Option<serde_json::Value>| match v {
                 None => "absent".to_owned(),
-                Some(serde_json::Value::String(v)) => safe(v).into_owned(),
+                Some(serde_json::Value::String(v)) => quoted(v),
                 Some(other) => other.to_string(),
             };
             let _ = writeln!(

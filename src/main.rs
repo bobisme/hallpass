@@ -892,9 +892,9 @@ fn status_text(
 ) -> String {
     let pass = &loaded.pass;
     let mut text = format!(
-        "Pass {} \"{}\" ({})\nApproved by: {} (reference: {})\nOperator: {}\nWindow: {}\n",
+        "Pass {} {} ({})\nApproved by: {} (reference: {})\nOperator: {}\nWindow: {}\n",
         pass.id,
-        safe(&pass.name),
+        quoted(&pass.name),
         safe(&file.display().to_string()),
         safe(&pass.approval.owner),
         safe(&pass.approval.reference),
@@ -1421,9 +1421,8 @@ fn debit_spend(
     Output { code, json, text }
 }
 
+/// A receipt in `spend` and `ledger` text: every value quoted once.
 fn debit_receipt_text(receipt: &hallpass::DebitReceipt) -> String {
-    // Quote values reliably in text mode, including labels from a pass.
-    let quoted = |text: &str| safe(&serde_json::to_string(text).unwrap_or_default()).into_owned();
     let mut parts = Vec::new();
     if let Some(reference) = &receipt.caller_ref {
         parts.push(format!("ref {}", quoted(reference)));
@@ -1597,7 +1596,6 @@ const SHOWN_REFERENCES: usize = 10;
 /// the first few references, each quoted, and the reason last, so the
 /// reason runs to the end of the line and cannot pass for a reference.
 fn reconciliation_row_text(r: &hallpass::ReferenceReconciliation) -> String {
-    let quoted = |text: &str| safe(&serde_json::to_string(text).unwrap_or_default()).into_owned();
     let mut shown: Vec<String> = r
         .references
         .iter()
@@ -1983,11 +1981,11 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
     };
     let a = &outcome.adoption;
     let text = format!(
-        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason \"{}\". Carried from the witness: {}. Spent now: {}.\n",
+        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. Carried from the witness: {}. Spent now: {}.\n",
         safe(&outcome.ledger.display().to_string()),
         outcome.pass_id,
         a.seq,
-        safe(&a.reason),
+        quoted(&a.reason),
         hallpass::totals_text(&a.carried),
         hallpass::totals_text(&outcome.totals),
     );
@@ -2033,13 +2031,13 @@ fn reconcile_references(
     };
     let r = &outcome.reconciliation;
     let text = format!(
-        "RECONCILED: {} caller reference(s) for the adoption at sequence {} of pass {}, recorded in {} as entry {} with the reason \"{}\". From here on a guarded spend (--require-new-ref) refuses a listed reference as duplicate-reference, and the adoption at sequence {} no longer makes other references inconclusive.\n",
+        "RECONCILED: {} caller reference(s) for the adoption at sequence {} of pass {}, recorded in {} as entry {} with the reason {}. From here on a guarded spend (--require-new-ref) refuses a listed reference as duplicate-reference, and the adoption at sequence {} no longer makes other references inconclusive.\n",
         r.references.len(),
         r.adoption,
         outcome.pass_id,
         safe(&outcome.ledger.display().to_string()),
         r.seq,
-        safe(&r.reason),
+        quoted(&r.reason),
         r.adoption,
     );
     Output {
@@ -2066,6 +2064,13 @@ fn reconcile_references(
 /// Operator-supplied text, escaped for a terminal.
 fn safe(text: &str) -> std::borrow::Cow<'_, str> {
     hallpass::display_safe(text)
+}
+
+/// Caller- or pass-supplied text as one quoted value in text output, escaped
+/// once (`\"`, `\\` and `\u{...}`), so it cannot end its quotes early and
+/// read as more fields.
+fn quoted(text: &str) -> String {
+    hallpass::display_quoted(text)
 }
 
 /// An error message made safe for a terminal, with its backslashes left as
@@ -2097,7 +2102,7 @@ fn archive(file: &Path, directory: &Path) -> Output {
                 |approval| {
                     format!(
                         "; its verified signature record for principal {} is kept",
-                        safe(&format!("{:?}", approval.principal))
+                        quoted(&approval.principal)
                     )
                 },
             );

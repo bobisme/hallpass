@@ -99,8 +99,9 @@ Validation rules, all reported together with field paths
 
 - unknown keys are errors in every table;
 - text fields (`name`, `owner`, `reference`, `operator`, `revoked_reason`)
-  hold no control character, line or paragraph separator or bidirectional
-  control (the characters a note refuses); new after 0.2.0;
+  hold no control character, line or paragraph separator or Unicode format
+  character (the characters a note refuses), and the problem names the
+  character; new after 0.2.0;
 - addresses in canonical spelling only; refused: host names, IPv4 leading
   zeros and shortened forms, zones, non-canonical IPv6, IPv6 forms carrying
   IPv4 (mapped, compatible, NAT64, and the transition forms 6to4, Teredo,
@@ -197,9 +198,14 @@ request name follows the destination rules.
 1. Request checks, before any file is touched: `n` from 1 to 10^12, note one
    line of at most 500 characters with no control character (newline, tab,
    escape, C1 controls), no Unicode line or paragraph separator (U+2028,
-   U+2029) and no bidirectional control (U+061C, U+200E, U+200F,
-   U+202A-U+202E, U+2066-U+2069). Failure is a usage error. (Reading a
-   ledger accepts notes that only avoid control characters, the 0.1 rule.)
+   U+2029) and no Unicode format character: general category Cf of Unicode
+   16.0 and the whole Tags block U+E0000-U+E007F. These include the
+   bidirectional controls (U+061C, U+200E, U+200F, U+202A-U+202E,
+   U+2066-U+2069), the zero-width characters (U+200B-U+200D, U+2060,
+   U+FEFF), the soft hyphen (U+00AD) and the interlinear annotation
+   controls (U+FFF9-U+FFFB). Failure is a usage error that names the
+   character. (Reading a ledger accepts notes that only avoid control
+   characters, the 0.1 rule.)
    A name without a target, a negative `needed`, and a `now` outside the
    years 0001 to 9999 in UTC are usage errors too.
 2. Load and validate the pass. Find the state directory, create it if
@@ -315,6 +321,14 @@ a complete one, and neither the count nor the guard sees lines missing
 from it. Every adoption record already has the `witness` and `carried`
 fields that tell the kinds apart, so the adoption line is unchanged.
 
+A new caller reference is nonblank, at most 128 characters, without
+leading or trailing spaces, and holds no control character and none of the
+characters a note refuses (line separators and Unicode format characters):
+two references that differ only in those could look the same. Reading a
+ledger, and looking a reference up with `receipt` or a `reconcile`
+manifest, applies the earlier rule (nonblank, at most 128 characters, no
+control character, line separator or bidirectional control), so a
+reference recorded before the new rule still reads and can be found.
 Missing or invalid caller references are usage errors. A dry run applies
 the same rules and reports observed matches without a reservation. The
 guard coordinates cooperating guarded writers on the same local history.
@@ -426,7 +440,10 @@ reconciliation (`reconcile-references`, below) ends that refusal. Carried amount
 count as spent. An adoption never lowers a count below
 what the witness recorded; there is no reset to zero (a new budget is a
 raised ceiling in the pass, or a new pass). Then the witness records the
-new last line. The reason follows the note rules and is required. With
+new last line. The reason follows the note rules and is required.
+(Reading a ledger accepts a recorded reason under the earlier rule, which
+refused line separators and bidirectional controls but not the other
+format characters.) With
 nothing to adopt (the ledger matches its witness, or there is neither a
 ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
@@ -966,12 +983,21 @@ reconciliations always count as entries).
 `--since` beyond the last entry shows none. A slice is marked: text output
 has a line `Showing entries A to B of T in the ledger (...)`, and JSON has
 `shown`. A pass without a ledger says
-so and exits 0. In text output every operator-supplied string (notes, and
-pass text in `status`) is shown with control characters, line separators
-and bidirectional controls escaped as `\u{...}` and a backslash as `\\`,
-so a note can neither forge a line of output nor send a terminal escape
-sequence. Error messages already carry their own escapes, so their
-backslashes are printed once, as written. JSON output carries the exact text.
+so and exits 0. In text output every operator-supplied string (notes,
+reasons, caller references, and pass text in `status`) is shown with
+control characters, line and paragraph separators and Unicode format
+characters escaped as `\u{...}` and a backslash as `\\`, so a note can
+neither forge a line of output nor send a terminal escape sequence, and a
+value recorded earlier with an invisible character shows it. A value that
+text output quotes is in double quotes, with a `"` inside written as `\"`
+and each character escaped once, so it cannot end its quotes early and
+read as more fields: a caller reference (in `spend`, `ledger`, `receipt`
+and `reconcile`), a receipt's target, name and label (in `spend` and
+`ledger`), a value that `reconcile` says differs, a reason after "with the
+reason", a signer principal (in `archive`, `audit-receipts` and
+`audit-charges`) and the pass name in `status`. Error messages already
+carry their own escapes, so their backslashes are printed once, as
+written. JSON output carries the exact text.
 
 ### JSON fields
 
@@ -1205,6 +1231,7 @@ Crate `hallpass` (re-exports `time`):
 | modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |
 | `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
+| `display_quoted(text) -> String` | operator text as one double-quoted value, each character escaped once |
 | `ledger_path(path)` | `<pass>.ledger` |
 | `write_template(path)`, `TEMPLATE` | `init` |
 | `parse_address`, `parse_network`, `embedded_ipv4`, `ipv6_transition` (`Ipv6Transition`), `Target` (`FromStr`), `Network` (with `is_network_or_broadcast(ip)`), `Protocol`, `PortSet` | strict parsing |

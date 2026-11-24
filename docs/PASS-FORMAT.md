@@ -45,16 +45,25 @@ requests = 500
 - **Text fields** (`name`, `owner`, `reference`, `operator`, `label`,
   `revoked_reason`, `hostname`) must be quoted strings on one line: no
   control characters (newline, tab), no Unicode line or paragraph
-  separator (U+2028, U+2029) and no bidirectional control (U+061C, U+200E,
-  U+200F, U+202A to U+202E, U+2066 to U+2069), no leading or trailing
-  spaces, not empty. The bidirectional controls reorder the text around them,
-  so an owner or reference could read as something other than the bytes the
-  owner approved, as in `--note`, which refuses them too. A pass that holds
-  one fails to load, with the field named. Right-to-left text itself
-  (Arabic, Hebrew) is accepted: only the invisible controls are refused.
-  This refusal is new after 0.2.0; a pass written earlier that holds such a
-  character must be re-approved without it. Everything hallpass prints
-  still escapes these characters.
+  separator (U+2028, U+2029) and no Unicode format character, no leading
+  or trailing spaces, not empty. The format characters are general
+  category Cf of Unicode 16.0 and the whole Tags block: the bidirectional
+  controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069),
+  the zero-width space and joiners (U+200B to U+200D), the word joiner and
+  invisible operators (U+2060 to U+2064), the soft hyphen (U+00AD), the
+  byte order mark (U+FEFF), the interlinear annotation controls (U+FFF9 to
+  U+FFFB), the tag characters (U+E0000 to U+E007F) and a few others. A
+  bidirectional control reorders the text around it, and most of the
+  others are invisible, so an owner or reference could read as something
+  other than the bytes the owner approved, and two passes that differ
+  could look the same. `--note` refuses them too. A pass that holds one
+  fails to load, with the field and the character named, for example
+  `approval.owner: contains a Unicode format character (U+200B)`.
+  Right-to-left text itself (Arabic, Hebrew) is accepted: only the
+  controls are refused. This refusal is new after 0.2.0; a pass written
+  earlier that holds such a character must be re-approved without it.
+  Text output escapes these characters as `\u{...}` wherever it shows
+  caller- or pass-supplied text; JSON carries the exact text.
 - **Numbers** (`format`, ports, ceilings) are plain decimal digits. TOML's
   other spellings are refused: `0x10`, `0o17`, `0b110`, `1_000`, `+6`. A
   reviewer who reads `0x10` as 10 would approve less than the 16 a tool
@@ -437,7 +446,7 @@ edit it. It is JSON Lines:
 | destinations | 1024 |
 | counters | 64 |
 | ceiling total | 10^12 |
-| note on a spend | 500 characters, one line: no control characters, line separators or bidirectional controls |
+| note on a spend | 500 characters, one line: no control characters, line separators or Unicode format characters (such as bidirectional controls and zero-width characters) |
 
 ### Versioned debit records
 
@@ -457,9 +466,14 @@ previous ledger line, respectively.
 ~~~
 
 The note and receipt are optional. The receipt is present only if the caller
-opts in. A caller reference is nonblank, at most 128 characters, and excludes
-control characters and Unicode formatting and line controls that disguise
-text. The target list is optional and records the approved literals and
+opts in. A new caller reference is nonblank, at most 128 characters, has
+no leading or trailing spaces, and holds no control character, line or
+paragraph separator or Unicode format character (the characters a pass
+text field refuses), so a reference cannot differ from another only by a
+format character or a surrounding space. A reader still
+accepts a reference recorded under the earlier rule, which
+refused only control characters, line separators and bidirectional
+controls. The target list is optional and records the approved literals and
 matched labels in request order. Each name is the canonical request name, if
 supplied. Targets, names and labels reflect the pass checked at the recorded
 digest, so later edits do not rewrite prior receipts. Store only approved

@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use super::{Parsed, add, check_note, has_control, is_disguising, longer_than};
+use super::{
+    Parsed, add, check_note, describe_disguising, has_control, is_disguising,
+    is_line_or_bidi_control, longer_than,
+};
 use crate::{Digest, HostName, MAX_CEILING, MAX_COUNTERS, Target, is_counter_name};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -120,12 +123,53 @@ pub(super) fn check_charges<'a>(
     Ok(())
 }
 
+/// Check a recorded caller reference, or one to look up: nonblank, at most
+/// `max` characters, without a control character, line separator or
+/// bidirectional control. This is the rule references were written under
+/// before every Unicode format character and surrounding spaces were
+/// refused, so a ledger written earlier stays readable and its references
+/// can still be looked up. A new reference must pass [`check_new_reference`].
 pub(super) fn valid_text(text: &str, max: usize) -> bool {
     // The disguising characters are all outside ASCII.
     !text.trim().is_empty()
         && !longer_than(text, max)
         && !has_control(text)
-        && (text.is_ascii() || !text.chars().any(is_disguising))
+        && (text.is_ascii() || !text.chars().any(is_line_or_bidi_control))
+}
+
+/// Check a caller reference before it is recorded: nonblank, at most
+/// [`MAX_CALLER_REF`] characters, without a control character, without a
+/// disguising character ([`is_disguising`]: a line separator or a Unicode
+/// format character such as U+200B or U+202E) and without leading or
+/// trailing spaces. Two references that differ only in such characters
+/// could look the same. The error says what is wrong, after "the reference".
+pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("is blank".to_owned());
+    }
+    if longer_than(text, MAX_CALLER_REF) {
+        return Err(format!("is longer than {MAX_CALLER_REF} characters"));
+    }
+    if has_control(text) {
+        return Err("contains a control character (such as a newline or tab)".to_owned());
+    }
+    if let Some(c) = text.chars().find(|c| is_disguising(*c)) {
+        return Err(format!(
+            "contains {}, which can make it display as something else",
+            describe_disguising(c)
+        ));
+    }
+    if text.trim() != text {
+        return Err("has leading or trailing spaces".to_owned());
+    }
+    Ok(())
+}
+
+/// The rule of [`check_new_reference`], as a sentence for a message.
+pub(super) fn new_reference_rule() -> String {
+    format!(
+        "A caller reference is nonblank, at most {MAX_CALLER_REF} characters, without leading or trailing spaces, control characters, line separators or Unicode format characters"
+    )
 }
 
 /// How many distinct valid recorded targets one ledger scan remembers.
@@ -270,12 +314,13 @@ impl<'a> SpendChargesRequest<'a> {
                 "requiring a new reference also requires a caller reference",
             ));
         }
-        if self
+        if let Some(problem) = self
             .caller_ref
-            .is_some_and(|text| !valid_text(text, MAX_CALLER_REF))
+            .and_then(|text| check_new_reference(text).err())
         {
             return Err(Error::Usage(format!(
-                "the caller reference must be nonblank, at most {MAX_CALLER_REF} characters and free of controls; nothing was recorded"
+                "the caller reference {problem}. {}; nothing was recorded",
+                new_reference_rule()
             )));
         }
         Ok(())
@@ -1063,7 +1108,17 @@ mod tests {
     fn defined_valid_text(text: &str, max: usize) -> bool {
         !text.trim().is_empty()
             && text.chars().count() <= max
-            && !text.chars().any(|c| c.is_control() || is_disguising(c))
+            && !text
+                .chars()
+                .any(|c| c.is_control() || is_line_or_bidi_control(c))
+    }
+
+    /// A new reference: a recorded one without surrounding spaces or any
+    /// disguising character.
+    fn defined_new_reference(text: &str) -> bool {
+        defined_valid_text(text, MAX_CALLER_REF)
+            && text.trim() == text
+            && !text.chars().any(is_disguising)
     }
 
     fn defined_note(note: &str) -> bool {
@@ -1105,7 +1160,7 @@ mod tests {
         prop_oneof![
             "[ -~]{0,12}",
             "[\\x00-\\x7f]{0,12}",
-            "[ a\\t\\x00\\x1f\\x7f\\x{80}\\x{85}\\x{9f}\\x{a0}\\x{61c}\\x{200e}\\x{2028}\\x{2029}\\x{202e}\\x{2066}\\x{2069}\\x{3000}é]{0,12}",
+            "[ a\\t\\x00\\x1f\\x7f\\x{80}\\x{85}\\x{9f}\\x{a0}\\x{ad}\\x{61c}\\x{200b}\\x{200e}\\x{2028}\\x{2029}\\x{202e}\\x{2066}\\x{2069}\\x{3000}\\x{feff}\\x{e0065}é]{0,12}",
             any::<String>(),
         ]
         .boxed()
@@ -1152,6 +1207,7 @@ mod tests {
         #[test]
         fn text_checks_decide_as_defined(text in edge_text(), max in 0_usize..16) {
             prop_assert_eq!(valid_text(&text, max), defined_valid_text(&text, max));
+            prop_assert_eq!(check_new_reference(&text).is_ok(), defined_new_reference(&text));
             prop_assert_eq!(has_control(&text), text.chars().any(char::is_control));
             prop_assert_eq!(longer_than(&text, max), text.chars().count() > max);
             prop_assert_eq!(check_note(&text).is_ok(), defined_note(&text));

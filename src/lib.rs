@@ -86,7 +86,7 @@ pub use ledger::{
     LedgerView, MAX_CALLER_REF, MAX_NOTE, MAX_RECONCILED_REFERENCES, MAX_REFERENCE_LIST_BYTES,
     ReconcileReferencesOutcome, RecordedTarget, ReferenceEvidence, ReferenceReconciliation,
     SpendChargesOutcome, SpendChargesRequest, SpendOutcome, SpendRequest, Tally, WitnessRelation,
-    WitnessStatus, adopt, adopt_guarded, display_safe, export_checkpoint,
+    WitnessStatus, adopt, adopt_guarded, display_quoted, display_safe, export_checkpoint,
     export_checkpoint_observed, ledger_path, preview_adopt, preview_spend_in,
     preview_spend_with_clock_in, read_ledger, read_reference_list, read_summary,
     reconcile_references, rfc3339, spend, spend_charges, spend_charges_in,

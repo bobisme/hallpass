@@ -93,8 +93,9 @@ fn every_text_field_refuses_bidi_and_line_separators() {
             let (code, value) = case.json(&["check", &file]);
             assert_eq!(code, 1, "{field} {c:?}: {value}");
             let text = value.to_string();
+            let named = format!("U+{:04X}", u32::from(c));
             assert!(
-                text.contains(field) && text.contains("bidirectional text control"),
+                text.contains(field) && text.contains(&named),
                 "{field} {c:?}: {text}"
             );
         }

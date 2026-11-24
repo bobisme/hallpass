@@ -230,7 +230,9 @@ const fn kind(value: &Value) -> &'static str {
     }
 }
 
-/// Free text: printable, no surrounding spaces, 1 to `max` characters.
+/// Free text: printable, without line separators or Unicode format
+/// characters ([`crate::ledger::is_disguising`]), no surrounding spaces, 1 to
+/// `max` characters.
 fn check_text(text: &str, max: usize) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("is empty; fill it in".to_owned());
@@ -241,11 +243,11 @@ fn check_text(text: &str, max: usize) -> Result<(), String> {
                 .to_owned(),
         );
     }
-    if text.chars().any(crate::ledger::is_disguising) {
-        return Err(
-            "contains a line separator or a bidirectional text control (such as U+202E), which can make it display as something else; write one plain line"
-                .to_owned(),
-        );
+    if let Some(c) = text.chars().find(|c| crate::ledger::is_disguising(*c)) {
+        return Err(format!(
+            "contains {}, which can make it display as something else; write one plain line without it",
+            crate::ledger::describe_disguising(c)
+        ));
     }
     if text.trim() != text {
         return Err("has leading or trailing spaces; remove them".to_owned());
