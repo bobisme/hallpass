@@ -979,7 +979,11 @@ fn status_text(
     }
     let _ = writeln!(text, "Digest: {}", loaded.digest);
     if let Some(r) = refusal {
-        let _ = writeln!(text, "This pass permits NOTHING now: {}.", safe(&r.message));
+        let _ = writeln!(
+            text,
+            "This pass permits NOTHING now: {}.",
+            safe_message(&r.message)
+        );
     }
     text
 }
@@ -1234,7 +1238,7 @@ fn permits(
                 window_text(&loaded.pass, &state)
             )
         },
-        |r| format!("REFUSED: {asked}: {}.\n", safe(&r.reason.message)),
+        |r| format!("REFUSED: {asked}: {}.\n", safe_message(&r.reason.message)),
     );
     Output {
         code: if refused.is_some() { REFUSED } else { OK },
@@ -1315,7 +1319,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "WOULD ALLOW: {} {}; no debit recorded.\n",
             outcome.amount, outcome.counter
         ),
-        (Some(r), _, _) => format!("REFUSED: {}.\n", safe(&r.message)),
+        (Some(r), _, _) => format!("REFUSED: {}.\n", safe_message(&r.message)),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
     let reply = cli_debit::SpendReply {
@@ -1381,7 +1385,7 @@ fn debit_spend(
         (Some(r), _) => (
             "refused",
             REFUSED,
-            format!("REFUSED: {}.\n", safe(&r.message)),
+            format!("REFUSED: {}.\n", safe_message(&r.message)),
         ),
         (None, Some(seq)) => ("allowed", OK, format!("RECORDED: ledger entry {seq}\n")),
         (None, None) => (
@@ -2518,12 +2522,12 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
         }
         Format::Text | Format::Pretty => {
             for w in output.json["warnings"].as_array().into_iter().flatten() {
-                let w = safe(w.as_str().unwrap_or_default());
+                let w = safe_message(w.as_str().unwrap_or_default());
                 // An evidence report already prints its warnings in its own text.
                 if output
                     .text
                     .lines()
-                    .any(|l| l.strip_prefix("Warning: ") == Some(w.as_ref()))
+                    .any(|l| l.strip_prefix("Warning: ") == Some(w.as_str()))
                 {
                     continue;
                 }
@@ -2626,7 +2630,7 @@ fn main() -> ExitCode {
                 emit(out, Format::Json)
             } else {
                 if let Some(warning) = &input.env_warning {
-                    eprintln!("hallpass: warning: {}", safe(warning));
+                    eprintln!("hallpass: warning: {}", safe_message(warning));
                 }
                 let code = if e.use_stderr() { ERROR } else { OK };
                 let _ = e.print();

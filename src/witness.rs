@@ -26,6 +26,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+
+/// A path as one quoted value in a message, escaped once.
+fn quote_path(path: impl AsRef<Path>) -> String {
+    crate::display_quoted(&path.as_ref().display().to_string())
+}
 use crate::files::{Digest, open_no_follow};
 use crate::pass::{MAX_CEILING, is_counter_name};
 
@@ -76,17 +81,13 @@ impl StateDir {
         if Path::new(&xdg).is_absolute() {
             return None;
         }
-        let shown: String = xdg
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_control() { '?' } else { c })
-            .collect();
+        let shown = crate::display_quoted(&xdg.to_string_lossy());
         let instead = resolve(None, std::env::var_os("HOME")).map_or_else(
             |_| "and HOME is not absolute either, so there is no state directory".to_owned(),
-            |dir| format!("using {} instead", dir.display()),
+            |dir| format!("using {} instead", quote_path(&dir)),
         );
         Some(format!(
-            "XDG_STATE_HOME is set to the relative path `{shown}`, which is ignored (the XDG rules need an absolute path); {instead}. Witnesses kept under another directory are not seen there, so a lost or rewound ledger is not noticed until one is recorded; set XDG_STATE_HOME to an absolute path or unset it"
+            "XDG_STATE_HOME is set to the relative path {shown}, which is ignored (the XDG rules need an absolute path); {instead}. Witnesses kept under another directory are not seen there, so a lost or rewound ledger is not noticed until one is recorded; set XDG_STATE_HOME to an absolute path or unset it"
         ))
     }
 
@@ -152,7 +153,7 @@ impl StateDir {
                 format!(
                     "the state directory has mode {:04o}, so other users can read or change the witnesses; run `chmod 700 {}`",
                     meta.mode() & 0o7777,
-                    dir.display()
+                    quote_path(dir)
                 ),
             ));
         }
@@ -215,14 +216,14 @@ impl StateDir {
             Err(e) => {
                 return Err(self.unavailable(
                     pass_id,
-                    format!("{} cannot be created ({e})", path.display()),
+                    format!("{} cannot be created ({e})", quote_path(&path)),
                 ));
             }
         };
         wait.exclusive(&file, &path, |e| {
             self.unavailable(
                 pass_id,
-                format!("{} cannot be locked ({e})", path.display()),
+                format!("{} cannot be locked ({e})", quote_path(&path)),
             )
         })?;
         // The witness is written after the ledger; find out now, before
@@ -243,7 +244,7 @@ impl StateDir {
                     pass_id,
                     format!(
                         "the state directory {} is not writable ({e})",
-                        dir.display()
+                        quote_path(dir)
                     ),
                 )
             })?;
@@ -264,9 +265,10 @@ impl StateDir {
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(
-                    self.unavailable(pass_id, format!("{} cannot be read ({e})", path.display()))
-                );
+                return Err(self.unavailable(
+                    pass_id,
+                    format!("{} cannot be read ({e})", quote_path(&path)),
+                ));
             }
             Ok(_) => {}
         }
@@ -280,7 +282,7 @@ impl StateDir {
                 pass_id,
                 format!(
                     "{} has mode {:04o}; run `chmod 600` on it",
-                    path.display(),
+                    quote_path(&path),
                     meta.mode() & 0o7777
                 ),
             ));
@@ -288,14 +290,14 @@ impl StateDir {
         let mut bytes = Vec::new();
         file.take(MAX_WITNESS_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|e| self.unavailable(pass_id, format!("{} ({e})", path.display())))?;
+            .map_err(|e| self.unavailable(pass_id, format!("{} ({e})", quote_path(&path))))?;
         self.check_size(pass_id, bytes.len())?;
         let damaged = || {
             self.unavailable(
                 pass_id,
                 format!(
                     "{} is damaged (not a hallpass witness for this pass id); move it aside and run `hallpass adopt` to record a new one",
-                    path.display()
+                    quote_path(&path)
                 ),
             )
         };
@@ -378,7 +380,7 @@ impl StateDir {
         result.map_err(|e| {
             self.unavailable(
                 pass_id,
-                format!("{} cannot be written ({e})", path.display()),
+                format!("{} cannot be written ({e})", quote_path(&path)),
             )
         })
     }

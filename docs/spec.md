@@ -1003,7 +1003,13 @@ and `reconcile`), a receipt's target, name and label (in `spend` and
 reason", a signer principal (in `archive`, `audit-receipts` and
 `audit-charges`) and the pass name in `status`. Error messages already
 carry their own escapes, so their backslashes are printed once, as
-written. JSON output carries the exact text.
+written. The same rule holds for every message in text output: errors,
+warnings, `REFUSED:` lines and advice. A message puts text from the
+caller, the pass or an archive in as a quoted value (as `display_quoted`
+writes it), and is printed with control, line-separator, bidi and format
+characters escaped and its own backslashes left alone, so each escape
+shows once. `verify-approval` quotes the principal in the same way. JSON
+output carries the exact text.
 
 ### JSON fields
 

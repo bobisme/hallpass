@@ -75,8 +75,8 @@ fn steps(path: &Path) -> Result<Vec<ValidatedStep>, Error> {
     for step in raw.step {
         if !crate::pass::is_identifier(&step.id) || !ids.insert(step.id.clone()) {
             return Err(invalid(format!(
-                "expected a unique identifier for step {:?}",
-                step.id
+                "expected a unique identifier for step {}",
+                crate::display_quoted(&step.id)
             )));
         }
         let bad_step = |detail: &str| invalid(format!("step {}: {detail}", step.id));

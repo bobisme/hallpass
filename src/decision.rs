@@ -286,7 +286,8 @@ impl Pass {
                 code: RefusalCode::Revoked,
                 message: format!(
                     "the owner revoked this pass{}; stop. Nothing more is permitted under it",
-                    reason.map_or_else(String::new, |r| format!(" ({r})"))
+                    reason
+                        .map_or_else(String::new, |r| format!(" ({})", crate::display_quoted(&r)))
                 ),
             }),
             WindowState::NotYetValid { opens_in } => Err(Refusal {

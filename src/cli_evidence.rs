@@ -316,7 +316,7 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
                 tip_text(tip),
                 row.tip_group.unwrap_or(i + 1)
             ),
-            (None, Some(e)) => format!("error {}: {}", e.code, safe(&e.message)),
+            (None, Some(e)) => format!("error {}: {}", e.code, super::safe_message(&e.message)),
             (None, None) => String::new(),
         };
         let _ = writeln!(
@@ -328,7 +328,7 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
         );
     }
     for warning in &report.warnings {
-        let _ = writeln!(text, "Warning: {}", safe(warning));
+        let _ = writeln!(text, "Warning: {}", super::safe_message(warning));
     }
     let mut value = json!(report);
     let (result, code) = if report.errors > 0 {
@@ -399,7 +399,7 @@ pub fn audit_charges(file: &Path, directory: &Path, signatures: &SignatureArgs) 
     gaps_text(&mut text, &report.gaps);
     revisions_text(&mut text, &report.revisions, &report.signatures);
     for warning in &report.warnings {
-        let _ = writeln!(text, "Warning: {}", safe(warning));
+        let _ = writeln!(text, "Warning: {}", super::safe_message(warning));
     }
     output(
         "audit-charges",
@@ -472,7 +472,7 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
         }
     }
     for warning in &report.warnings {
-        let _ = writeln!(text, "Warning: {}", safe(warning));
+        let _ = writeln!(text, "Warning: {}", super::safe_message(warning));
     }
     output(
         "reconcile",

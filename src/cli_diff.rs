@@ -89,7 +89,7 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
         );
     }
     for warning in &view.warnings {
-        let _ = writeln!(out.text, "WARNING: {}", super::safe(warning));
+        let _ = writeln!(out.text, "WARNING: {}", super::safe_message(warning));
     }
     out.json["budget_impact"] = json!({"result":"projected", "ledger":ledger.display().to_string(), "ledger_source":source, "tip":view.tip, "witness":view.witness.as_str(),
         "warnings":view.warnings, "counters":rows});
@@ -336,7 +336,7 @@ fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
         }
     }
     for w in &report.name_overlap_warnings {
-        let _ = writeln!(text, "WARNING: {}", safe(&w.message));
+        let _ = writeln!(text, "WARNING: {}", super::safe_message(&w.message));
     }
     if report.order_changed {
         text.push_str("WARNING: common destination order changed; returned label may change.\n");

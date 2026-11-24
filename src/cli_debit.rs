@@ -341,7 +341,10 @@ pub fn run_capacity(unit: &DebitUnit, clock: &Clock) -> Output {
             json["units"] = Value::Null;
             Output {
                 code: REFUSED,
-                text: format!("REFUSED: {}\n", safe(&refusal.reason.message)),
+                text: format!(
+                    "REFUSED: {}\n",
+                    super::safe_message(&refusal.reason.message)
+                ),
                 json,
             }
         }

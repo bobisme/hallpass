@@ -557,7 +557,8 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
             w.problem(
                 format!("destination[{}].label", i + 1),
                 format!(
-                    "`{label}` is also the label of destination[{first}]; labels must be unique"
+                    "{} is also the label of destination[{first}]; labels must be unique",
+                    crate::display_quoted(label)
                 ),
             );
         }
@@ -723,7 +724,13 @@ fn parse_overlap_acknowledged(w: &mut Walker, t: &Table, p: &str) -> Option<Vec<
                 complete = false;
             }
             Some(label) if out.iter().any(|l| l == label) => {
-                w.problem(at, format!("`{label}` is listed twice; remove one"));
+                w.problem(
+                    at,
+                    format!(
+                        "{} is listed twice; remove one",
+                        crate::display_quoted(label)
+                    ),
+                );
                 complete = false;
             }
             Some(label) => out.push(label.to_owned()),

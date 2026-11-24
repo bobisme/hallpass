@@ -4,7 +4,7 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{OK, Output, REFUSED, error_output, safe};
+use super::{OK, Output, REFUSED, error_output, quoted, safe};
 use hallpass::evidence::{Recheck, Reverify, SignatureToCheck};
 use hallpass::{APPROVAL_NAMESPACE as NAMESPACE, ArchivedSignature, Digest, Error};
 use serde_json::json;
@@ -379,8 +379,8 @@ pub fn verify_approval(
             let mut warnings = Vec::new();
             if let Some(ArchivedSignature::KeptEarlier(kept)) = &record {
                 warnings.push(format!(
-                    "the archive already held a different signature record for these bytes (principal {:?}); it was kept, and this signature was not stored",
-                    kept.principal
+                    "the archive already held a different signature record for these bytes (principal {}); it was kept, and this signature was not stored",
+                    quoted(&kept.principal)
                 ));
             }
             let approval = record.as_ref().map(ArchivedSignature::approval);
@@ -388,7 +388,7 @@ pub fn verify_approval(
                 code: OK,
                 text: format!(
                     "Verified signature from {} over pass {} ({}).{} Supply this digest for the live policy check.\n",
-                    safe(principal),
+                    quoted(principal),
                     loaded.pass.id,
                     digest,
                     archive.map_or(String::new(), |dir| format!(
@@ -403,7 +403,7 @@ pub fn verify_approval(
             code: REFUSED,
             text: format!(
                 "Unverified signature for {}: {}.\n",
-                safe(principal),
+                quoted(principal),
                 why.advice()
             ),
             json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),

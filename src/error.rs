@@ -152,7 +152,7 @@ pub enum Error {
     /// against it.
     #[error(
         "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.{}",
-        dir.as_ref().map_or_else(|| "none".to_owned(), |d| d.display().to_string()),
+        dir.as_ref().map_or_else(|| "none".to_owned(), |d| crate::display_quoted(&d.display().to_string())),
         witness_advice(detail)
     )]
     WitnessUnavailable {
