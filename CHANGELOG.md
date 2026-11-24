@@ -166,6 +166,36 @@ Changes since commit d70c09f.
   make the overall verdict `widened`. The reason `both-windows-must-be-open`
   is replaced by `new-admits-nothing` and `old-closed-new-open`.
 
+- **Invisible characters and look-alike spaces:** a pass whose text fields
+  hold a default-ignorable character (for example U+034F, the Hangul fillers
+  U+115F, U+1160, U+3164 and U+FFA0, variation selectors, and the reserved
+  U+2065, U+FFF0–FFF8 and U+E0000–E0FFF) or a space other than U+0020 (U+00A0,
+  U+1680, U+2000–200A, U+202F, U+205F, U+3000) no longer loads; `check` names
+  the field and the character. New caller references, notes, adoption and
+  reconciliation reasons and reference lists refuse the same characters.
+  Ledgers written earlier still read, and their references can still be looked
+  up.
+- **`approval-id`** refuses an owner or reference that a pass could not hold:
+  empty, over 200 characters, surrounding spaces, or any character a pass
+  refuses. It is a usage error (exit 1) with `problems` as in `check`, and no
+  id is printed. Library: `review::approval_id` returns `Result<String,
+  Vec<Problem>>`.
+- **Signature verification works on the bytes read:**
+  `audit-receipts`/`audit-charges --allowed-signers` and `verify-approval`
+  read the signature and the trusted signers file once and give `ssh-keygen`
+  private copies in a new 0700 directory under `TMPDIR`, so they need a
+  writable `TMPDIR`. A file that changes during verification is no longer an
+  error; the result describes the bytes read, and `verify-approval --archive`
+  records exactly those. `verify-approval` refuses a signature over 64 KiB.
+  Library: `evidence::SignatureToCheck::signature` is the signature's bytes,
+  not a path, and `Reverify::check` runs after the ledger lock is released,
+  once per digest in order of first use.
+- **Message quoting:** messages put caller-, pass- and archive-supplied values
+  in as quoted values: the principal in `verify-approval` text, witness and
+  state-directory paths, the revoked reason in the revoked-pass refusal, pass
+  labels in problem messages and scenario step ids. Scripts that matched the
+  old wording break; JSON keys are unchanged.
+
 ### Added
 
 - A warning when a debit checks no destination: an allowed or previewed
@@ -387,3 +417,20 @@ Changes since commit d70c09f.
   about 60 a second; 8 writers do 62–71 a second on a small ledger and 12–13
   at 100,000 lines. The tmpfs figures are labelled as such, and the batching
   advice matches.
+- **Fixed:** warnings, `REFUSED:` lines and `verify-approval` text no longer
+  double backslashes that are already escapes (a principal `ops\lead` showed
+  as `"ops\\\\lead"`). Messages are printed with control, separator, bidi,
+  format and invisible characters escaped and their own backslashes left
+  alone; spec.md states the rule.
+- **Fixed:** a signature or trusted signers file swapped out and back during
+  verification could make `ssh-keygen` check other bytes than the record
+  names. Verification now uses private copies of the bytes read.
+- With `--allowed-signers`, the audits run `ssh-keygen` after they release the
+  shared ledger lock, so `spend` and `adopt` no longer wait for one
+  `ssh-keygen` per digest.
+- Text output escapes default-ignorable characters and non-ASCII spaces as
+  `\u{…}`, messages included. A caller reference that starts or ends with a
+  non-ASCII space is refused as containing "a look-alike space (U+…)".
+- spec.md's library table lists the audit API (`audit_*_with`, `Reverify`,
+  `SignatureToCheck`, `Recheck`, `SignatureCheck`), and its test-clock list
+  includes `check`; tests/doc_lists.rs keeps that list in step with the code.
