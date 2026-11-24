@@ -1,13 +1,16 @@
-//! Verify a detached approval signature using the installed OpenSSH verifier.
+//! Verify a detached approval signature using the installed OpenSSH verifier,
+//! for `verify-approval` and for the audits' `--allowed-signers`.
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::{OK, Output, REFUSED, error_output, safe};
+use hallpass::evidence::{Recheck, Reverify, SignatureToCheck};
 use hallpass::{APPROVAL_NAMESPACE as NAMESPACE, ArchivedSignature, Digest, Error};
 use serde_json::json;
 
-/// The largest trusted signers file `verify-approval --archive` digests.
+/// The largest trusted signers file `verify-approval --archive` and the
+/// audits digest.
 const MAX_TRUST_BYTES: u64 = 16 * 1024 * 1024;
 
 fn input_path(path: &Path) -> Result<PathBuf, Error> {
@@ -103,6 +106,15 @@ enum Why {
 }
 
 impl Why {
+    const ALL: [Self; 6] = [
+        Self::Namespace,
+        Self::Tampered,
+        Self::Malformed,
+        Self::UntrustedKey,
+        Self::WrongPrincipal,
+        Self::Unknown,
+    ];
+
     const fn code(self) -> &'static str {
         match self {
             Self::Namespace => "wrong-namespace",
@@ -135,6 +147,88 @@ impl Why {
                 "check the signed bytes, signature namespace, expected principal and trusted signers"
             }
         }
+    }
+
+    /// The advice for a signature that an audit verified again, from the
+    /// archive, with the auditor's trusted signers file.
+    const fn audit_advice(self) -> &'static str {
+        match self {
+            Self::Namespace => {
+                "the recorded signature was made for another namespace than hallpass-approval-v1, so it does not approve a pass"
+            }
+            Self::Tampered => {
+                "the recorded signature does not match these archived bytes, for example because it was copied from another revision"
+            }
+            Self::Malformed => "the archived .sig file could not be read as an SSH signature",
+            Self::UntrustedKey => {
+                "the key that made the recorded signature is not in the trusted signers file you supplied; check that it is the right file"
+            }
+            Self::WrongPrincipal => {
+                "the key is in the trusted signers file you supplied, but not for the principal checked (--principal, else the one the record names)"
+            }
+            Self::Unknown => {
+                "check the archived bytes, the archived signature and the trusted signers file you supplied"
+            }
+        }
+    }
+}
+
+/// What a `reason` code of a signature an audit verified again means, and
+/// what to do about it.
+pub fn audit_advice(code: &str) -> &'static str {
+    Why::ALL
+        .into_iter()
+        .find(|why| why.code() == code)
+        .unwrap_or(Why::Unknown)
+        .audit_advice()
+}
+
+/// The audits' `--allowed-signers` and `--principal`.
+#[derive(clap::Args)]
+pub struct SignatureArgs {
+    /// Your own trusted OpenSSH allowed-signers file. The audit runs `ssh-keygen -Y verify` again for every recorded signature with it. Without it, no revision is signature-verified and the audit is never complete.
+    #[arg(long)]
+    allowed_signers: Option<PathBuf>,
+    /// Require every recorded signature to verify for this principal, instead of the principal its record names.
+    #[arg(long, requires = "allowed_signers")]
+    principal: Option<String>,
+}
+
+impl SignatureArgs {
+    /// Run `audit`, verifying every recorded signature again when
+    /// `--allowed-signers` was given. The trusted signers file is read once
+    /// here, and again after each verification; a change between those reads
+    /// is an error.
+    pub fn reverifying<T>(
+        &self,
+        audit: impl FnOnce(Option<Reverify<'_>>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Some(trust) = &self.allowed_signers else {
+            return audit(None);
+        };
+        let principal = self.principal.as_deref();
+        if principal.is_some_and(|p| p.trim().is_empty() || p.chars().any(char::is_control)) {
+            return Err(Error::Usage(
+                "provide a nonblank single-line signer principal".into(),
+            ));
+        }
+        let trust = input_path(trust)?;
+        let before = read_input(&trust, MAX_TRUST_BYTES)?;
+        let mut check = |signed: &SignatureToCheck<'_>| {
+            let verdict = verified(signed.bytes, signed.signature, &trust, signed.principal)?;
+            if read_input(&trust, MAX_TRUST_BYTES)? != before {
+                return Err(Error::Usage(
+                    "the trusted signers file changed while the audit used it; run the audit again"
+                        .into(),
+                ));
+            }
+            Ok(verdict.map_or_else(|why| Recheck::Rejected(why.code()), |()| Recheck::Verified))
+        };
+        audit(Some(Reverify {
+            allowed_signers: Digest::of(&before),
+            principal,
+            check: &mut check,
+        }))
     }
 }
 
@@ -238,6 +332,16 @@ fn verified(
             message: format!("signature verifier terminated: {status}"),
         });
     }
+    // An ssh-keygen without SSH signature support rejects `-Y` and prints its
+    // usage. That is an unusable verifier, not an unverified signature.
+    if !status.success()
+        && (stderr.contains("usage: ssh-keygen") || stderr.contains("unknown option"))
+    {
+        return Err(Error::Io {
+            path: "ssh-keygen".into(),
+            message: "ssh-keygen did not accept `-Y verify` and printed its usage. Install OpenSSH with SSH signature support and check PATH".into(),
+        });
+    }
     if status.success() {
         Ok(Ok(()))
     } else {
@@ -275,7 +379,7 @@ pub fn verify_approval(
             let mut warnings = Vec::new();
             if let Some(ArchivedSignature::KeptEarlier(kept)) = &record {
                 warnings.push(format!(
-                    "the archive already held a different verified signature record for these bytes (principal {:?}); it was kept, and this signature was not stored",
+                    "the archive already held a different signature record for these bytes (principal {:?}); it was kept, and this signature was not stored",
                     kept.principal
                 ));
             }
@@ -292,7 +396,7 @@ pub fn verify_approval(
                         safe(&dir.display().to_string())
                     ))
                 ),
-                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-verified"),"approval":approval,"warnings":warnings}),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-recorded"),"approval":approval,"warnings":warnings}),
             }
         }
         Ok(Err(why)) => Output {

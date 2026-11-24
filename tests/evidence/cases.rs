@@ -46,8 +46,11 @@ fn bytes(path: &Path) -> Vec<u8> {
 }
 
 /// Record a signature over an archived revision, as `verify-approval
-/// --archive` does after ssh-keygen accepts it. The audits read this record;
-/// they do not verify the signature again, so these tests need no keys.
+/// --archive` does after ssh-keygen accepts it. Without `--allowed-signers`
+/// the audits read this record and do not verify the signature again, so
+/// these tests need no keys, and an audit whose replay finds nothing wrong is
+/// `incomplete` with only a `signature-not-reverified` gap (see [`clean`]).
+/// `tests/audit_reverify.rs` verifies real signatures.
 fn approve(archive: &Path, archived: &Value) {
     let digest = archived["digest"]
         .as_str()
@@ -62,6 +65,19 @@ fn approve(archive: &Path, archived: &Value) {
         hallpass::Digest::of(b"trusted signers"),
     )
     .expect("signature record");
+}
+
+/// An audit whose replay found nothing wrong, over revisions that each have a
+/// signature record it did not verify again (bn-2ld).
+fn clean(audit: &Value) {
+    assert_eq!(audit["result"], "incomplete", "{audit}");
+    assert_eq!(audit["mismatches"]["count"], 0, "{audit}");
+    let gaps = audit["gaps"].as_object().expect("gaps");
+    assert_eq!(
+        gaps.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["signature-not-reverified"],
+        "{audit}"
+    );
 }
 
 fn archive(case: &Case) -> PathBuf {
@@ -185,18 +201,18 @@ fn audit_historical_revisions_exact_instant_mismatch_precedence_and_archive_inte
     fs::write(&p, revised.replace("revoked = false", "revoked = true")).expect("revoke");
     let ledger = hallpass::ledger_path(&p);
     let stable = (bytes(&ledger), bytes(&witness(&case)));
-    let complete = checked(&cmd, 0);
-    assert_eq!(complete["result"], "complete");
-    assert_eq!(complete["witness"], "matches");
-    assert_eq!(complete["corroborated"]["count"], 3);
-    let rows = complete["corroborated"]["details"]
+    let replayed = checked(&cmd, 2);
+    clean(&replayed);
+    assert_eq!(replayed["witness"], "matches");
+    assert_eq!(replayed["corroborated"]["count"], 3);
+    let rows = replayed["corroborated"]["details"]
         .as_array()
         .expect("rows");
     assert_eq!(rows[0]["label"], "web");
     assert_eq!(rows[1]["label"], "other");
     assert_eq!(rows[2]["index"], 2);
     assert_ne!(rows[0]["digest"], rows[1]["digest"]);
-    assert!(!complete.to_string().contains("private-reference"));
+    assert!(!replayed.to_string().contains("private-reference"));
     assert_eq!((bytes(&ledger), bytes(&witness(&case))), stable);
     let old_path = a.join(saved["digest"].as_str().expect("digest"));
     let original = bytes(&old_path);
@@ -326,7 +342,8 @@ fn count_all_matches_and_endpoints_after_detail_limit() {
     assert_eq!(found["matches"].as_array().expect("matches").len(), limit);
     assert_eq!(found["matches"][limit - 1]["seq"], limit);
     let cmd = ["audit-receipts", file, s(&a)];
-    let audit = checked(&cmd, 0);
+    let audit = checked(&cmd, 2);
+    clean(&audit);
     assert_eq!(audit["corroborated"]["count"], limit + 1);
     assert_eq!(audit["corroborated"]["truncated"], true);
     assert_eq!(
@@ -359,8 +376,8 @@ fn audit_rejects_wrong_pass_id_and_reports_uncorroborated_history_independently(
     debit(file, REFERENCE);
     let w = witness(&case);
     fs::remove_file(&w).expect("unwitnessed history");
-    let audit = checked(&cmd, 0);
-    assert_eq!(audit["result"], "complete");
+    let audit = checked(&cmd, 2);
+    clean(&audit);
     assert_eq!(audit["witness"], "missing");
     let other = case.pass(
         "foreign.toml",
@@ -384,7 +401,7 @@ fn audit_rejects_wrong_pass_id_and_reports_uncorroborated_history_independently(
     fs::write(&ledger, original).expect("original");
     fs::write(&w, "corrupt").expect("unreadable witness");
     fs::set_permissions(&w, fs::Permissions::from_mode(0o600)).expect("private");
-    assert_eq!(checked(&cmd, 0)["witness"], "not-checked");
+    assert_eq!(checked(&cmd, 2)["witness"], "not-checked");
     let found = checked(&["receipt", file, "--caller-ref", REFERENCE], 1);
     assert_eq!(found["error"]["code"], "witness-unavailable");
 }
@@ -490,8 +507,9 @@ fn charge_audit_uses_each_revision_and_advances_across_missing_archive() {
     approve(&a, &checked(&["archive", file, s(&a)], 0));
     checked(&["spend", file, "--charge", "requests=4"], 0);
     let cmd = ["audit-charges", file, s(&a)];
-    let complete = checked(&cmd, 0);
-    assert_eq!(complete["checked_debits"], 2);
+    let replayed = checked(&cmd, 2);
+    clean(&replayed);
+    assert_eq!(replayed["checked_debits"], 2);
     fs::remove_file(a.join(first["digest"].as_str().expect("digest"))).expect("missing archive");
     let gap = checked(&cmd, 2);
     assert_eq!(gap["result"], "incomplete");

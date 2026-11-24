@@ -1,7 +1,7 @@
 //! Replay numerical and mandatory charge terms against archived revisions.
 use super::evidence::{
-    DETAIL_LIMIT, EvidenceGap, RevisionGroup, RevisionTracker, archive_revision, record_gap,
-    record_revision_gap,
+    DETAIL_LIMIT, EvidenceGap, Reverify, RevisionGroup, RevisionTracker, SignatureCheck,
+    archive_revision, record_gap, record_revision_gap,
 };
 use super::{VerifiedEvent, add, check_required_charges, decide_ceiling, visit_view};
 use crate::{Digest, Error, LoadedPass, Pass, StateDir};
@@ -29,6 +29,7 @@ pub struct ChargeAudit {
     pub mismatches: ChargeMismatches,
     pub gaps: BTreeMap<&'static str, EvidenceGap>,
     pub revisions: RevisionGroup,
+    pub signatures: SignatureCheck,
     pub witness: &'static str,
     pub warnings: Vec<String>,
 }
@@ -46,6 +47,10 @@ fn mismatch(group: &mut ChargeMismatches, seq: u64, counter: &str, reason: &'sta
 }
 /// Audit recorded charges independently of endpoints or external actions.
 ///
+/// Signature records are read without being verified again, so the result
+/// is never `complete` for a revision with a signature record: use
+/// [`audit_charges_with`].
+///
 /// # Errors
 /// Returns an error for invalid archive data or failed ledger verification.
 pub fn audit_charges(
@@ -53,12 +58,28 @@ pub fn audit_charges(
     state: &StateDir,
     directory: &Path,
 ) -> Result<ChargeAudit, Error> {
+    audit_charges_with(loaded, state, directory, None)
+}
+
+/// [`audit_charges`], verifying every recorded signature again with
+/// `reverify` when it is given, as
+/// [`audit_receipts_with`](super::evidence::audit_receipts_with) does.
+///
+/// # Errors
+/// As [`audit_charges`], and any error of `reverify.check`, or a signature
+/// or record that changed while it was verified.
+pub fn audit_charges_with(
+    loaded: &LoadedPass,
+    state: &StateDir,
+    directory: &Path,
+    reverify: Option<Reverify<'_>>,
+) -> Result<ChargeAudit, Error> {
     crate::archive::check_directory(directory)?;
     let mut totals = BTreeMap::new();
     let mut cache: Option<(Digest, Option<Pass>)> = None;
     let mut mismatches = ChargeMismatches::default();
     let mut gaps = BTreeMap::new();
-    let mut revisions = RevisionTracker::new(directory);
+    let mut revisions = RevisionTracker::new(directory, reverify);
     let mut checked = 0;
     let mut debits = 0;
     let view = visit_view(loaded, state, false, &mut |event| {
@@ -116,8 +137,8 @@ pub fn audit_charges(
         }
         Ok(())
     })?;
-    let revisions = revisions.report();
-    // `complete` needs a verified signature over every revision used.
+    let (revisions, signatures) = revisions.report();
+    // `complete` needs a signature this audit verified over every revision used.
     let result = if mismatches.count > 0 {
         "mismatch"
     } else if debits == 0 && gaps.is_empty() {
@@ -134,6 +155,7 @@ pub fn audit_charges(
         mismatches,
         gaps,
         revisions,
+        signatures,
         witness: view.witness.as_str(),
         warnings: view.warnings,
     })

@@ -20,6 +20,7 @@ const NOW: &str = "2026-11-20T09:00:00Z";
 const OWNER: &str = "owner@example.org";
 const WEB: &str = "192.0.2.10:443/tcp@app.example.com";
 const EXTRA: &str = "192.0.2.99:443/tcp";
+const TRUST: &str = "--allowed-signers";
 
 fn pass() -> String {
     format!(
@@ -183,7 +184,7 @@ fn evaluator_scenario(env: &Env) -> (String, String) {
     env.write("p.toml", &pass());
     env.sign("owner", "p.toml");
     let verified = env.verify("p.toml", "trust", OWNER);
-    assert_eq!(verified["provenance"], "signature-verified", "{verified}");
+    assert_eq!(verified["provenance"], "signature-recorded", "{verified}");
     assert_eq!(verified["approval"]["principal"], OWNER);
     let signed = text_of(&verified["digest"]).to_owned();
     assert_eq!(env.spend("1", WEB)["seq"], 1);
@@ -199,7 +200,7 @@ fn evaluator_scenario(env: &Env) -> (String, String) {
     // Archiving signed bytes again keeps their signature record.
     let again = env.json(&["archive", "p.toml", "arch"], 0);
     assert_eq!(again["digest"], signed.as_str());
-    assert_eq!(again["provenance"], "signature-verified", "{again}");
+    assert_eq!(again["provenance"], "signature-recorded", "{again}");
     assert_eq!(again["approval"]["principal"], OWNER);
     (signed, unsigned)
 }
@@ -212,7 +213,9 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
     let env = Env::new();
     let (signed, unsigned) = evaluator_scenario(&env);
 
-    let receipts = env.json(&["audit-receipts", "p.toml", "arch"], 2);
+    // The auditor verifies the recorded signatures again with their own
+    // trusted signers file (bn-2ld).
+    let receipts = env.json(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 2);
     assert_eq!(receipts["result"], "incomplete", "{receipts}");
     assert_eq!(receipts["mismatches"]["count"], 0);
     let gap = &receipts["gaps"]["approval-unverified"];
@@ -252,7 +255,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
     );
     assert!(rows[1]["approval"].is_null());
 
-    let text = env.text(&["audit-receipts", "p.toml", "arch"], 2);
+    let text = env.text(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 2);
     assert!(text.starts_with("Receipt audit incomplete."), "{text}");
     assert!(!text.contains("audit complete"), "{text}");
     let line = |prefix: &str| {
@@ -283,7 +286,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
         "{text}"
     );
 
-    let charges = env.json(&["audit-charges", "p.toml", "arch"], 2);
+    let charges = env.json(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 2);
     assert_eq!(charges["result"], "incomplete", "{charges}");
     assert_eq!(charges["checked_debits"], 2);
     assert_eq!(
@@ -291,7 +294,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
         unsigned.as_str()
     );
     assert_eq!(charges["revisions"], receipts["revisions"]);
-    let text = env.text(&["audit-charges", "p.toml", "arch"], 2);
+    let text = env.text(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 2);
     assert!(text.starts_with("Charge audit incomplete."), "{text}");
     assert!(!text.contains("audit complete"), "{text}");
 }
@@ -311,25 +314,25 @@ fn signing_the_revision_later_upgrades_it_and_a_signed_engagement_audits_clean()
         unsigned.as_str()
     );
 
-    let receipts = env.json(&["audit-receipts", "p.toml", "arch"], 0);
+    let receipts = env.json(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 0);
     assert_eq!(receipts["result"], "complete", "{receipts}");
     assert_eq!(receipts["gaps"], json!({}));
     assert_eq!(receipts["revisions"]["unverified"], 0);
-    let text = env.text(&["audit-receipts", "p.toml", "arch"], 0);
+    let text = env.text(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 0);
     assert!(text.starts_with("Receipt audit complete."), "{text}");
     assert_eq!(text.matches(" confirmed\n").count(), 2, "{text}");
     assert!(
         text.contains("Revisions used 2, 0 without a verified signature"),
         "{text}"
     );
-    let charges = env.json(&["audit-charges", "p.toml", "arch"], 0);
+    let charges = env.json(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 0);
     assert_eq!(charges["result"], "complete", "{charges}");
-    let text = env.text(&["audit-charges", "p.toml", "arch"], 0);
+    let text = env.text(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 0);
     assert!(text.starts_with("Charge audit complete."), "{text}");
     assert!(text.contains("Gaps none"), "{text}");
 
-    // An auditor can check each kept signature with their own trust file,
-    // as docs/EVIDENCE.md shows.
+    // An auditor can also check each kept signature by hand with their own
+    // trust file, as docs/EVIDENCE.md shows.
     for digest in [&signed, &unsigned] {
         let bytes = fs::File::open(env.path(&format!("arch/{digest}"))).expect("bytes");
         let status = Command::new("ssh-keygen")
@@ -366,10 +369,10 @@ fn a_signature_record_is_never_replaced_or_downgraded() {
     assert_eq!(kept.1, fs::read(env.path("p.toml.sig")).expect("sig"));
 
     let archived = env.json(&["archive", "p.toml", "arch"], 0);
-    assert_eq!(archived["provenance"], "signature-verified");
+    assert_eq!(archived["provenance"], "signature-recorded");
     let text = env.text(&["archive", "p.toml", "arch"], 0);
     assert!(
-        text.contains("its verified signature record for principal \"owner@example.org\" is kept"),
+        text.contains("its signature record for principal \"owner@example.org\" is kept"),
         "{text}"
     );
 
@@ -502,7 +505,7 @@ fn signature_records_are_kept_once_and_checked_like_the_bytes() {
     assert_eq!(approval.signature, Digest::of(b"signature"));
     assert_eq!(
         archive_provenance(&archive, digest).expect("lookup"),
-        Provenance::SignatureVerified(approval.clone())
+        Provenance::SignatureRecorded(approval.clone())
     );
     assert_eq!(
         record(b"signature", OWNER).expect("again"),
@@ -522,14 +525,25 @@ fn signature_records_are_kept_once_and_checked_like_the_bytes() {
         fs::write(path, content).expect("write");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mode");
     };
-    // A record that the audit cannot trust is an error, never "unsigned".
+    // A record that the audit cannot read is an error, never "unsigned". An
+    // intact one is a record, not a verified signature (bn-2ld): without
+    // --allowed-signers the audit is incomplete.
     let audit = |code| {
         env.write("p.toml", &bytes);
         env.json(&["audit-charges", "p.toml", "arch"], code)
     };
     env.write("p.toml", &bytes);
     env.spend("1", WEB);
-    assert_eq!(audit(0)["result"], "complete");
+    let intact = audit(2);
+    assert_eq!(intact["result"], "incomplete");
+    assert_eq!(
+        intact["revisions"]["details"][0]["provenance"],
+        "signature-recorded"
+    );
+    assert_eq!(
+        intact["gaps"]["signature-not-reverified"]["sequences"],
+        json!([1])
+    );
     damage(&sig, b"another signature", 0o600);
     assert!(archive_provenance(&archive, digest).is_err());
     assert!(text_of(&audit(1)["error"]["message"]).contains("damaged"));
@@ -546,7 +560,7 @@ fn signature_records_are_kept_once_and_checked_like_the_bytes() {
     symlink(env.path("elsewhere"), &rec).expect("link");
     assert!(archive_provenance(&archive, digest).is_err());
     damage(&rec, &line, 0o600);
-    assert_eq!(audit(0)["result"], "complete");
+    assert_eq!(audit(2)["result"], "incomplete");
 
     // An interrupted run can leave a signature without a record. The same
     // signature completes it; another one is refused, and nothing is replaced.
@@ -628,7 +642,7 @@ fn archive_missing_gaps_name_each_digest_with_its_sequences() {
         let rows = &audit["revisions"]["details"];
         assert_eq!(
             rows[0],
-            json!({"digest": a, "first_seq": 1, "last_seq": 4, "lines": 3, "provenance": "missing", "approval": null}),
+            json!({"digest": a, "first_seq": 1, "last_seq": 4, "lines": 3, "provenance": "missing", "approval": null, "reason": null}),
             "{command}"
         );
         assert_eq!(rows[1]["provenance"], "missing");

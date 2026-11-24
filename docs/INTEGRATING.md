@@ -734,12 +734,15 @@ pass later, retrieve the originally verified bytes with
 the archive keeps the signature that verified (`DIGEST.sig`) and a record of
 the principal, namespace and trusted signers file digest (`DIGEST.approval`).
 The response gives that record as `approval`, with `provenance` set to
-`signature-verified`. `audit-receipts` and `audit-charges` read these records
-to tell revisions the owner signed from revisions stored by plain `archive`
+`signature-recorded`. `audit-receipts` and `audit-charges` read these records
+to tell revisions with a signature from revisions stored by plain `archive`,
+and with `--allowed-signers` they verify each signature again
 ([what the audits prove](EVIDENCE.md#what-an-audit-proves)). Keep the trusted
-signers file and the expected principal separately: the audits do not verify
-the signature again, and an auditor needs both to do so. A failed signature
-check publishes nothing.
+signers file and the expected principal separately: a record alone does not
+show who approved the bytes, because anyone who can write the archive can
+write one, so an audit is `complete` only when it verifies the signatures
+again with a trusted signers file. A failed signature check publishes
+nothing.
 
 ## Review and case suites
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hallpass::{StateDir, evidence};
 use serde_json::{Value, json};
 
+use super::cli_verify::{SignatureArgs, audit_advice};
 use super::{ERROR, OK, Output, REFUSED, error_output, quoted, safe};
 
 fn output(cmd: &str, file: &Path, code: u8, mut value: Value, text: String) -> Output {
@@ -93,8 +94,13 @@ fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
             format!("recorded label {} confirmed", safe(label))
         }
         (Some(label), _) if *label == row.recorded.label => format!(
-            "recorded label {} matches the archived revision, which no verified signature approved",
-            safe(label)
+            "recorded label {} matches the archived revision, {}",
+            safe(label),
+            match row.provenance {
+                "signature-recorded" => "which has a signature record (not re-verified)",
+                "signature-rejected" => "whose recorded signature failed re-verification",
+                _ => "which no verified signature approved",
+            }
         ),
         (Some(label), _) => format!(
             "recorded label {} but the revision matches label {}",
@@ -116,6 +122,7 @@ fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
     )
 }
 
+/// Only a signature this audit verified again (with `--allowed-signers`).
 const SIGNED: &str = "signature-verified";
 
 /// What a gap reason means, and what would close it next time.
@@ -124,6 +131,12 @@ fn gap_meaning(reason: &str) -> &'static str {
         "adoption-carry" => "an adoption carried totals, which are not original debits",
         "approval-unverified" => {
             "decided under a revision that no verified signature approved in this archive; if the owner signed it, record the signature with verify-approval --archive"
+        }
+        "signature-not-reverified" => {
+            "decided under a revision with a signature record that this audit did not check; anyone who can write the archive can write a record, so run the audit with --allowed-signers and your own trusted signers file"
+        }
+        "signature-rejected" => {
+            "decided under a revision whose recorded signature failed re-verification with the trusted signers file you supplied, so the archive does not show that the owner approved those bytes"
         }
         "archive-missing" => {
             "the revision is not in the archive; archive each revision before spending under it"
@@ -157,9 +170,12 @@ fn gaps_text(
             omitted(gap.truncated, "sequences")
         );
         for row in &gap.digests {
+            let why = row.reason.map_or_else(String::new, |code| {
+                format!(". Reason {code}: {}", audit_advice(code))
+            });
             let _ = writeln!(
                 text,
-                "  {} {} line(s). Sequences {:?}{}",
+                "  {} {} line(s). Sequences {:?}{}{why}",
                 row.digest,
                 row.count,
                 row.sequences,
@@ -172,7 +188,11 @@ fn gaps_text(
     }
 }
 
-fn revisions_text(text: &mut String, revisions: &evidence::RevisionGroup) {
+fn revisions_text(
+    text: &mut String,
+    revisions: &evidence::RevisionGroup,
+    signatures: &evidence::SignatureCheck,
+) {
     let _ = writeln!(
         text,
         "Revisions used {}, {} without a verified signature",
@@ -185,11 +205,21 @@ fn revisions_text(text: &mut String, revisions: &evidence::RevisionGroup) {
                 _ => "not in the archive".to_owned(),
             },
             |a| {
-                format!(
-                    "signature-verified for principal {} with trusted signers {}",
-                    quoted(&a.principal),
-                    a.allowed_signers
-                )
+                // The principal the signature was (or would be) verified for.
+                let principal = quoted(signatures.principal.as_ref().unwrap_or(&a.principal));
+                match (row.provenance, row.reason) {
+                    (SIGNED, _) => format!(
+                        "signature re-verified for principal {principal} with the trusted signers you supplied"
+                    ),
+                    ("signature-rejected", Some(code)) => format!(
+                        "recorded signature failed re-verification for principal {principal} ({code}): {}",
+                        audit_advice(code)
+                    ),
+                    _ => format!(
+                        "signature record present (not re-verified) for principal {principal}, recorded with trusted signers {}",
+                        a.allowed_signers
+                    ),
+                }
             },
         );
         let _ = writeln!(
@@ -200,6 +230,16 @@ fn revisions_text(text: &mut String, revisions: &evidence::RevisionGroup) {
     }
     if revisions.truncated {
         text.push_str("  Additional revisions omitted.\n");
+    }
+    if let Some(trust) = &signatures.allowed_signers {
+        let _ = writeln!(
+            text,
+            "Recorded signatures checked with ssh-keygen against trusted signers {trust}{}.",
+            signatures.principal.as_ref().map_or_else(
+                || ", each for the principal its record names".to_owned(),
+                |p| format!(", all for principal {}", quoted(p))
+            )
+        );
     }
 }
 
@@ -212,10 +252,12 @@ fn tip_text(tip: &hallpass::Checkpoint) -> String {
     )
 }
 
-pub fn audit(file: &Path, directory: &Path) -> Output {
-    let report = match hallpass::load(file)
-        .and_then(|p| evidence::audit_receipts(&p, &StateDir::from_env(), directory))
-    {
+pub fn audit(file: &Path, directory: &Path, signatures: &SignatureArgs) -> Output {
+    let report = match hallpass::load(file).and_then(|p| {
+        signatures.reverifying(|reverify| {
+            evidence::audit_receipts_with(&p, &StateDir::from_env(), directory, reverify)
+        })
+    }) {
         Ok(report) => report,
         Err(e) => return error_output("audit-receipts", Some(file), &e),
     };
@@ -236,7 +278,7 @@ pub fn audit(file: &Path, directory: &Path) -> Output {
         }
     }
     gaps_text(&mut text, &report.gaps);
-    revisions_text(&mut text, &report.revisions);
+    revisions_text(&mut text, &report.revisions, &report.signatures);
     output(
         "audit-receipts",
         file,
@@ -326,10 +368,12 @@ fn ancestry_text(text: &mut String, ancestry: &evidence::BackupAncestry) {
     }
 }
 
-pub fn audit_charges(file: &Path, directory: &Path) -> Output {
-    let report = match hallpass::load(file)
-        .and_then(|p| evidence::audit_charges(&p, &StateDir::from_env(), directory))
-    {
+pub fn audit_charges(file: &Path, directory: &Path, signatures: &SignatureArgs) -> Output {
+    let report = match hallpass::load(file).and_then(|p| {
+        signatures.reverifying(|reverify| {
+            evidence::audit_charges_with(&p, &StateDir::from_env(), directory, reverify)
+        })
+    }) {
         Ok(report) => report,
         Err(e) => return error_output("audit-charges", Some(file), &e),
     };
@@ -353,7 +397,7 @@ pub fn audit_charges(file: &Path, directory: &Path) -> Output {
         text.push_str("Gaps none\n");
     }
     gaps_text(&mut text, &report.gaps);
-    revisions_text(&mut text, &report.revisions);
+    revisions_text(&mut text, &report.revisions, &report.signatures);
     for warning in &report.warnings {
         let _ = writeln!(text, "Warning: {}", safe(warning));
     }

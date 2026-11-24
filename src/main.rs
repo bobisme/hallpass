@@ -186,6 +186,8 @@ enum Command {
         file: PathBuf,
         /// Private directory populated by archive.
         directory: PathBuf,
+        #[command(flatten)]
+        signatures: cli_verify::SignatureArgs,
     },
     /// Audit historical charges against archived pass revisions.
     AuditCharges {
@@ -193,6 +195,8 @@ enum Command {
         file: PathBuf,
         /// Private directory populated by archive.
         directory: PathBuf,
+        #[command(flatten)]
+        signatures: cli_verify::SignatureArgs,
     },
     /// Reconcile expected debits from a local JSON manifest.
     Reconcile {
@@ -2101,7 +2105,7 @@ fn archive(file: &Path, directory: &Path) -> Output {
                 || " without a signature record (verify-approval --archive records one)".to_owned(),
                 |approval| {
                     format!(
-                        "; its verified signature record for principal {} is kept",
+                        "; its signature record for principal {} is kept",
                         quoted(&approval.principal)
                     )
                 },
@@ -2324,8 +2328,16 @@ fn run(cli: &Cli, format: Format) -> Output {
             output,
         } => retrieve(directory, digest, output.as_deref()),
         Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
-        Command::AuditReceipts { file, directory } => cli_evidence::audit(file, directory),
-        Command::AuditCharges { file, directory } => cli_evidence::audit_charges(file, directory),
+        Command::AuditReceipts {
+            file,
+            directory,
+            signatures,
+        } => cli_evidence::audit(file, directory, signatures),
+        Command::AuditCharges {
+            file,
+            directory,
+            signatures,
+        } => cli_evidence::audit_charges(file, directory, signatures),
         Command::Reconcile { file, manifest } => cli_evidence::reconcile(file, manifest),
         Command::CompareBackups {
             file,

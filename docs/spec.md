@@ -851,15 +851,21 @@ because the group could change it.
 `verify-approval --archive DIR` retains them too, after the owner's signature
 verified, and keeps the signature (`DIGEST.sig`) and a record of the
 verification (`DIGEST.approval`) beside them. Each archived digest therefore
-has a provenance: `signature-verified`, `unsigned` (archived without a
+has a provenance: `signature-recorded`, `unsigned` (archived without a
 signature record, as by `archive` or an older version) or `missing`. Archive
 files are created once and never replaced, so `archive` never upgrades or
-downgrades a digest; only `verify-approval --archive` adds a record.
+downgrades a digest; only `verify-approval --archive` adds a record. Reading
+a record does not verify its signature, and anyone who can write the archive
+can write one.
 `receipt`, `audit-receipts`, `audit-charges`, `reconcile` and
 `compare-backups` read the ledger under shared locks and report historical
 evidence. None of these commands writes the ledger or the witness. Both
-audits report every revision the ledger used with its provenance, and are
-`complete` only when a verified signature approved each one.
+audits report every revision the ledger used with its provenance. With
+`--allowed-signers FILE` (and optionally `--principal`) they run
+`ssh-keygen -Y verify` again over each recorded revision's archived bytes and
+signature with FILE, and report it `signature-verified` or
+`signature-rejected`. They are `complete` only when every revision used is
+`signature-verified`, so never without `--allowed-signers`.
 [EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
 
 ## Command line
@@ -917,8 +923,8 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
 | `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
-| `audit-receipts` | `complete`: and every revision used is signature-verified | `incomplete`, `mismatch` | unusable ledger, archive entry or signature record |
-| `audit-charges` | `complete`: and every revision used is signature-verified | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry or signature record |
+| `audit-receipts` | `complete`: and `--allowed-signers` verified a signature over every revision used again | `incomplete`, `mismatch` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature |
+| `audit-charges` | `complete`: and `--allowed-signers` verified a signature over every revision used again | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature |
 | `reconcile` | `match` | `discrepancy` | invalid manifest, pass or history |
 | `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass |
 | `checkpoint` | exported | `empty`: nothing recorded yet | invalid pass, ledger error (as `status`) |
@@ -1114,7 +1120,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **reconcile-references**: `ledger`, `pass_id`, `digest`, `now`,
   `test_clock`, `seq` (of the new line), `adoption`, `reason` and
   `references` (the list recorded).
-- **archive**: `digest`, `provenance` (`signature-verified` or
+- **archive**: `digest`, `provenance` (`signature-recorded` or
   `unsigned`) and `approval` (the kept signature record `{principal,
   namespace, allowed_signers, signature}`, or null). **retrieve**: `digest`
   and `bytes` (the exact pass text); with `--output FILE`, `digest`, `output`
@@ -1140,7 +1146,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
   unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `archive`, `provenance`
-  (`signature-verified` when verified with `--archive`, else null) and
+  (`signature-recorded` when verified with `--archive`, else null) and
   `approval` (the signature record now in the archive, as in `archive`, or
   null; when an earlier, different record was kept, a warning says so).
 - **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,

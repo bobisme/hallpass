@@ -237,7 +237,8 @@ fn other_advanced_commands_print_readable_text() {
     let file = s(&p);
     let (code, archived) = json(&["archive", file, s(&archive)]);
     assert_eq!(code, 0);
-    // As `verify-approval --archive` records it; the audits do not verify it again.
+    // As `verify-approval --archive` records it. Without --allowed-signers the
+    // audits do not verify it again, and say so.
     hallpass::archive_verified_signature(
         &archive,
         archived["digest"]
@@ -261,14 +262,23 @@ fn other_advanced_commands_print_readable_text() {
     assert!(out.contains("label \"web\""), "{out}");
 
     let (code, out) = text(&["audit-receipts", file, s(&archive)]);
-    assert_eq!(code, 0, "{out}");
+    assert_eq!(code, 2, "{out}");
     assert!(out.contains("#1 target 1"), "{out}");
-    assert!(out.contains("recorded label web confirmed"), "{out}");
+    assert!(
+        out.contains(
+            "recorded label web matches the archived revision, which has a signature record (not re-verified)"
+        ),
+        "{out}"
+    );
 
     let (code, out) = text(&["audit-charges", file, s(&archive)]);
-    assert_eq!(code, 0, "{out}");
+    assert_eq!(code, 2, "{out}");
     assert!(out.contains("Mismatches 0"), "{out}");
-    assert!(out.contains("Gaps none"), "{out}");
+    assert!(out.contains("Gap signature-not-reverified 2: "), "{out}");
+    assert!(
+        out.contains("signature record present (not re-verified)"),
+        "{out}"
+    );
 
     fs::write(case.witness(), &anchor_witness).expect("captured witness");
     fs::remove_file(&ledger).expect("lost");

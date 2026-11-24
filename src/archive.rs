@@ -72,7 +72,8 @@ fn destination(dir: &Path, digest: Digest) -> PathBuf {
     dir.join(digest.to_string())
 }
 
-fn signature_path(dir: &Path, digest: Digest) -> PathBuf {
+/// Where the archive keeps the detached signature of `digest` (`DIGEST.sig`).
+pub fn signature_path(dir: &Path, digest: Digest) -> PathBuf {
     dir.join(format!("{digest}.sig"))
 }
 
@@ -235,7 +236,8 @@ fn digest_text<S: Serializer>(digest: &Digest, serializer: S) -> Result<S::Ok, S
 /// trusted signers file whose digest is `allowed_signers`. Reading it does not
 /// verify the signature again: anyone who can write the archive can write a
 /// record. To check it independently, verify `DIGEST.sig` over the archived
-/// bytes with a trusted signers file of your own.
+/// bytes with a trusted signers file of your own, as the audits do with
+/// `--allowed-signers` (see [`crate::evidence::Reverify`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SignedApproval {
     /// The signer identity that was expected and verified.
@@ -271,27 +273,28 @@ pub enum Provenance {
     /// them, or `verify-approval --archive` stopped before it recorded the
     /// signature.
     Unsigned,
-    /// `verify-approval --archive` verified an owner's signature over the bytes
-    /// and kept it beside them.
-    SignatureVerified(SignedApproval),
+    /// The bytes are archived with a signature record and the signature it
+    /// names, as `verify-approval --archive` keeps them after the signature
+    /// verified. Reading the record does not verify the signature again.
+    SignatureRecorded(SignedApproval),
 }
 
 impl Provenance {
-    /// `missing`, `unsigned` or `signature-verified`.
+    /// `missing`, `unsigned` or `signature-recorded`.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Missing => "missing",
             Self::Unsigned => "unsigned",
-            Self::SignatureVerified(_) => "signature-verified",
+            Self::SignatureRecorded(_) => "signature-recorded",
         }
     }
 
-    /// The signature record, for [`Provenance::SignatureVerified`].
+    /// The signature record, for [`Provenance::SignatureRecorded`].
     #[must_use]
     pub const fn approval(&self) -> Option<&SignedApproval> {
         match self {
-            Self::SignatureVerified(approval) => Some(approval),
+            Self::SignatureRecorded(approval) => Some(approval),
             Self::Missing | Self::Unsigned => None,
         }
     }
@@ -360,7 +363,7 @@ pub fn archive_provenance(dir: &Path, digest: Digest) -> Result<Provenance, Erro
             "the .sig file beside it is not the signature it records",
         ));
     }
-    Ok(Provenance::SignatureVerified(approval))
+    Ok(Provenance::SignatureRecorded(approval))
 }
 
 /// What [`archive_verified_signature`] left in the archive.
@@ -369,7 +372,7 @@ pub enum ArchivedSignature {
     /// This verification is recorded (now, or by an identical earlier run).
     Recorded(SignedApproval),
     /// An earlier, different signature record for the same bytes was kept
-    /// unchanged, and this one was not stored. The bytes stay signature-verified.
+    /// unchanged, and this one was not stored. The bytes keep that record.
     KeptEarlier(SignedApproval),
 }
 
@@ -432,7 +435,7 @@ pub fn archive_verified_signature(
                 "archive the bytes of {digest} before recording their signature"
             )));
         }
-        Provenance::SignatureVerified(existing) => return Ok(kept(existing)),
+        Provenance::SignatureRecorded(existing) => return Ok(kept(existing)),
         Provenance::Unsigned => (),
     }
     let advice = "check that verify-approval wrote this signature";
@@ -470,7 +473,7 @@ pub fn archive_verified_signature(
     // Another run recorded the same signature with another principal or trust
     // file first. Keep its record.
     match archive_provenance(dir, digest)? {
-        Provenance::SignatureVerified(existing) => Ok(kept(existing)),
+        Provenance::SignatureRecorded(existing) => Ok(kept(existing)),
         Provenance::Missing | Provenance::Unsigned => Err(damaged_record(&path, "unreadable")),
     }
 }

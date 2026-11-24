@@ -87,7 +87,7 @@ fn guide(name: &str) -> Guide {
                 "mkdir -m 700 approval-archive",
                 "hallpass --format json archive engagement.pass.toml approval-archive",
             ],
-            "Create a private directory once. Archive each reviewed revision there and save its digest. Use retrieve with that digest to recover the exact approved text. archive stores bytes only and reports provenance: unsigned, or signature-verified when verify-approval --archive already recorded a signature for these bytes (that record is kept). The audits are complete only for revisions with a verified signature record.",
+            "Create a private directory once. Archive each reviewed revision there and save its digest. Use retrieve with that digest to recover the exact approved text. archive stores bytes only and reports provenance: unsigned, or signature-recorded when verify-approval --archive already recorded a signature for these bytes (that record is kept). The audits are complete only when run with --allowed-signers and every revision's recorded signature verifies again.",
         ),
         "retrieve" => (
             &["hallpass --format json retrieve approval-archive \"$digest\""],
@@ -98,7 +98,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org",
                 "hallpass --format json verify-approval engagement.pass.toml --signature engagement.pass.toml.sig --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive",
             ],
-            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. With --archive, the exact verified bytes, the signature and a record of the principal and trust file digest are retained after signature success, and the reply's provenance is signature-verified. An earlier, different record for the same bytes is kept, with a warning. Keep the trust file and expected principal separately to verify the signature again. Those live operations check current policy.",
+            "Select the principal and trusted signers independently. On exit 0 and result=verified, pin the returned digest with permits --digest or spend --digest. With --archive, the exact verified bytes, the signature and a record of the principal and trust file digest are retained after signature success, and the reply's provenance is signature-recorded. An earlier, different record for the same bytes is kept, with a warning. Keep the trust file and expected principal separately: the audits verify the signatures again only with --allowed-signers. Those live operations check current policy.",
         ),
         "diff" => (
             &[
@@ -144,15 +144,18 @@ fn history_guide(name: &str) -> Guide {
             "After a lost spend reply, supply the exact reference from your durable run record. Compare matching sequences, digests, charges and retained targets. Found exits 0. Absent or ambiguous exits 2. Reconcile before retrying. A receipt records a debit and cannot establish that the external action occurred.",
         ),
         "audit-receipts" => (
-            &["hallpass --format json audit-receipts engagement.pass.toml approval-archive"],
-            "Archive each reviewed revision with verify-approval --archive before spending with --record-target. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps, revisions and the independent witness status. Complete exits 0 only when a verified signature approved every revision used; approval-unverified gaps name the others with their sequences. Incomplete or mismatch exits 2. A damaged input exits 1.",
+            &[
+                "hallpass --format json audit-receipts engagement.pass.toml approval-archive --allowed-signers trusted_signers",
+                "hallpass --format json audit-receipts engagement.pass.toml approval-archive --allowed-signers trusted_signers --principal owner@example.org",
+            ],
+            "Archive each reviewed revision with verify-approval --archive before spending with --record-target. Supply your own trusted signers file with --allowed-signers: the audit runs ssh-keygen -Y verify again for each recorded signature over the archived bytes, once per digest, for the record's principal or --principal. Replay retained endpoints at their recorded instant, then inspect mismatches, gaps, revisions, signatures and the independent witness status. Complete exits 0 only when every revision used is signature-verified, so never without --allowed-signers: a signature record alone is signature-recorded with a signature-not-reverified gap. A rejected signature is a signature-rejected gap with a reason; revisions without a record are approval-unverified gaps. Incomplete or mismatch exits 2. A damaged input, an unreadable trusted signers file, or an ssh-keygen that cannot run when a recorded signature needs verifying, exits 1.",
         ),
         "audit-charges" => (
             &[
-                "hallpass audit-charges engagement.pass.toml approval-archive",
-                "hallpass --format json audit-charges engagement.pass.toml approval-archive",
+                "hallpass audit-charges engagement.pass.toml approval-archive --allowed-signers trusted_signers",
+                "hallpass --format json audit-charges engagement.pass.toml approval-archive --allowed-signers trusted_signers",
             ],
-            "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. Inspect revisions for each digest used, with its first and last sequence and provenance; complete needs a verified signature over every one. The witness is reported separately. This checks accounting, not external work or endpoints.",
+            "Replay each recorded charge against its archived revision and earlier totals. Mismatches and gaps can coexist; carry is not an original debit. Supply your own trusted signers file with --allowed-signers so that each recorded signature is verified again, as in audit-receipts. Inspect revisions for each digest used, with its first and last sequence and provenance; complete needs every one signature-verified, so never without --allowed-signers. The witness is reported separately. This checks accounting, not external work or endpoints.",
         ),
         "reconcile" => (
             &[

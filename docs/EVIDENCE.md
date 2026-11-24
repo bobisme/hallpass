@@ -58,7 +58,8 @@ can reuse references for correlation.
 ## Replay historical endpoint decisions
 
 Retain each revision the owner approves together with the signature that
-approves it, and keep the checked target with each debit:
+approves it, and keep the checked target with each debit. Audit with your own
+trusted signers file, so that the audit verifies each signature again:
 
 ```sh
 mkdir -m 700 approval-archive
@@ -66,7 +67,8 @@ hallpass --json verify-approval engagement.toml --signature engagement.toml.sig 
   --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive
 hallpass --json spend engagement.toml --charge requests=1 \
   --to 192.0.2.10:443/tcp@app.example.com --record-target
-hallpass --json audit-receipts engagement.toml approval-archive
+hallpass --json audit-receipts engagement.toml approval-archive \
+  --allowed-signers trusted_signers
 ```
 
 A plain `spend --to` checks its target but does not keep it, so the audit can
@@ -81,16 +83,32 @@ For each debit that retained targets, the audit reads the archived bytes for its
 
 | Result | Exit | Meaning |
 | --- | --- | --- |
-| `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and a verified signature approved every revision the ledger used. |
-| `incomplete` | 2 | No corroborated endpoints, or evidence gaps (a revision without a verified signature is one) and no policy mismatch. |
+| `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and this audit verified again, with `--allowed-signers`, a signature over every revision the ledger used. |
+| `incomplete` | 2 | No corroborated endpoints, or evidence gaps and no policy mismatch. A revision without a signature this audit verified is a gap. |
 | `mismatch` | 2 | At least one refusal or changed matched label. Other gaps are still listed. |
-| `error` | 1 | Unusable input, such as a corrupt ledger, a digest-invalid archive entry or a damaged signature record. |
+| `error` | 1 | Unusable input, such as a corrupt ledger, a digest-invalid archive entry, a damaged signature record or an unreadable `--allowed-signers` file, or an `ssh-keygen` that cannot run when a recorded signature needs verifying. |
 
-A CI gate should require exit 0 and `result = "complete"`. An engagement
-whose revisions were stored by `archive` alone is never `complete`: even when
-the replay finds no mismatch, it is `incomplete` with an `approval-unverified`
-gap. That gap means the archive holds no evidence that the owner approved
-those bytes; it is not a pass.
+A CI gate should run the audit with `--allowed-signers` and a trusted
+signers file the auditor controls, and require exit 0 and
+`result = "complete"`:
+
+```sh
+hallpass --json audit-receipts engagement.toml approval-archive \
+  --allowed-signers trusted_signers > audit.json
+jq -e '.result == "complete"' audit.json
+```
+
+`complete` cannot be reached without `--allowed-signers`. A signature record
+in the archive is only a file: anyone who can write the archive can copy
+another revision's `.sig` and write a record that names any digest, with no
+key. So an audit that only reads the records reports each one as
+`signature-recorded`, with a `signature-not-reverified` gap, and is
+`incomplete`. A gate keyed on exit 0 or on `complete` alone therefore fails
+when the flag is missing, instead of accepting records that anyone could have
+written. The reply's `signatures.reverified` says which mode ran. An
+engagement whose revisions were stored by `archive` alone is never `complete`
+either: it is `incomplete` with an `approval-unverified` gap, because the
+archive holds no signature for those bytes.
 
 The `gaps` object groups affected lines by reason. Counts include every endpoint or affected record. The report retains the first 64 endpoint details per outcome and the first 64 sequences per gap reason. Each group marks its own truncation.
 
@@ -98,31 +116,65 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | --- | --- | --- |
 | `targets-unrecorded` | A spend or debit line that kept no target: a scalar spend line, which has no field for one, or a debit without `--record-target`. | Spend with `--to` and `--record-target`. |
 | `archive-missing` | A debit with targets whose revision is not in the archive. | Archive each revision before spending under it. |
-| `approval-unverified` | A spend or debit line decided under a revision that is not `signature-verified` in the archive. | Have the owner sign that revision, and record it with `verify-approval --archive`. |
+| `approval-unverified` | A spend or debit line decided under a revision with no signature record in the archive (`unsigned` or `missing`). | Have the owner sign that revision, and record it with `verify-approval --archive`. |
+| `signature-not-reverified` | A spend or debit line decided under a revision with a signature record that this audit did not verify, because it ran without `--allowed-signers`. | Run the audit with `--allowed-signers` and your own trusted signers file. |
+| `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
 
 `targets-unrecorded` replaces the `legacy-spend` reason that earlier versions
-gave a scalar spend line. Both gaps about a revision, `archive-missing` and
-`approval-unverified`, also name the revision: `digests` lists each digest
-with its own `count`, first 64 `sequences` and `truncated`, in order of first
-use, up to 64 digests (`digests_truncated` marks more). Text output prints
-them under the gap. For the other reasons `digests` is empty.
+gave a scalar spend line. The four gaps about a revision, `archive-missing`,
+`approval-unverified`, `signature-not-reverified` and `signature-rejected`,
+also name the revision: `digests` lists each digest with its own `count`,
+first 64 `sequences` and `truncated`, in order of first use, up to 64 digests
+(`digests_truncated` marks more). A `signature-rejected` entry also has
+`reason`, the code `verify-approval` uses: `wrong-namespace`,
+`bytes-do-not-match`, `malformed-signature`, `untrusted-key`,
+`wrong-principal` or `unknown`, read from `ssh-keygen`'s output. Text output
+prints the digests under the gap, with the reason and what it means. For the
+other reasons `digests` is empty.
 
 The reader caches one parsed revision at a time. Review the independently reported witness status and warnings when interpreting the history. Replay establishes only the scope of recorded endpoints at the recorded instant. The requested duration, unrecorded endpoints, actual traffic and execution outcomes require other evidence.
 
 ### What an audit proves
 
+An audit has two modes, and they prove different things.
+
+- **Without `--allowed-signers`** the audit replays the ledger against the
+  archived bytes and reports which revisions have a signature record. It
+  shows whether the recorded endpoints (`audit-receipts`) or charges
+  (`audit-charges`) fit those exact bytes. It proves nothing about who
+  approved them: a record is a file that anyone who can write the archive
+  can write. Text says "signature record present (not re-verified)", JSON
+  says `signature-recorded`, and the audit is never `complete`.
+- **With `--allowed-signers FILE`** the audit also runs `ssh-keygen -Y
+  verify` again for each revision that has a record: over the archived
+  bytes, with the archived signature, in the `hallpass-approval-v1`
+  namespace, for the principal the record names (or `--principal`), against
+  FILE. A revision it accepts is `signature-verified`: a key that FILE trusts
+  for that principal signed those exact bytes. The proof is only as good as
+  FILE, so keep it under your own control; the reply gives its digest in
+  `signatures.allowed_signers`. A revision it rejects is
+  `signature-rejected`, with a `reason`.
+
 Text output says an endpoint is `confirmed` when the revision its debit was
 decided under allows it at the recorded instant, by the destination label the
 debit recorded, and that revision is `signature-verified`. Confirmed proves
-that the recorded endpoint was in the scope of exact pass bytes for which the
-archive holds a verified signature record. It does not prove that traffic went
-there or only there, that the work ran, or that the record itself is genuine:
-the audits read the record and do not run `ssh-keygen` again. An endpoint
-under an `unsigned` revision is never confirmed. Text says that it matches the
-archived revision, which no verified signature approved, and its JSON detail
-has `provenance = "unsigned"`. `corroborated` counts both kinds; read each
-detail's `provenance`.
+that the recorded endpoint was in the scope of exact pass bytes that a key in
+your trusted signers file signed. It does not prove that traffic went there
+or only there, or that the work ran. An endpoint under any other revision is
+never confirmed, and text says why: the revision matches but no verified
+signature approved it (`unsigned`), it has a signature record that was not
+re-verified (`signature-recorded`), or its recorded signature failed
+re-verification (`signature-rejected`). `corroborated` counts every kind;
+read each detail's `provenance`.
+
+With `--allowed-signers`, each digest is verified once, however many lines
+used it. The audit reads FILE before the first verification and again after
+each one, and reads the signature and its record again after each one; a
+change between those reads is an error (exit 1). A missing or unreadable FILE
+is an error. So is an `ssh-keygen` that cannot run, or that prints its usage
+instead of verifying, when a revision has a record to verify: an unusable
+verifier is never a pass.
 
 ### Revisions and their provenance
 
@@ -137,12 +189,17 @@ replaced. Each digest has one provenance:
 
 | `provenance` | Meaning |
 | --- | --- |
-| `signature-verified` | `verify-approval --archive` verified a signature over these bytes and recorded it. |
+| `signature-recorded` | The archive holds a signature record and the signature it names, as `verify-approval --archive` writes them after the signature verified. Reading the record does not verify the signature again, and anyone who can write the archive can write a record. |
 | `unsigned` | The bytes are archived without a signature record: `archive` stored them, or an older version wrote the archive. |
 | `missing` | The archive does not hold these bytes. |
 
+The audits report the same words, except for a revision with a record when
+they run with `--allowed-signers`: it is `signature-verified` when
+`ssh-keygen` accepted its signature again, and `signature-rejected` when it
+did not. Only an audit with `--allowed-signers` reports `signature-verified`.
+
 `archive` never upgrades a digest. Archiving bytes that already have a record
-keeps the record, and `archive` then reports `signature-verified` with the
+keeps the record, and `archive` then reports `signature-recorded` with the
 record as `approval`. Only `verify-approval --archive` adds a record, so
 running it later over the bytes of an `unsigned` digest upgrades that digest.
 A record is never replaced: a second, different verified signature over the
@@ -154,18 +211,26 @@ record that does not parse, names another digest, or does not match its
 
 Both audits list the digests the ledger's spend and debit lines used, in
 `revisions`, in order of first use. Each entry has `digest`, `first_seq` and
-`last_seq`, `lines` (how many lines used it), `provenance`, and `approval`
-(the record, or null). `count` is the number of distinct digests and
-`unverified` how many are not `signature-verified`. The first 64 are listed
-and `truncated` marks more. Text output prints them after the gaps. To list
-only the revisions:
+`last_seq`, `lines` (how many lines used it), `provenance`, `approval` (the
+record, or null) and `reason` (for `signature-rejected`, else null). `count`
+is the number of distinct digests and `unverified` how many are not
+`signature-verified`. The first 64 are listed and `truncated` marks more.
+Text output prints them after the gaps. To list only the revisions:
 
 ```sh
-hallpass --json audit-charges engagement.toml approval-archive | jq '.revisions'
+hallpass --json audit-charges engagement.toml approval-archive \
+  --allowed-signers trusted_signers | jq '.revisions'
 ```
 
-To check a signature independently, verify the archived signature over the
-archived bytes with a trusted signers file you hold:
+Both audits also report `signatures`: `reverified` (true when the audit ran
+with `--allowed-signers`, so `ssh-keygen` checked every record it read),
+`allowed_signers` (the digest of that file, or null) and `principal` (the
+`--principal` value, or null when each signature was verified for the
+principal its record names). With `--allowed-signers`, text output ends the
+revisions with a line that names the file's digest.
+
+`--allowed-signers` runs, for each recorded revision, the check you can also
+make by hand with a trusted signers file you hold:
 
 ```sh
 ssh-keygen -Y verify -n hallpass-approval-v1 -I owner@example.org -f trusted_signers \
@@ -227,8 +292,8 @@ the backups are unrelated. Text output says this in words.
 ### Audit historical charges
 
 ```sh
-hallpass audit-charges engagement.toml approval-archive
-hallpass --json audit-charges engagement.toml approval-archive
+hallpass audit-charges engagement.toml approval-archive --allowed-signers trusted_signers
+hallpass --json audit-charges engagement.toml approval-archive --allowed-signers trusted_signers
 ```
 
 Each scalar or atomic debit is checked against the exact archived revision and
@@ -236,10 +301,11 @@ pre-debit totals. Missing revisions leave `archive-missing` gaps, which name
 each missing digest with its sequences, while recorded arithmetic still
 advances. A report may contain both gaps and found `mismatches`; mismatches
 take precedence in the result. Adoption carry advances totals but is not a
-verified original debit. Like `audit-receipts`, the charge audit reports
-`revisions` and an `approval-unverified` gap for every debit decided under a
-revision that is not `signature-verified`. `complete` (exit 0) means every
-debit was checked without a mismatch and a verified signature approved every
+verified original debit. Like `audit-receipts`, the charge audit takes
+`--allowed-signers` and `--principal`, and reports `revisions`, `signatures`
+and a gap for every debit decided under a revision that is not
+`signature-verified`. `complete` (exit 0) means every debit was checked
+without a mismatch and this audit verified again a signature over every
 revision used. `empty` means no debit or carry was available; `incomplete`
 means evidence is missing, approval evidence included. The witness is reported
 separately. This numerical audit does not establish endpoints or external work.

@@ -1,5 +1,7 @@
 //! Local, read-only reconciliation, receipt auditing and backup comparison.
-pub use super::evidence_charges::{ChargeAudit, ChargeMismatch, ChargeMismatches, audit_charges};
+pub use super::evidence_charges::{
+    ChargeAudit, ChargeMismatch, ChargeMismatches, audit_charges, audit_charges_with,
+};
 pub use super::evidence_manifest::{
     MAX_MANIFEST_BYTES, MAX_MANIFEST_ROWS, ReconcileDifference, ReconcileRow, Reconciliation,
     reconcile,
@@ -15,7 +17,7 @@ use super::{
 };
 use crate::{
     Decision, Digest, Error, HostName, LoadedPass, Pass, Provenance, SignedApproval, StateDir,
-    Target, archive_provenance, retrieve_pass, time::Duration,
+    Target, archive::signature_path, archive_provenance, retrieve_pass, time::Duration,
 };
 use std::path::{Path, PathBuf};
 
@@ -163,8 +165,8 @@ pub struct AuditEndpoint {
     pub recorded: RecordedTarget,
     pub matched_label: Option<String>,
     pub refusal_code: Option<&'static str>,
-    /// How the revision it was replayed against was archived:
-    /// `signature-verified` or `unsigned`.
+    /// The provenance of the revision it was replayed against, as in
+    /// [`RevisionUse::provenance`]: never `missing`.
     pub provenance: &'static str,
 }
 
@@ -195,6 +197,10 @@ pub struct GapDigest {
     pub count: u64,
     pub sequences: Vec<u64>,
     pub truncated: bool,
+    /// Why the recorded signature did not verify again, for a
+    /// `signature-rejected` gap only (absent from the other gaps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     #[serde(skip)]
     key: Digest,
 }
@@ -208,11 +214,16 @@ pub struct RevisionUse {
     pub last_seq: u64,
     /// How many spend and debit lines were decided under it.
     pub lines: u64,
-    /// `signature-verified`, `unsigned` (archived without a signature
-    /// record) or `missing` (not in the archive).
+    /// `signature-verified` (this audit verified the recorded signature
+    /// again and the verifier accepted it), `signature-rejected` (it did not),
+    /// `signature-recorded` (a signature record that this audit did not
+    /// verify again), `unsigned` (archived without a signature record) or
+    /// `missing` (not in the archive).
     pub provenance: &'static str,
-    /// The retained signature record, for `signature-verified`.
+    /// The retained signature record, or null for `unsigned` and `missing`.
     pub approval: Option<SignedApproval>,
+    /// Why the verifier rejected the signature, for `signature-rejected`.
+    pub reason: Option<&'static str>,
 }
 
 /// The revisions the ledger's debits used, in order of first use.
@@ -226,6 +237,61 @@ pub struct RevisionGroup {
     pub unverified: u64,
 }
 
+/// Whether an audit verified the archive's signature records again.
+#[derive(Default, Debug, Serialize)]
+pub struct SignatureCheck {
+    /// True when the audit ran the verifier again over every signature
+    /// record it read (`--allowed-signers`); each revision's `provenance`
+    /// gives the outcome. False when it only read the records.
+    pub reverified: bool,
+    /// The digest of the trusted signers file the signatures were verified
+    /// against, when `reverified`.
+    pub allowed_signers: Option<String>,
+    /// The principal every signature had to verify for, or null when each
+    /// was verified for the principal its record names.
+    pub principal: Option<String>,
+}
+
+/// One archived revision whose recorded signature an audit verifies again.
+#[derive(Debug)]
+pub struct SignatureToCheck<'a> {
+    pub digest: Digest,
+    /// The archived bytes, already checked against `digest`.
+    pub bytes: &'a [u8],
+    /// The archived detached signature (`DIGEST.sig`), already checked
+    /// against the record's `signature` digest.
+    pub signature: &'a Path,
+    pub approval: &'a SignedApproval,
+    /// The principal to verify for: the required one, else the record's.
+    pub principal: &'a str,
+}
+
+/// What the verifier said about one recorded signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recheck {
+    /// It accepted the signature over the archived bytes.
+    Verified,
+    /// It did not, for the reason code given.
+    Rejected(&'static str),
+}
+
+/// How an audit verifies signature records again, instead of trusting them.
+///
+/// Anyone who can write the archive can write a record, so an audit without
+/// a `Reverify` treats every recorded signature as `signature-recorded` and
+/// is never `complete`.
+pub struct Reverify<'a> {
+    /// The digest of the trusted signers file that `check` verifies against.
+    /// It is reported, not read.
+    pub allowed_signers: Digest,
+    /// A principal every signature must verify for. `None` verifies each
+    /// signature for the principal its record names.
+    pub principal: Option<&'a str>,
+    /// Verifies one signature, once per digest. An error ends the audit, so a
+    /// verifier that cannot run is never a pass.
+    pub check: &'a mut dyn FnMut(&SignatureToCheck<'_>) -> Result<Recheck, Error>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReceiptAudit {
     pub pass_id: String,
@@ -234,6 +300,7 @@ pub struct ReceiptAudit {
     pub mismatches: EndpointGroup,
     pub gaps: BTreeMap<&'static str, EvidenceGap>,
     pub revisions: RevisionGroup,
+    pub signatures: SignatureCheck,
     pub witness: &'static str,
     pub warnings: Vec<String>,
 }
@@ -259,6 +326,16 @@ pub(super) fn record_revision_gap(
     seq: u64,
     digest: Digest,
 ) {
+    record_digest_gap(gaps, reason, seq, digest, None);
+}
+
+fn record_digest_gap(
+    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    reason: &'static str,
+    seq: u64,
+    digest: Digest,
+    why: Option<&'static str>,
+) {
     record_gap(gaps, reason, seq);
     let group = gaps.entry(reason).or_default();
     // Consecutive lines usually share a revision, so look from the end.
@@ -270,6 +347,7 @@ pub(super) fn record_revision_gap(
             count: 0,
             sequences: Vec::new(),
             truncated: false,
+            reason: why,
             key: digest,
         });
         group.digests.len() - 1
@@ -286,33 +364,67 @@ pub(super) fn record_revision_gap(
     }
 }
 
+/// How one revision's approval stands in this audit.
+enum Approval {
+    Missing,
+    Unsigned,
+    /// A signature record this audit did not verify again.
+    Recorded(SignedApproval),
+    /// A recorded signature that the verifier accepted again.
+    Verified(SignedApproval),
+    /// A recorded signature that the verifier rejected, and why.
+    Rejected(SignedApproval, &'static str),
+}
+
+impl Approval {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unsigned => "unsigned",
+            Self::Recorded(_) => "signature-recorded",
+            Self::Verified(_) => "signature-verified",
+            Self::Rejected(..) => "signature-rejected",
+        }
+    }
+
+    const fn record(&self) -> Option<&SignedApproval> {
+        match self {
+            Self::Missing | Self::Unsigned => None,
+            Self::Recorded(a) | Self::Verified(a) | Self::Rejected(a, _) => Some(a),
+        }
+    }
+}
+
 struct Used {
     digest: Digest,
     first_seq: u64,
     last_seq: u64,
     lines: u64,
-    provenance: Provenance,
+    approval: Approval,
 }
 
-/// The provenance of every revision the ledger used, looked up once per digest.
-pub(super) struct RevisionTracker<'a> {
+/// The provenance of every revision the ledger used, looked up (and with
+/// [`Reverify`], verified again) once per digest.
+pub(super) struct RevisionTracker<'a, 'r> {
     directory: &'a Path,
     index: HashMap<Digest, usize>,
     used: Vec<Used>,
+    reverify: Option<Reverify<'r>>,
 }
 
-impl<'a> RevisionTracker<'a> {
-    pub(super) fn new(directory: &'a Path) -> Self {
+impl<'a, 'r> RevisionTracker<'a, 'r> {
+    pub(super) fn new(directory: &'a Path, reverify: Option<Reverify<'r>>) -> Self {
         Self {
             directory,
             index: HashMap::new(),
             used: Vec::new(),
+            reverify,
         }
     }
 
-    /// Note that line `seq` was decided under `digest`, record an
-    /// `approval-unverified` gap unless a verified signature approved that
-    /// revision, and return its provenance word.
+    /// Note that line `seq` was decided under `digest`, record a gap unless
+    /// a signature this audit verified approved that revision, and return its
+    /// provenance word.
     pub(super) fn note(
         &mut self,
         digest: Digest,
@@ -322,12 +434,13 @@ impl<'a> RevisionTracker<'a> {
         let i = if let Some(&i) = self.index.get(&digest) {
             i
         } else {
+            let approval = self.approval(digest)?;
             self.used.push(Used {
                 digest,
                 first_seq: seq,
                 last_seq: seq,
                 lines: 0,
-                provenance: archive_provenance(self.directory, digest)?,
+                approval,
             });
             self.index.insert(digest, self.used.len() - 1);
             self.used.len() - 1
@@ -335,19 +448,75 @@ impl<'a> RevisionTracker<'a> {
         let entry = &mut self.used[i];
         entry.last_seq = seq;
         entry.lines += 1;
-        if !matches!(entry.provenance, Provenance::SignatureVerified(_)) {
-            record_revision_gap(gaps, "approval-unverified", seq, digest);
+        match entry.approval {
+            Approval::Verified(_) => (),
+            Approval::Missing | Approval::Unsigned => {
+                record_revision_gap(gaps, "approval-unverified", seq, digest);
+            }
+            Approval::Recorded(_) => {
+                record_revision_gap(gaps, "signature-not-reverified", seq, digest);
+            }
+            Approval::Rejected(_, why) => {
+                record_digest_gap(gaps, "signature-rejected", seq, digest, Some(why));
+            }
         }
-        Ok(entry.provenance.as_str())
+        Ok(entry.approval.as_str())
     }
 
-    pub(super) fn report(self) -> RevisionGroup {
+    /// Read the archive's provenance of `digest` and, with [`Reverify`],
+    /// verify its recorded signature again over the archived bytes.
+    fn approval(&mut self, digest: Digest) -> Result<Approval, Error> {
+        let record = match archive_provenance(self.directory, digest)? {
+            Provenance::Missing => return Ok(Approval::Missing),
+            Provenance::Unsigned => return Ok(Approval::Unsigned),
+            Provenance::SignatureRecorded(record) => record,
+        };
+        let Some(reverify) = self.reverify.as_mut() else {
+            return Ok(Approval::Recorded(record));
+        };
+        let bytes = retrieve_pass(self.directory, digest)?;
+        let signature = signature_path(self.directory, digest);
+        let verdict = (reverify.check)(&SignatureToCheck {
+            digest,
+            bytes: &bytes,
+            signature: &signature,
+            approval: &record,
+            principal: reverify.principal.unwrap_or(&record.principal),
+        })?;
+        // The verifier read the signature by its path. The archive must hold
+        // the same record and signature after it as before.
+        let changed = |detail: String| {
+            Error::Usage(format!(
+                "the archived signature or signature record of {digest} changed while it was verified{detail}; run the audit again"
+            ))
+        };
+        match archive_provenance(self.directory, digest) {
+            Ok(Provenance::SignatureRecorded(after)) if after == record => (),
+            Ok(_) => return Err(changed(String::new())),
+            Err(e) => return Err(changed(format!(" ({e})"))),
+        }
+        Ok(match verdict {
+            Recheck::Verified => Approval::Verified(record),
+            Recheck::Rejected(why) => Approval::Rejected(record, why),
+        })
+    }
+
+    /// The revisions used, and how their signatures were checked.
+    pub(super) fn report(self) -> (RevisionGroup, SignatureCheck) {
+        let signatures = self
+            .reverify
+            .as_ref()
+            .map_or_else(SignatureCheck::default, |r| SignatureCheck {
+                reverified: true,
+                allowed_signers: Some(r.allowed_signers.to_string()),
+                principal: r.principal.map(str::to_owned),
+            });
         let mut group = RevisionGroup {
             count: self.used.len() as u64,
             ..RevisionGroup::default()
         };
         for used in self.used {
-            if !matches!(used.provenance, Provenance::SignatureVerified(_)) {
+            if !matches!(used.approval, Approval::Verified(_)) {
                 group.unverified += 1;
             }
             if group.details.len() < DETAIL_LIMIT {
@@ -356,14 +525,18 @@ impl<'a> RevisionTracker<'a> {
                     first_seq: used.first_seq,
                     last_seq: used.last_seq,
                     lines: used.lines,
-                    provenance: used.provenance.as_str(),
-                    approval: used.provenance.approval().cloned(),
+                    provenance: used.approval.as_str(),
+                    approval: used.approval.record().cloned(),
+                    reason: match used.approval {
+                        Approval::Rejected(_, why) => Some(why),
+                        _ => None,
+                    },
                 });
             } else {
                 group.truncated = true;
             }
         }
-        group
+        (group, signatures)
     }
 }
 
@@ -394,7 +567,12 @@ pub(super) fn archive_revision(
     Ok(Some(pass))
 }
 
-/// Replay retained endpoints at each debit's recorded instant. Groups include counts even after detail limits are reached.
+/// Replay retained endpoints at each debit's recorded instant.
+///
+/// Signature records are read without being verified again, so the result
+/// is never `complete` for a revision with a signature record: use
+/// [`audit_receipts_with`]. Groups include counts even after detail limits are
+/// reached.
 ///
 /// # Errors
 /// Any failure to verify ledger or archive integrity is an error. Missing archive revisions are reported as gaps.
@@ -403,11 +581,27 @@ pub fn audit_receipts(
     state: &StateDir,
     directory: &Path,
 ) -> Result<ReceiptAudit, Error> {
+    audit_receipts_with(loaded, state, directory, None)
+}
+
+/// [`audit_receipts`], verifying every recorded signature again with
+/// `reverify` when it is given. A rejected signature is a
+/// `signature-rejected` gap.
+///
+/// # Errors
+/// As [`audit_receipts`], and any error of `reverify.check`, or a signature
+/// or record that changed while it was verified.
+pub fn audit_receipts_with(
+    loaded: &LoadedPass,
+    state: &StateDir,
+    directory: &Path,
+    reverify: Option<Reverify<'_>>,
+) -> Result<ReceiptAudit, Error> {
     crate::archive::check_directory(directory)?;
     let mut corroborated = EndpointGroup::default();
     let mut mismatches = EndpointGroup::default();
     let mut gaps = BTreeMap::new();
-    let mut revisions = RevisionTracker::new(directory);
+    let mut revisions = RevisionTracker::new(directory, reverify);
     let mut cached: Option<(Digest, Option<Pass>)> = None;
     let view = visit_view(loaded, state, false, &mut |event| {
         match event {
@@ -472,8 +666,8 @@ pub fn audit_receipts(
         }
         Ok(())
     })?;
-    let revisions = revisions.report();
-    // `complete` needs a verified signature over every revision used.
+    let (revisions, signatures) = revisions.report();
+    // `complete` needs a signature this audit verified over every revision used.
     let result = if mismatches.count > 0 {
         "mismatch"
     } else if corroborated.count == 0 || !gaps.is_empty() || revisions.unverified > 0 {
@@ -488,6 +682,7 @@ pub fn audit_receipts(
         mismatches,
         gaps,
         revisions,
+        signatures,
         witness: view.witness.as_str(),
         warnings: view.warnings,
     })
