@@ -134,6 +134,38 @@ Changes since commit d70c09f.
   path once; JSON `error.message` holds the same lines joined. Scripts that
   matched the old wording break.
 
+- **Audits without `--allowed-signers` are never `complete`.** Anyone who can
+  write the archive can write a signature record, so `audit-receipts` and
+  `audit-charges` no longer trust one they did not check: a recorded signature
+  reads as `signature-recorded` with a `signature-not-reverified` gap, and the
+  audit exits 2. Run the audits with `--allowed-signers FILE`. The unreleased
+  provenance value `signature-verified` now means only that this audit
+  verified the signature again; `archive` and `verify-approval` report
+  `signature-recorded`, and the library's `Provenance::SignatureVerified` is
+  renamed `SignatureRecorded`.
+- **`verify-approval`** with an ssh-keygen that prints its usage text now
+  exits 1 with an error, not 2 with `untrusted-key`.
+- **Shared pass directories:** `spend`, `adopt` and `reconcile-references`
+  refuse with the new error `shared-directory` (nothing recorded) when the
+  directory that holds the pass is writable by any user and lacks the sticky
+  bit. There another user could put the operator's own older, wider revision
+  back over the pass, and the owner and mode checks would accept it. Fix with
+  `chmod o-w DIR`, or `chmod +t DIR` if the directory must stay shared.
+- **Unicode format characters:** a pass whose `name`, `owner`, `reference`,
+  `operator`, `revoked_reason` or `hostname` holds a Unicode format character
+  (zero-width characters, BOM, soft hyphen, interlinear annotation, tag
+  characters and the rest of category Cf) no longer loads, and the problem
+  names the character. New caller references also refuse leading and trailing
+  spaces. New notes, adoption and reconciliation reasons and reference lists
+  refuse format characters too, also through the library. Ledgers written
+  earlier still read, and `receipt` and `reconcile` still find their
+  references.
+- **`diff --containment`:** when NEW is revoked or its window does not cover
+  the instant, the endpoint result is `contained` (reason
+  `new-admits-nothing`), so a pure revocation exits 0. Other loosenings still
+  make the overall verdict `widened`. The reason `both-windows-must-be-open`
+  is replaced by `new-admits-nothing` and `old-closed-new-open`.
+
 ### Added
 
 - A warning when a debit checks no destination: an allowed or previewed
@@ -218,6 +250,33 @@ Changes since commit d70c09f.
   0600, whatever the umask, and refuses an existing file or link.
 - docs/minimal-caller/minimal_caller.py, a short integrator (preflight,
   spend before the work, strict reply check) that a test runs.
+
+- `audit-receipts` and `audit-charges --allowed-signers FILE` (and optional
+  `--principal`) verify each recorded signature again with `ssh-keygen -Y
+  verify` over the archived bytes, once per digest. A rejection is a
+  `signature-rejected` gap whose `reason` says why (`bytes-do-not-match`,
+  `untrusted-key`, `wrong-principal`, `malformed-signature`,
+  `wrong-namespace`). Both audits gain a top-level `signatures` object and
+  `revisions.details[].reason`. docs/EVIDENCE.md shows how to move a rejected
+  record aside and record a new one. Library: `audit_receipts_with`,
+  `audit_charges_with` and the `Reverify` hook.
+- Window warnings in `check`, `status` and `lint`: a window longer than 90
+  days (`window-too-long`), one that has ended (`window-ended`) and one that
+  opens more than 30 days ahead (`window-starts-far-ahead`), in
+  `window_warnings` and `warnings`; exit codes are unchanged. `check` now
+  reads the clock and adds `now` and `test_clock`; `diff` adds
+  `new_window_warnings`.
+- Warnings for a pass directory without the sticky bit: every command warns
+  when it is group-writable, and the read-only commands (`check`, `status`,
+  `ledger`, `permits`, `spend --dry-run`, `adopt --preview`) warn when it is
+  world-writable.
+- `hallpass::display_quoted`, which quotes a value for text output and escapes
+  it once.
+- docs/WALKTHROUGH.md step 9 hands a pass to another account: copy the
+  journal, outbox, pass and archive, move the ledger, then `adopt` on the new
+  account. A copy would be a second budget; the old account is refused because
+  its witness remembers the ledger. INTEGRATING.md and the reference caller
+  README link to it.
 
 ### Changed
 
@@ -310,3 +369,21 @@ Changes since commit d70c09f.
   a release binary. The docs show `--record-target` wherever audit evidence
   is wanted. `spend --to` still records no target by default, because a
   conforming wrapper refuses a reply that has a receipt it did not request.
+- **Fixed:** `spend` and `ledger` text escaped a caller reference twice, so a
+  crafted reference could read as an extra, out-of-scope receipt target;
+  `receipt`, `archive` and the audits doubled backslashes. Text output now
+  quotes each value once (`\"`, `\\`, `\u{…}`) and escapes every Unicode
+  format character. Refusals name the character, for example U+200B.
+- `status` on an over-ceiling ledger says more is spent than the ceiling
+  allows and gives a lowered ceiling only as one possible cause. A pass or
+  ledger path that is not a regular file gets advice for both. Evidence
+  reports print each warning once. The missing-ledger refusal tells an account
+  whose ledger was moved away on purpose not to adopt or spend. An empty name
+  after `@` in `--to` says how to fix it. `docs/conformance/check.py` prints
+  one line, "N cases passed". The minimal caller and the tests no longer write
+  Python bytecode into the docs tree.
+- The cost-per-call figures in INTEGRATING.md and DESIGN.md are measured on an
+  ext4 NVMe disk: a spend takes about 15 ms, mostly fsync, so one process does
+  about 60 a second; 8 writers do 62–71 a second on a small ledger and 12–13
+  at 100,000 lines. The tmpfs figures are labelled as such, and the batching
+  advice matches.
