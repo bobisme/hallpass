@@ -196,6 +196,40 @@ Changes since commit d70c09f.
   labels in problem messages and scenario step ids. Scripts that matched the
   old wording break; JSON keys are unchanged.
 
+- **Audits need `--principal` to be `complete`.** With `--allowed-signers` but
+  no `--principal`, an audit still verifies every signature but records a
+  `signer-not-pinned` gap naming each record's principal, and exits 2: the
+  signers file decides whose keys count, `--principal` decides who must have
+  approved. `--principal` is repeatable. JSON `signatures.principal` is now
+  `signatures.principals` (a list); library `Reverify.principals` and
+  `Reverify.as_of`.
+- **Audits verify signatures as of each revision's first use** in the ledger
+  (`-Overify-time`), not now: a key that expired after first use still
+  verifies, and one not yet valid then is rejected. A key outside its validity
+  window is reported as `key-not-valid-at-time`, not `untrusted-key`. Audits
+  need an ssh-keygen that accepts `-O verify-time`.
+- **Hidden characters anywhere in a pass file:** comments, keys and whitespace
+  refuse the characters text fields refuse, and every control character other
+  than tab and a line end (LF or CRLF); a leading byte order mark too. The
+  problem gives line, column and character. Delete it and get the pass
+  re-approved.
+- **Labels and ports:** labels that differ only in letter case are refused,
+  and so is a port listed twice in one destination (`[443, 443]`, `[80,
+  "1-1024"]`).
+- **File inputs:** every file input (case suite, checkpoint, manifest,
+  reference list, signature, allowed-signers file) is opened like a pass: a
+  symbolic link is refused with `symlink`, and a FIFO, device or directory
+  with `not-regular-file`. compare-backups refuses the whole command for such
+  a candidate.
+- **Containment counterexamples** are chosen one per widened class, so the
+  list can change, and `more_counterexamples` now means some widened class has
+  no counterexample listed or a limit was reached.
+- **Wording and fields:** `lint`'s first line is `N advisory finding(s) and M
+  warning(s) for ID`; the backwards-clock, `lock-timeout`, charge,
+  adopt-preview and ledger-damage messages are reworded. Library:
+  `Error::LedgerCorrupt.complete`, `LockWait.shared`,
+  `review::LintReport.port_findings`.
+
 ### Added
 
 - A warning when a debit checks no destination: an allowed or previewed
@@ -307,6 +341,30 @@ Changes since commit d70c09f.
   account. A copy would be a second budget; the old account is refused because
   its witness remembers the ledger. INTEGRATING.md and the reference caller
   README link to it.
+
+- `--lock-timeout-ms` on every command that takes the ledger lock, and a
+  notice naming the holding process when a read waits more than 2 s. Library:
+  `with_lock_wait`, `open_input`.
+- Audits: `--signatures-as-of first-use|now`, per-revision `first_time`,
+  `verify_time` and `verified_for`, `signatures.as_of`, and a
+  `revision-unparsable` gap (with `problems` and `problem_count`) for an
+  archived revision that breaks a pass rule added after it was archived.
+  `verify-approval --at TIME`.
+- `diff --examples` and `--containment` first try each address where a new
+  nameless destination overlaps a names-restricted one, unnamed and with an
+  unlisted name, marked `bypasses_names_of`. When the digests differ and no
+  declared field does, `diff` says so, names the kind of change (`comments`,
+  `layout`, `value-spelling`) and lists comments added and removed. Library:
+  `review::text_changes`.
+- `lint` gives a `wide-port-grant` finding for more than 1,024 ports or every
+  port. `approval-id`, `check` and `lint` warn when the owner or reference
+  holds a combining mark or a run of spaces, because the id depends on the
+  exact characters.
+- The reference caller's `pin --require-signature PRINCIPAL --allowed-signers
+  FILE` verifies the signature itself and pins only a digest `verify-approval`
+  and `archive` agree on. The minimal caller reads `HALLPASS_REVIEWED_DIGEST`.
+  INTEGRATING.md shows the signed workflow end to end.
+- `--json` is listed in `hallpass help` and every `<command> --help`.
 
 ### Changed
 
@@ -434,3 +492,20 @@ Changes since commit d70c09f.
 - spec.md's library table lists the audit API (`audit_*_with`, `Reverify`,
   `SignatureToCheck`, `Recheck`, `SignatureCheck`), and its test-clock list
   includes `check`; tests/doc_lists.rs keeps that list in step with the code.
+- **Fixed:** the documented audit CI gate accepted a widening that the
+  operator signed with their own trusted key; audits broke once the owner's
+  key expired and called it untrusted; an archived revision that broke a newer
+  pass rule stopped an audit with advice to edit archived bytes.
+- **Fixed:** read-only commands waited silently, without limit, on a held
+  ledger lock; a FIFO argument hung `test-pass` and `verify-checkpoint`; the
+  backwards-clock warning stopped after one spend (it now compares with the
+  latest recorded time, and `permits` warns too).
+- **Fixed:** a bidi override or zero-width character in a pass comment passed
+  `check`; review examples never showed the address where a new destination
+  bypasses a names list; `lint` said "0 advisory finding(s)" while printing a
+  window warning; a doubled full stop in symlink, witness and `REFUSED:`
+  messages.
+- Charge errors name the charge and give the range (1 to 1000000000000);
+  `adopt --preview` says why there is nothing to adopt; a complete but invalid
+  ledger line names the field and advises a restore from backup, never
+  removal.
