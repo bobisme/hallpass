@@ -94,9 +94,10 @@ pub enum Error {
     },
     /// The ledger cannot be trusted.
     #[error(
-        "the ledger {} is damaged at line {line}: {detail}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: {}",
+        "the ledger {} is damaged at line {line}: {}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: {}",
         path.display(),
-        corrupt_advice(.last)
+        without_stop(detail),
+        corrupt_advice(.last, .complete)
     )]
     LedgerCorrupt {
         /// The ledger file.
@@ -108,6 +109,9 @@ pub enum Error {
         /// True when `line` is the last line of the file. Only then can the
         /// damage be a final line cut short.
         last: bool,
+        /// True when the damaged line is whole JSON: it is invalid, not cut
+        /// short, so removing it is never the advice.
+        complete: bool,
     },
     /// The ledger belongs to a different pass id.
     #[error(
@@ -151,7 +155,8 @@ pub enum Error {
     /// The witness cannot be read or written, so a spend cannot be checked
     /// against it.
     #[error(
-        "the witness for pass `{pass_id}` cannot be used: {detail}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.{}",
+        "the witness for pass `{pass_id}` cannot be used: {}. hallpass keeps a record of each ledger's last line in its state directory ({}) so that a lost or rewound ledger is noticed, and does not record a spend without it.{}",
+        without_stop(detail),
         dir.as_ref().map_or_else(|| "none".to_owned(), |d| crate::display_quoted(&d.display().to_string())),
         witness_advice(detail)
     )]
@@ -447,10 +452,19 @@ fn witness_advice(detail: &str) -> &'static str {
     }
 }
 
+/// A detail that is joined into a sentence by a full stop of its own: the
+/// join, not the detail, owns the stop, so a detail that ends in one (such as
+/// the message of [`Error::Symlink`]) is not followed by a second.
+fn without_stop(detail: &str) -> &str {
+    detail.strip_suffix('.').unwrap_or(detail)
+}
+
 /// What to do about a damaged ledger, by where the damage is.
 #[allow(clippy::trivially_copy_pass_by_ref)] // thiserror passes the field by reference
-const fn corrupt_advice(last: &bool) -> &'static str {
-    if *last {
+const fn corrupt_advice(last: &bool, complete: &bool) -> &'static str {
+    if *complete {
+        "the line is complete, not cut short, so do not remove it or edit it by hand. Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one."
+    } else if *last {
         "compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed). If the line is not just cut short, restore the ledger from a backup instead."
     } else {
         "the damage is before the end of the file, so do not edit lines by hand. Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one."
@@ -478,5 +492,85 @@ mod tests {
                 .into(),
         };
         assert!(!damaged.read_only_message().contains("adopt"));
+    }
+
+    /// No message ends with a doubled full stop, where a detail that ends in
+    /// one is joined into a sentence (bn-110).
+    #[test]
+    fn no_message_has_a_doubled_stop() {
+        let path = std::path::PathBuf::from("p.toml");
+        let symlink = Error::Symlink { path: path.clone() }.to_string();
+        let details = [
+            symlink,
+            "it is damaged".to_owned(),
+            "it is damaged.".to_owned(),
+        ];
+        let mut messages = Vec::new();
+        for detail in details {
+            for last in [false, true] {
+                for complete in [false, true] {
+                    messages.push(Error::LedgerCorrupt {
+                        path: path.clone(),
+                        line: 2,
+                        detail: detail.clone(),
+                        last,
+                        complete,
+                    });
+                }
+            }
+            for dir in [None, Some(std::path::PathBuf::from("/state"))] {
+                let unavailable = Error::WitnessUnavailable {
+                    pass_id: "a".into(),
+                    dir,
+                    detail: detail.clone(),
+                };
+                messages.push(unavailable);
+            }
+            messages.push(Error::LedgerChanged {
+                path: path.clone(),
+                pass: path.clone(),
+                witness: path.clone(),
+                detail: detail.clone(),
+            });
+            messages.push(Error::WitnessNotUpdated {
+                path: path.clone(),
+                seq: 1,
+                detail: detail.clone(),
+            });
+            messages.push(Error::AppendUncertain {
+                path: path.clone(),
+                event: "spend".into(),
+                detail: detail.clone(),
+            });
+            messages.push(Error::Io {
+                path: path.clone(),
+                message: detail.clone(),
+            });
+            messages.push(Error::Usage(detail));
+        }
+        messages.extend([
+            Error::Symlink { path: path.clone() },
+            Error::NotRegular { path: path.clone() },
+            Error::TooLarge {
+                path: path.clone(),
+                limit: 5,
+            },
+            Error::SharedDirectory {
+                path: path.clone(),
+                mode: 0o777,
+            },
+            Error::LockTimeout { path: path.clone() },
+            Error::Exists { path: path.clone() },
+            Error::LedgerForeign {
+                path,
+                ledger_id: "a".into(),
+                pass_id: "b".into(),
+            },
+        ]);
+        for error in messages {
+            for text in [error.to_string(), error.read_only_message()] {
+                assert!(!text.contains(".. ") && !text.ends_with(".."), "{text}");
+            }
+        }
     }
 }

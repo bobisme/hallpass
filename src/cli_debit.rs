@@ -251,15 +251,25 @@ impl DebitUnit {
             .iter()
             .map(|charge| {
                 let (counter, n) = charge.split_once('=').ok_or_else(|| {
-                    Error::Usage(format!("--charge expects COUNTER=N (got {})", safe(charge)))
+                    Error::Usage(format!(
+                        "--charge expects COUNTER=N (got {}). Write the counter, `=`, then a whole amount, for example --charge bytes=100",
+                        safe(charge)
+                    ))
                 })?;
                 if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(Error::Usage(
-                        "--charge expects a positive whole number".to_owned(),
-                    ));
+                    return Err(Error::Usage(format!(
+                        "--charge {} has an amount that is not a whole number: an amount is digits only, from 1 to {}. Write for example {}=100",
+                        safe(charge),
+                        hallpass::MAX_CEILING,
+                        safe(counter)
+                    )));
                 }
                 let amount = n.parse::<u64>().map_err(|_| {
-                    Error::Usage("--charge amount exceeds the maximum whole number".to_owned())
+                    Error::Usage(format!(
+                        "--charge {} has an amount over the limit: an amount is a whole number from 1 to {}. Charge an amount in that range",
+                        safe(charge),
+                        hallpass::MAX_CEILING
+                    ))
                 })?;
                 Ok(Charge { counter, amount })
             })

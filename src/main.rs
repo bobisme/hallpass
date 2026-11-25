@@ -41,6 +41,13 @@ struct Cli {
     /// Output format (flag overrides `HALLPASS_FORMAT`; default is pretty on a terminal, text in a pipe).
     #[arg(long, value_enum, global = true, overrides_with = "format")]
     format: Option<Format>,
+    // Listed for help only: `Invocation::read` rewrites `--json` before clap parses.
+    #[arg(long, global = true, help = "Same as `--format json`")]
+    #[expect(
+        dead_code,
+        reason = "Invocation::read turns --json into --format=json before clap sees it"
+    )]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -1255,7 +1262,7 @@ fn permits(
                 window_text(&loaded.pass, &state)
             )
         },
-        |r| format!("REFUSED: {asked}: {}.\n", safe_message(&r.reason.message)),
+        |r| format!("REFUSED: {asked}: {}\n", sentence(&r.reason.message)),
     );
     Output {
         code: if refused.is_some() { REFUSED } else { OK },
@@ -1336,7 +1343,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "WOULD ALLOW: {} {}; no debit recorded.\n",
             outcome.amount, outcome.counter
         ),
-        (Some(r), _, _) => format!("REFUSED: {}.\n", safe_message(&r.message)),
+        (Some(r), _, _) => format!("REFUSED: {}\n", sentence(&r.message)),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
     let reply = cli_debit::SpendReply {
@@ -1402,7 +1409,7 @@ fn debit_spend(
         (Some(r), _) => (
             "refused",
             REFUSED,
-            format!("REFUSED: {}.\n", safe_message(&r.message)),
+            format!("REFUSED: {}\n", sentence(&r.message)),
         ),
         (None, Some(seq)) => ("allowed", OK, format!("RECORDED: ledger entry {seq}\n")),
         (None, None) => (
@@ -2102,6 +2109,17 @@ fn quoted(text: &str) -> String {
 /// written. The messages already carry their own escapes (`\"`, `\\`, and
 /// `\u{...}` from `escape_default`), so escaping each backslash again would
 /// show every one doubled. Every other unsafe character is still escaped.
+/// A refusal message as one sentence: it gets a full stop unless it already
+/// ends with one, so the text never shows a doubled stop.
+fn sentence(message: &str) -> String {
+    let shown = safe_message(message);
+    if shown.ends_with('.') {
+        shown
+    } else {
+        format!("{shown}.")
+    }
+}
+
 fn safe_message(text: &str) -> String {
     text.chars()
         .map(|c| {

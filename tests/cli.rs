@@ -862,7 +862,7 @@ fn spend_fails_closed_on_corrupt_ledger() {
                 .into_iter()
                 .chain(b"{\"seq\":2}\n".iter().copied())
                 .collect(),
-            "complete ledger entry",
+            "complete spend record",
         ),
     ] {
         fs::write(&ledger, &damaged).expect("damage");
@@ -1498,7 +1498,7 @@ fn discover_every_command_from_machine_help() {
             human.contains("Examples") && human.contains("Agent workflow"),
             "{name}"
         );
-        assert!(!human.contains("--json"), "{name}");
+        assert!(human.contains("--json"), "{name}");
     }
     assert_eq!(json(&["help", "cases"], None).1["topic"], "test-pass");
     assert_eq!(json(&["help", "missing-command"], None).0, 1);

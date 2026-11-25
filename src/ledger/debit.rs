@@ -94,12 +94,32 @@ pub(super) struct DebitLine {
     pub(super) prev: String,
 }
 
+/// What is wrong with one charge, with its limit and what to do, or `None`
+/// when the charge is valid.
+fn charge_problem(counter: &str, amount: u64) -> Option<String> {
+    if !is_counter_name(counter) {
+        return Some(format!(
+            "the counter name {} is not valid: a counter name starts with a lower-case letter, then has lower-case letters, digits, `_` or `-`, up to 32 characters in all. Charge a counter named in the pass",
+            super::display_quoted(counter)
+        ));
+    }
+    let problem = match amount {
+        0 => "is zero, and a charge must be at least 1",
+        n if n > MAX_CEILING => "is over the limit",
+        _ => return None,
+    };
+    Some(format!(
+        "the charge {} {problem}: an amount is a whole number from 1 to {MAX_CEILING}. Charge an amount in that range",
+        super::display_quoted(&format!("{counter}={amount}"))
+    ))
+}
+
 pub(super) fn check_charges<'a>(
     count: usize,
     charges: impl Iterator<Item = (&'a str, u64)>,
 ) -> Result<(), &'static str> {
     if !(1..=MAX_COUNTERS).contains(&count) {
-        return Err("a debit needs between 1 and MAX_COUNTERS charges");
+        return Err("a debit needs between 1 and 64 charges; list 1 to 64 counters");
     }
     // A debit usually charges a few counters: each of the first few is
     // compared with those before it, without allocating; a set holds the rest.
@@ -338,8 +358,15 @@ pub(super) fn validate_unit(
     charges: &[Charge<'_>],
     policy: &SpendRequest<'_>,
 ) -> Result<(), Error> {
-    check_charges(charges.len(), charges.iter().map(|c| (c.counter, c.amount)))
-        .map_err(|message| Error::Usage(format!("{message}; nothing was recorded")))?;
+    check_charges(charges.len(), charges.iter().map(|c| (c.counter, c.amount))).map_err(
+        |message| {
+            let problem = charges
+                .iter()
+                .find_map(|c| charge_problem(c.counter, c.amount))
+                .unwrap_or_else(|| message.to_owned());
+            Error::Usage(format!("{problem}; nothing was recorded"))
+        },
+    )?;
     validate_spend_policy(policy)
 }
 
@@ -1130,7 +1157,7 @@ mod tests {
 
     fn defined_charges(charges: &[(String, u64)]) -> Result<(), &'static str> {
         if !(1..=MAX_COUNTERS).contains(&charges.len()) {
-            return Err("a debit needs between 1 and MAX_COUNTERS charges");
+            return Err("a debit needs between 1 and 64 charges; list 1 to 64 counters");
         }
         let mut seen = BTreeSet::new();
         for (counter, amount) in charges {

@@ -839,6 +839,7 @@ fn scan_ledger(
         line,
         detail: detail.to_owned(),
         last: at_end.get(),
+        complete: false,
     };
     let mut reader = reader;
     let mut first = Vec::new();
@@ -898,12 +899,17 @@ fn scan_ledger(
             return Err(corrupt(number, "the last line is cut short (no line end)"));
         }
         let record = Line::decode(&line).ok_or_else(|| {
-            corrupt(
-                number,
-                unknown_event(&line)
-                    .as_deref()
-                    .unwrap_or("the line is not a complete ledger entry"),
-            )
+            if let Some(detail) = unknown_event(&line).or_else(|| invalid_record(&line)) {
+                // The line is whole JSON, so it was not cut short.
+                return Error::LedgerCorrupt {
+                    path: path.to_path_buf(),
+                    line: number,
+                    detail,
+                    last: at_end.get(),
+                    complete: true,
+                };
+            }
+            corrupt(number, "the line is not a complete ledger entry")
         })?;
         let (seq, prev) = match &record {
             Line::Spend(e) => (e.seq, &e.prev),
@@ -969,6 +975,80 @@ fn unknown_event(line: &[u8]) -> Option<String> {
             display_quoted(event)
         )
     })
+}
+
+/// For a line that no shape decodes but that is a complete JSON object: say
+/// which record it looks like and which value is not valid, so the damage is
+/// not mistaken for a line cut short.
+fn invalid_record(line: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(line).ok()?;
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value.as_object()?;
+    let (record, error) = match Shape::guess(text) {
+        Shape::Debit => ("debit", serde_json::from_str::<DebitLine>(text).err()),
+        Shape::Adopt => ("adoption", serde_json::from_str::<AdoptLine>(text).err()),
+        Shape::Reconcile => (
+            "reconciliation",
+            serde_json::from_str::<reference::ReconcileLine>(text).err(),
+        ),
+        Shape::Spend => ("spend", serde_json::from_str::<Entry>(text).err()),
+    };
+    let error = error?;
+    let full = error.to_string();
+    let reason = full
+        .rsplit_once(" at line ")
+        .map_or(full.as_str(), |(reason, _)| reason);
+    let field = text
+        .get(..error.column().saturating_sub(1))
+        .filter(|_| {
+            error.classify() == serde_json::error::Category::Data && reason.starts_with("invalid ")
+        })
+        .map(key_path)
+        .filter(|path| !path.is_empty());
+    Some(field.map_or_else(
+        || format!("the line is a complete {record} record, but it is not valid ({reason})"),
+        |name| {
+            format!(
+                "the line is a complete {record} record, but the value of {} is not valid ({reason})",
+                display_quoted(&name)
+            )
+        },
+    ))
+}
+
+/// The object keys that enclose the end of a JSON prefix, joined by `.`, such
+/// as `carried.requests` for a prefix that stops inside that value.
+fn key_path(head: &str) -> String {
+    let mut keys: Vec<String> = Vec::new();
+    let mut depth = 0_usize;
+    let mut chars = head.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                keys.truncate(depth);
+            }
+            '"' => {
+                let mut name = String::new();
+                while let Some(d) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => name.push(d),
+                    }
+                }
+                if chars.peek() == Some(&':') {
+                    keys.truncate(depth.saturating_sub(1));
+                    keys.push(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    keys.join(".")
 }
 
 fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<LedgerEntry, &'static str> {
@@ -2379,6 +2459,15 @@ impl Adoption {
     }
 }
 
+/// The refusal when the ledger and its witness agree, for `adopt` and its
+/// preview alike.
+fn nothing_to_adopt(ledger: &Path) -> Error {
+    Error::Usage(format!(
+        "the ledger {} matches its witness, so there is nothing to adopt. Adopt only after the ledger was lost or changed, or when it has no witness; run `hallpass status` to see the current count. Nothing was recorded",
+        ledger.display()
+    ))
+}
+
 fn carry(present: &BTreeMap<String, u64>, witness: Option<&Witnessed>) -> BTreeMap<String, u64> {
     let mut carried = BTreeMap::new();
     if let Some(w) = witness {
@@ -2472,7 +2561,7 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
         Err(Error::LedgerMissing(_)) => AdoptCase::LedgerMissing,
         Err(Error::LedgerChanged { .. }) => AdoptCase::LedgerChanged,
         Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
-        Ok(_) => return Err(Error::Usage("nothing to adopt".into())),
+        Ok(_) => return Err(nothing_to_adopt(&path)),
         Err(e) => return Err(e),
     };
     check_preview_write_access(pass_path, &path, parsed.is_some(), state, id)?;
@@ -2581,10 +2670,7 @@ pub fn adopt_guarded(
             Err(Error::LedgerChanged { .. }) => AdoptCase::LedgerChanged,
             Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
             Ok(_) => {
-                return Err(Error::Usage(format!(
-                    "the ledger {} matches its witness: nothing to adopt. Nothing was recorded",
-                    locked.path.display()
-                )));
+                return Err(nothing_to_adopt(&locked.path));
             }
             Err(e) => return Err(e),
         }
