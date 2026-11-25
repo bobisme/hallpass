@@ -385,8 +385,9 @@ signature. So nothing in the archive shows that the owner approved those exact
 bytes, and the audit names both digests. On a live engagement, have the owner
 sign each revision and archive it with `verify-approval --archive`
 ([Signing and verifying an approval](INTEGRATING.md#signing-and-verifying-an-approval)),
-and run the audit with `--allowed-signers` and your own trusted signers file,
-so that it verifies each signature again. The audit then says `confirmed` for
+and run the audit with `--allowed-signers`, your own trusted signers file,
+and `--principal` with the owner's principal, so that it verifies each
+signature again and requires the owner's. The audit then says `confirmed` for
 each endpoint and `complete`. What each word proves is in
 [What an audit proves](EVIDENCE.md#what-an-audit-proves).
 

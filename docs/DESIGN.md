@@ -292,7 +292,8 @@ witness catches them.
   only while it reads. The audits with `--allowed-signers` read each signed
   revision's archived bytes, record and signature into memory under the
   lock (a pass is at most 1 MiB, a signature at most 64 KiB), release it,
-  and only then run `ssh-keygen`, once per digest. Before, they ran it under
+  and only then run `ssh-keygen`, once per digest (and once more for each
+  further `--principal` until one verifies). Before, they ran it under
   the lock, so every spend on the pass waited for it. `ssh-keygen` gets
   copies of those bytes and of the trusted signers file, read once, in a
   private temporary directory, so it verifies exactly what the audit read

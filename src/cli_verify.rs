@@ -11,7 +11,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{OK, Output, REFUSED, error_output, quoted, safe};
-use hallpass::evidence::{Recheck, Reverify, SignatureToCheck};
+use hallpass::evidence::{AsOf, Recheck, Reverify, SignatureToCheck};
+use hallpass::time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use hallpass::{APPROVAL_NAMESPACE as NAMESPACE, ArchivedSignature, Digest, Error};
 use serde_json::json;
 
@@ -73,8 +74,13 @@ impl Inputs {
         })
     }
 
-    fn verify(&self, bytes: &[u8], principal: &str) -> Result<Result<(), Why>, Error> {
-        Verifier::new(&self.trust)?.verify(bytes, &self.signature, principal)
+    fn verify(
+        &self,
+        bytes: &[u8],
+        principal: &str,
+        at: Option<OffsetDateTime>,
+    ) -> Result<Result<(), Why>, Error> {
+        Verifier::new(&self.trust)?.verify(bytes, &self.signature, principal, at)
     }
 }
 
@@ -183,20 +189,43 @@ impl Verifier {
         Ok(Self { scratch, trust })
     }
 
-    /// Verify `signature` over `bytes` for `principal`. ssh-keygen reads
-    /// `bytes` on its standard input and a copy of `signature` from the
-    /// private directory.
+    /// Verify `signature` over `bytes` for `principal`, as of `at` or else
+    /// now. ssh-keygen reads `bytes` on its standard input and a copy of
+    /// `signature` from the private directory.
     fn verify(
         &self,
         bytes: &[u8],
         signature: &[u8],
         principal: &str,
+        at: Option<OffsetDateTime>,
     ) -> Result<Result<(), Why>, Error> {
         let signature = self.scratch.write("signature", signature)?;
-        let verdict = verified(bytes, &signature, &self.trust, principal);
+        let verdict = verified(bytes, &signature, &self.trust, principal, at);
         let _ = std::fs::remove_file(&signature);
         verdict
     }
+}
+
+/// ssh-keygen's `-Overify-time` for `at`: UTC, to the second.
+fn verify_time_option(at: OffsetDateTime) -> Result<String, Error> {
+    let utc = at
+        .checked_to_offset(UtcOffset::UTC)
+        .filter(|utc| (1..=9999).contains(&utc.year()))
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "cannot verify a signature as of {}: ssh-keygen takes a time in the years 0001 to 9999; supply a time in that range",
+                hallpass::stamp(at)
+            ))
+        })?;
+    Ok(format!(
+        "-Overify-time={:04}{:02}{:02}{:02}{:02}{:02}Z",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second()
+    ))
 }
 
 /// Why a signature did not verify, as far as ssh-keygen's output shows.
@@ -207,16 +236,18 @@ enum Why {
     Malformed,
     UntrustedKey,
     WrongPrincipal,
+    NotValidAtTime,
     Unknown,
 }
 
 impl Why {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Namespace,
         Self::Tampered,
         Self::Malformed,
         Self::UntrustedKey,
         Self::WrongPrincipal,
+        Self::NotValidAtTime,
         Self::Unknown,
     ];
 
@@ -227,6 +258,7 @@ impl Why {
             Self::Malformed => "malformed-signature",
             Self::UntrustedKey => "untrusted-key",
             Self::WrongPrincipal => "wrong-principal",
+            Self::NotValidAtTime => "key-not-valid-at-time",
             Self::Unknown => "unknown",
         }
     }
@@ -247,6 +279,9 @@ impl Why {
             }
             Self::WrongPrincipal => {
                 "the key is trusted, but for a different principal than the one expected; check the principal name against the trusted signers file"
+            }
+            Self::NotValidAtTime => {
+                "the key is trusted for this principal, but its valid-after or valid-before window in the trusted signers file does not include the verification time; check the window, or for an approval used in the past, verify with --at the time it was first used"
             }
             Self::Unknown => {
                 "check the signed bytes, signature namespace, expected principal and trusted signers"
@@ -271,6 +306,9 @@ impl Why {
             Self::WrongPrincipal => {
                 "the key is in the trusted signers file you supplied, but not for the principal checked (--principal, else the one the record names)"
             }
+            Self::NotValidAtTime => {
+                "the key is in the trusted signers file you supplied for the principal checked, but its valid-after or valid-before window there does not include the time the signature was verified as of (verify_time); check the window, and keep a retired key's line with valid-before set, so that the revisions it signed before still verify"
+            }
             Self::Unknown => {
                 "check the archived bytes, the archived signature and the trusted signers file you supplied"
             }
@@ -288,15 +326,35 @@ pub fn audit_advice(code: &str) -> &'static str {
         .audit_advice()
 }
 
-/// The audits' `--allowed-signers` and `--principal`.
+/// The audits' `--allowed-signers`, `--principal` and `--signatures-as-of`.
 #[derive(clap::Args)]
 pub struct SignatureArgs {
-    /// Your own trusted OpenSSH allowed-signers file. The audit runs `ssh-keygen -Y verify` again for every recorded signature with it. Without it, no revision is signature-verified and the audit is never complete.
+    /// Your own trusted OpenSSH allowed-signers file: it decides whose keys count. The audit runs `ssh-keygen -Y verify` again for every recorded signature with it. Without it, no revision is signature-verified and the audit is never complete.
     #[arg(long)]
     allowed_signers: Option<PathBuf>,
-    /// Require every recorded signature to verify for this principal, instead of the principal its record names.
-    #[arg(long, requires = "allowed_signers")]
-    principal: Option<String>,
+    /// The owner's principal: it decides who must have approved. Every recorded signature must verify for it. Repeat it for an owner with several principals; a signature then verifies for any of them. Without it, each signature is verified for the principal its record names, and the audit is never complete.
+    #[arg(long, requires = "allowed_signers", value_name = "PRINCIPAL")]
+    principal: Vec<String>,
+    /// Verify each signature as of `first-use` (the default: the time of the first ledger line decided under its revision) or `now`.
+    #[arg(long, requires = "allowed_signers", value_enum, value_name = "WHEN")]
+    signatures_as_of: Option<SignaturesAsOf>,
+}
+
+/// The values of `--signatures-as-of`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SignaturesAsOf {
+    FirstUse,
+    Now,
+}
+
+/// A principal that ssh-keygen can take: nonblank, on one line.
+fn check_principal(principal: &str) -> Result<(), Error> {
+    if principal.trim().is_empty() || principal.chars().any(char::is_control) {
+        return Err(Error::Usage(
+            "provide a nonblank single-line signer principal".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl SignatureArgs {
@@ -311,12 +369,19 @@ impl SignatureArgs {
         let Some(trust) = &self.allowed_signers else {
             return audit(None);
         };
-        let principal = self.principal.as_deref();
-        if principal.is_some_and(|p| p.trim().is_empty() || p.chars().any(char::is_control)) {
-            return Err(Error::Usage(
-                "provide a nonblank single-line signer principal".into(),
-            ));
+        for principal in &self.principal {
+            check_principal(principal)?;
         }
+        let principals: Vec<&str> = self.principal.iter().map(String::as_str).collect();
+        let as_of = match self.signatures_as_of {
+            None | Some(SignaturesAsOf::FirstUse) => AsOf::FirstUse,
+            // The real clock, to the second as ssh-keygen takes it: the
+            // audits do not take the test clock.
+            Some(SignaturesAsOf::Now) => {
+                let now = OffsetDateTime::now_utc();
+                AsOf::Instant(now.replace_nanosecond(0).unwrap_or(now))
+            }
+        };
         let trust = read_input(trust, MAX_TRUST_BYTES)?;
         // Made at the first recorded signature, so that an audit with none
         // needs no temporary directory.
@@ -326,21 +391,45 @@ impl SignatureArgs {
                 Some(verifier) => verifier,
                 None => verifier.insert(Verifier::new(&trust)?),
             };
-            let verdict = verifier.verify(signed.bytes, signed.signature, signed.principal)?;
+            let verdict = verifier.verify(
+                signed.bytes,
+                signed.signature,
+                signed.principal,
+                Some(signed.as_of),
+            )?;
             Ok(verdict.map_or_else(|why| Recheck::Rejected(why.code()), |()| Recheck::Verified))
         };
         audit(Some(Reverify {
             allowed_signers: Digest::of(&trust),
-            principal,
+            principals: &principals,
+            as_of,
             check: &mut check,
         }))
     }
 }
 
+/// Whether ssh-keygen said that a key matched but was not valid at the
+/// verification time: outside its `valid-after`/`valid-before` window, or a
+/// certificate outside its validity.
+fn outside_window(stderr: &str) -> bool {
+    ["key has expired", "key is not yet valid"]
+        .iter()
+        .any(|m| stderr.contains(m))
+        || (stderr.contains("Certificate invalid")
+            && (stderr.contains("expired") || stderr.contains("not yet valid")))
+}
+
 /// Look at ssh-keygen's complaint, and when it says nothing useful, ask
-/// `find-principals` whether the key is trusted at all. The result code does
-/// not depend on this: the caller has already seen the failure.
-fn classify(stderr: &str, signature: &Path, trust: &Path, principal: &str) -> Why {
+/// `find-principals`, as of the same time, whether the key is trusted at
+/// all. The result code does not depend on this: the caller has already seen
+/// the failure.
+fn classify(
+    stderr: &str,
+    signature: &Path,
+    trust: &Path,
+    principal: &str,
+    at: Option<&str>,
+) -> Why {
     if stderr.contains("namespace does not match") {
         return Why::Namespace;
     }
@@ -353,13 +442,19 @@ fn classify(stderr: &str, signature: &Path, trust: &Path, principal: &str) -> Wh
     {
         return Why::Malformed;
     }
+    // ssh-keygen names the window only for a line that has both this key
+    // and this principal.
+    if outside_window(stderr) {
+        return Why::NotValidAtTime;
+    }
     let found = Command::new("ssh-keygen")
         .args(["-Y", "find-principals", "-f"])
         .arg(trust)
         .arg("-s")
         .arg(signature)
+        .args(at)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output();
     match found {
         Ok(out) if out.status.success() => {
@@ -370,7 +465,15 @@ fn classify(stderr: &str, signature: &Path, trust: &Path, principal: &str) -> Wh
                 Why::WrongPrincipal
             }
         }
-        Ok(out) if out.status.code().is_some() => Why::UntrustedKey,
+        // The key is in the file, but only for other principals, and not
+        // valid at this time for them either: the principal is still wrong.
+        Ok(out) if out.status.code().is_some() => {
+            if outside_window(&String::from_utf8_lossy(&out.stderr)) {
+                Why::WrongPrincipal
+            } else {
+                Why::UntrustedKey
+            }
+        }
         _ => Why::Unknown,
     }
 }
@@ -382,12 +485,10 @@ fn verified(
     signature: &Path,
     trust: &Path,
     principal: &str,
+    at: Option<OffsetDateTime>,
 ) -> Result<Result<(), Why>, Error> {
-    if principal.trim().is_empty() || principal.chars().any(char::is_control) {
-        return Err(Error::Usage(
-            "provide a nonblank single-line signer principal".into(),
-        ));
-    }
+    check_principal(principal)?;
+    let at = at.map(verify_time_option).transpose()?;
     let mut verifier = Command::new("ssh-keygen");
     verifier
         .args(["-Y", "verify", "-n", NAMESPACE, "-I", principal])
@@ -395,6 +496,7 @@ fn verified(
         .arg(trust)
         .arg("-s")
         .arg(signature)
+        .args(&at)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -433,6 +535,15 @@ fn verified(
             message: format!("signature verifier terminated: {status}"),
         });
     }
+    // An older ssh-keygen does not know the time option, and names it. A
+    // time it cannot take is an unusable verifier, not an unverified
+    // signature.
+    if !status.success() && at.is_some() && stderr.contains("verify-time") {
+        return Err(Error::Io {
+            path: "ssh-keygen".into(),
+            message: "ssh-keygen did not accept `-O verify-time`, so it cannot verify a signature as of a given time. Install an OpenSSH whose ssh-keygen supports `-O verify-time` and check PATH".into(),
+        });
+    }
     // An ssh-keygen without SSH signature support rejects `-Y` and prints its
     // usage. That is an unusable verifier, not an unverified signature.
     if !status.success()
@@ -446,8 +557,24 @@ fn verified(
     if status.success() {
         Ok(Ok(()))
     } else {
-        Ok(Err(classify(&stderr, signature, trust, principal)))
+        Ok(Err(classify(
+            &stderr,
+            signature,
+            trust,
+            principal,
+            at.as_deref(),
+        )))
     }
+}
+
+/// `verify-approval --at`: an RFC 3339 instant with an offset.
+fn parse_at(at: &str) -> Result<OffsetDateTime, Error> {
+    OffsetDateTime::parse(at, &Rfc3339).map_err(|_| {
+        Error::Usage(format!(
+            "--at is {}, not an RFC 3339 timestamp with an offset; supply one such as 2026-11-20T09:00:00Z, or leave --at out to verify as of now",
+            quoted(at)
+        ))
+    })
 }
 
 pub fn verify_approval(
@@ -456,7 +583,12 @@ pub fn verify_approval(
     trust: &Path,
     principal: &str,
     archive: Option<&Path>,
+    at: Option<&str>,
 ) -> Output {
+    let at = match at.map(parse_at).transpose() {
+        Ok(at) => at,
+        Err(e) => return error_output("verify-approval", Some(path), &e),
+    };
     let (loaded, bytes) = match hallpass::load_with_bytes(path) {
         Ok(value) => value,
         Err(e) => return error_output("verify-approval", Some(path), &e),
@@ -467,7 +599,10 @@ pub fn verify_approval(
         Ok(inputs) => inputs,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
-    match inputs.verify(&bytes, principal) {
+    // Null: as of now, by ssh-keygen's own clock.
+    let verify_time = at.map(hallpass::rfc3339);
+    let as_of = at.map_or_else(String::new, |at| format!(" as of {}", hallpass::stamp(at)));
+    match inputs.verify(&bytes, principal, at) {
         Ok(Ok(())) => {
             let (digest, record) = match archive {
                 Some(directory) => match retain(&bytes, &inputs, principal, directory) {
@@ -487,7 +622,7 @@ pub fn verify_approval(
             Output {
                 code: OK,
                 text: format!(
-                    "Verified signature from {} over pass {} ({}).{} Supply this digest for the live policy check.\n",
+                    "Verified signature from {}{as_of} over pass {} ({}).{} Supply this digest for the live policy check.\n",
                     quoted(principal),
                     loaded.pass.id,
                     digest,
@@ -496,17 +631,17 @@ pub fn verify_approval(
                         safe(&dir.display().to_string())
                     ))
                 ),
-                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-recorded"),"approval":approval,"warnings":warnings}),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-recorded"),"approval":approval,"warnings":warnings}),
             }
         }
         Ok(Err(why)) => Output {
             code: REFUSED,
             text: format!(
-                "Unverified signature for {}: {}.\n",
+                "Unverified signature for {}{as_of}: {}.\n",
                 quoted(principal),
                 why.advice()
             ),
-            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),
+            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),
         },
         Err(e) => error_output("verify-approval", Some(path), &e),
     }

@@ -729,8 +729,14 @@ hallpass --json verify-approval engagement.pass.toml --signature engagement.pass
 
 Exit 0 with `result=verified` identifies the signer, pass ID and exact digest.
 An unverified signature exits 2. Input and missing-verifier errors exit 1.
-Historical verification can succeed after expiry. Supply the returned digest
-to `permits --digest` or `spend --digest` for the live decision.
+`verify-approval` checks the signature, not the pass window, so a pass past
+its window still verifies; `permits` and `spend` refuse it. It checks the
+signer key's `valid-after` and `valid-before` window in your trusted signers
+file as of now. A key outside its window gives the reason
+`key-not-valid-at-time`. To check an approval used in the past, add `--at`
+with the time it was first used, for example `--at 2026-11-20T09:00:00Z`; the
+reply gives that time as `verify_time`. Supply the returned digest to
+`permits --digest` or `spend --digest` for the live decision.
 
 To retain exactly the bytes that passed verification, create a private archive
 once and request publication in the same invocation:
@@ -756,9 +762,11 @@ and with `--allowed-signers` they verify each signature again
 ([what the audits prove](EVIDENCE.md#what-an-audit-proves)). Keep the trusted
 signers file and the expected principal separately: a record alone does not
 show who approved the bytes, because anyone who can write the archive can
-write one, so an audit is `complete` only when it verifies the signatures
-again with a trusted signers file. A failed signature check publishes
-nothing.
+write one and name any principal. So an audit is `complete` only when it
+verifies the signatures again with a trusted signers file, for the principal
+given with `--principal`. The file decides whose keys count, and
+`--principal` decides who must have approved. A failed signature check
+publishes nothing.
 
 The [reference caller](reference-caller/README.md#pinning-a-signed-revision)
 does these steps for you and refuses to pin an unsigned edit. Its `pin

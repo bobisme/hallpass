@@ -844,7 +844,10 @@ are `endpoints`, `names`, `live-window`, `target-on-every-debit` and
 `verify-approval` uses OpenSSH detached signatures under the fixed namespace
 `hallpass-approval-v1`. A verified result includes the expected principal,
 pass ID and digest of the exact bytes supplied to the verifier. The operator
-provisions the trust file and selects the principal. With `--archive`, the
+provisions the trust file and selects the principal. It verifies as of now,
+or as of `--at TIME`: a key that the trust file limits with `valid-after` or
+`valid-before` counts only inside that window, and outside it the reason is
+`key-not-valid-at-time`. With `--archive`, the
 verified bytes, the signature and a record of the verification are retained
 (see "Archives and evidence"). See the signing and
 digest-pinning workflow in the [integration guide](INTEGRATING.md#signing-and-verifying-an-approval).
@@ -910,14 +913,18 @@ can write one.
 `compare-backups` read the ledger under shared locks and report historical
 evidence. None of these commands writes the ledger or the witness. Both
 audits report every revision the ledger used with its provenance. With
-`--allowed-signers FILE` (and optionally `--principal`) they run
-`ssh-keygen -Y verify` again over each recorded revision's archived bytes and
-signature with FILE, and report it `signature-verified` or
-`signature-rejected`. They are `complete` only when every revision used is
-`signature-verified`, so never without `--allowed-signers`. They run
-`ssh-keygen` after they release the ledger lock, over copies of the bytes
-they read under it. [EVIDENCE.md](EVIDENCE.md) gives their results, exit
-codes and fields.
+`--allowed-signers FILE` they run `ssh-keygen -Y verify` again over each
+recorded revision's archived bytes and signature with FILE, as of the time
+the revision was first used (`--signatures-as-of now` for the current time),
+and report it `signature-verified` or `signature-rejected`. FILE decides
+whose keys count; `--principal`, which can be repeated, decides who must have
+approved. Without `--principal`, each signature is verified for the principal
+its record names, and a revision that verifies is a `signer-not-pinned` gap.
+So the audits are `complete` only when every revision used is
+`signature-verified` for a principal named with `--principal`, and never
+without `--allowed-signers` and `--principal`. They run `ssh-keygen` after
+they release the ledger lock, over copies of the bytes they read under it.
+[EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
 
 ## Command line
 
@@ -974,8 +981,8 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
 | `receipt` | `found` | `absent`, `ambiguous` | the reference, pass, ledger or witness could not be checked |
-| `audit-receipts` | `complete`: and `--allowed-signers` verified a signature over every revision used again | `incomplete`, `mismatch` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature |
-| `audit-charges` | `complete`: and `--allowed-signers` verified a signature over every revision used again | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature |
+| `audit-receipts` | `complete`: and `--allowed-signers` verified a signature over every revision used again, for a `--principal` | `incomplete`, `mismatch` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature, or does not accept `-O verify-time` |
+| `audit-charges` | `complete`: and `--allowed-signers` verified a signature over every revision used again, for a `--principal` | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature, or does not accept `-O verify-time` |
 | `reconcile` | `match` | `discrepancy` | invalid manifest, pass or history |
 | `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass |
 | `checkpoint` | exported | `empty`: nothing recorded yet | invalid pass, ledger error (as `status`) |
@@ -1202,7 +1209,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `foreign` or `mismatch`), `added` (lines after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
-  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `archive`, `provenance`
+  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
   (`signature-recorded` when verified with `--archive`, else null) and
   `approval` (the signature record now in the archive, as in `archive`, or
   null; when an earlier, different record was kept, a warning says so).
@@ -1305,7 +1312,7 @@ Crate `hallpass` (re-exports `time`):
 | `archive_provenance` (`Provenance`, `SignedApproval`), `archive_verified_signature` (`ArchivedSignature`), `APPROVAL_NAMESPACE`, `MAX_SIGNATURE_BYTES` | signature records beside archived bytes; recording one does not verify anything |
 | modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |
 | `evidence::audit_receipts`, `evidence::audit_charges` (`ReceiptAudit`, `ChargeAudit`) | replay the ledger against the archived revisions; signature records are read, not verified again, so the result is never `complete` |
-| `evidence::audit_receipts_with`, `evidence::audit_charges_with`, `Reverify { allowed_signers, principal, check }`, `SignatureToCheck`, `Recheck`, `SignatureCheck` | the same audits, verifying each recorded signature again. `check` runs once per digest, after the ledger lock is released, and gets a `SignatureToCheck { digest, bytes, signature, approval, principal }` with the archived bytes and signature as read under the lock (bytes, not paths). It returns `Recheck::Verified` or `Recheck::Rejected(reason)`; an error ends the audit. Without a `Reverify` an audit is never `complete`. `SignatureCheck` (the reply's `signatures`) says whether the audit verified again, and against which `allowed_signers` digest |
+| `evidence::audit_receipts_with`, `evidence::audit_charges_with`, `Reverify { allowed_signers, principals, as_of, check }`, `AsOf` (`FirstUse`, `Instant(time)`), `SignatureToCheck`, `Recheck`, `SignatureCheck` | the same audits, verifying each recorded signature again. `check` runs after the ledger lock is released, once per digest and principal tried, and gets a `SignatureToCheck { digest, bytes, signature, approval, principal, as_of }` with the archived bytes and signature as read under the lock (bytes, not paths), and the instant to verify as of: the revision's first use, or the `AsOf::Instant`. With `principals`, it tries the record's principal first when it is named, then the others in order, until one verifies. It returns `Recheck::Verified` or `Recheck::Rejected(reason)`; an error ends the audit. Without a `Reverify`, or with empty `principals`, an audit is never `complete`. `SignatureCheck` (the reply's `signatures`) says whether the audit verified again, against which `allowed_signers` digest, for which `principals` and as of when |
 | `StateDir` (`from_env()`, `new(path)`, `path()`, `witness_path(id)`), `Witnessed`, `totals_text` | the state directory and witness records |
 | `display_safe(text) -> Cow<str>` | operator text escaped for one terminal line |
 | `display_quoted(text) -> String` | operator text as one double-quoted value, each character escaped once |

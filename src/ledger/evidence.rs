@@ -17,7 +17,9 @@ use super::{
 };
 use crate::{
     Decision, Digest, Error, HostName, LoadedPass, Pass, SignedApproval, StateDir, Target,
-    archive::read_revision, retrieve_pass, time::Duration,
+    archive::read_revision,
+    retrieve_pass,
+    time::{Duration, OffsetDateTime},
 };
 use std::path::{Path, PathBuf};
 
@@ -203,6 +205,10 @@ pub struct GapDigest {
     /// `signature-rejected` gap only (absent from the other gaps).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// The principal the signature verified for, which its record names,
+    /// for a `signer-not-pinned` gap only (absent from the other gaps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
     #[serde(skip)]
     key: Digest,
 }
@@ -214,6 +220,8 @@ pub struct RevisionUse {
     /// The first and last ledger sequence decided under it.
     pub first_seq: u64,
     pub last_seq: u64,
+    /// The time of the first line decided under it: when it was first used.
+    pub first_time: String,
     /// How many spend and debit lines were decided under it.
     pub lines: u64,
     /// `signature-verified` (this audit verified the recorded signature
@@ -226,6 +234,11 @@ pub struct RevisionUse {
     pub approval: Option<SignedApproval>,
     /// Why the verifier rejected the signature, for `signature-rejected`.
     pub reason: Option<&'static str>,
+    /// The instant the signature was verified as of ([`AsOf`]), or null when
+    /// this audit did not verify it.
+    pub verify_time: Option<String>,
+    /// The principal the signature verified for, for `signature-verified`.
+    pub verified_for: Option<String>,
 }
 
 /// The revisions the ledger's debits used, in order of first use.
@@ -249,9 +262,28 @@ pub struct SignatureCheck {
     /// The digest of the trusted signers file the signatures were verified
     /// against, when `reverified`.
     pub allowed_signers: Option<String>,
-    /// The principal every signature had to verify for, or null when each
-    /// was verified for the principal its record names.
-    pub principal: Option<String>,
+    /// The principals the auditor named: each signature had to verify for
+    /// one of them. Empty when none was named, so that each signature was
+    /// verified for the principal its record names and the audit has a
+    /// `signer-not-pinned` gap, and when the audit did not verify again.
+    pub principals: Vec<String>,
+    /// What the signatures were verified as of: `first-use` (the time of
+    /// the first line decided under each revision) or one instant for all,
+    /// in RFC 3339. Null when the audit did not verify again.
+    pub as_of: Option<String>,
+}
+
+/// The time an audit verifies each recorded signature as of. A trusted
+/// signers file can limit a key to a window with `valid-after` and
+/// `valid-before`, and a key counts only for a time inside its window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsOf {
+    /// The time of the first ledger line decided under each revision. A key
+    /// that has expired since still approves what it signed before, and a
+    /// key that was not yet valid when the revision was first used does not.
+    FirstUse,
+    /// One instant for every revision, such as now.
+    Instant(OffsetDateTime),
 }
 
 /// One archived revision whose recorded signature an audit verifies again.
@@ -268,8 +300,13 @@ pub struct SignatureToCheck<'a> {
     /// the record and already checked against its `signature` digest.
     pub signature: &'a [u8],
     pub approval: &'a SignedApproval,
-    /// The principal to verify for: the required one, else the record's.
+    /// The principal to verify for: one that [`Reverify::principals`]
+    /// names, or the record's when it names none.
     pub principal: &'a str,
+    /// Verify as of this instant ([`Reverify::as_of`]): a key that the
+    /// trusted signers file limits to a window that does not hold it does
+    /// not count.
+    pub as_of: OffsetDateTime,
 }
 
 /// What the verifier said about one recorded signature.
@@ -291,13 +328,24 @@ pub struct Reverify<'a> {
     /// It is reported, not read: read the file once, verify against those
     /// bytes, and give the digest of that same read.
     pub allowed_signers: Digest,
-    /// A principal every signature must verify for. `None` verifies each
-    /// signature for the principal its record names.
-    pub principal: Option<&'a str>,
-    /// Verifies one signature, once per digest, in order of first use. It
-    /// runs after the audit has read the ledger and released the ledger
-    /// lock, so a slow verifier does not hold up spends. An error ends the
-    /// audit, so a verifier that cannot run is never a pass.
+    /// The principals that may approve, such as the owner's. Each revision's
+    /// signature must verify for one of them. The trusted signers file
+    /// decides whose keys count; these decide who must have approved.
+    ///
+    /// When it is empty, each signature is verified for the principal its
+    /// record names. Whoever writes the archive picks that principal, so a
+    /// revision that verifies is a `signer-not-pinned` gap, and the audit is
+    /// never `complete`.
+    pub principals: &'a [&'a str],
+    /// The time each signature is verified as of.
+    pub as_of: AsOf,
+    /// Verifies one signature for one principal. It runs once per digest,
+    /// in order of first use, and once more for each further principal in
+    /// `principals` until one verifies: the record's principal first when
+    /// `principals` names it. It runs after the audit has read the ledger
+    /// and released the ledger lock, so a slow verifier does not hold up
+    /// spends. An error ends the audit, so a verifier that cannot run is
+    /// never a pass.
     pub check: &'a mut dyn FnMut(&SignatureToCheck<'_>) -> Result<Recheck, Error>,
 }
 
@@ -347,6 +395,7 @@ pub(super) fn record_revision_gap(
             sequences: Vec::new(),
             truncated: false,
             reason: None,
+            principal: None,
             key: digest,
         });
         group.digests.len() - 1
@@ -372,8 +421,13 @@ enum Approval {
     /// A signature record to verify again once the ledger lock is released,
     /// with what was read under the lock.
     Pending(SignedApproval, Pending),
-    /// A recorded signature that the verifier accepted again.
-    Verified(SignedApproval),
+    /// A recorded signature that the verifier accepted again, for
+    /// `principal`. `pinned` when the auditor named that principal.
+    Verified {
+        record: SignedApproval,
+        principal: String,
+        pinned: bool,
+    },
     /// A recorded signature that the verifier rejected, and why.
     Rejected(SignedApproval, &'static str),
 }
@@ -393,7 +447,7 @@ impl Approval {
             Self::Missing => "missing",
             Self::Unsigned => "unsigned",
             Self::Recorded(_) | Self::Pending(..) => "signature-recorded",
-            Self::Verified(_) => "signature-verified",
+            Self::Verified { .. } => "signature-verified",
             Self::Rejected(..) => "signature-rejected",
         }
     }
@@ -401,17 +455,19 @@ impl Approval {
     const fn record(&self) -> Option<&SignedApproval> {
         match self {
             Self::Missing | Self::Unsigned => None,
-            Self::Recorded(a) | Self::Pending(a, _) | Self::Verified(a) | Self::Rejected(a, _) => {
-                Some(a)
-            }
+            Self::Recorded(a)
+            | Self::Pending(a, _)
+            | Self::Verified { record: a, .. }
+            | Self::Rejected(a, _) => Some(a),
         }
     }
 
     /// The gap of a line decided under this revision: none when a signature
-    /// this audit verified approved it.
+    /// this audit verified, for a principal the auditor named, approved it.
     const fn gap(&self) -> Option<&'static str> {
         match self {
-            Self::Verified(_) => None,
+            Self::Verified { pinned: true, .. } => None,
+            Self::Verified { pinned: false, .. } => Some("signer-not-pinned"),
             Self::Missing | Self::Unsigned => Some("approval-unverified"),
             Self::Recorded(_) | Self::Pending(..) => Some("signature-not-reverified"),
             Self::Rejected(..) => Some("signature-rejected"),
@@ -421,20 +477,25 @@ impl Approval {
 
 /// The gaps that [`RevisionTracker::finish`] records, about a revision's
 /// approval.
-const APPROVAL_GAPS: [&str; 3] = [
+const APPROVAL_GAPS: [&str; 4] = [
     "approval-unverified",
     "signature-not-reverified",
     "signature-rejected",
+    "signer-not-pinned",
 ];
 
 struct Used {
     digest: Digest,
     first_seq: u64,
     last_seq: u64,
+    /// The time of the first line decided under it.
+    first_time: OffsetDateTime,
     lines: u64,
     /// The first [`DETAIL_LIMIT`] sequences decided under it.
     sequences: Vec<u64>,
     approval: Approval,
+    /// The instant its signature was verified as of, once it was.
+    verify_time: Option<OffsetDateTime>,
 }
 
 /// The provenance of every revision the ledger used, read once per digest
@@ -457,9 +518,15 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
         }
     }
 
-    /// Note that line `seq` was decided under `digest`. This runs under the
-    /// ledger lock, so it only reads the archive, once per digest.
-    pub(super) fn note(&mut self, digest: Digest, seq: u64) -> Result<(), Error> {
+    /// Note that line `seq`, recorded at `time`, was decided under
+    /// `digest`. This runs under the ledger lock, so it only reads the
+    /// archive, once per digest.
+    pub(super) fn note(
+        &mut self,
+        digest: Digest,
+        seq: u64,
+        time: OffsetDateTime,
+    ) -> Result<(), Error> {
         let i = if let Some(&i) = self.index.get(&digest) {
             i
         } else {
@@ -468,9 +535,11 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
                 digest,
                 first_seq: seq,
                 last_seq: seq,
+                first_time: time,
                 lines: 0,
                 sequences: Vec::new(),
                 approval,
+                verify_time: None,
             });
             self.index.insert(digest, self.used.len() - 1);
             self.used.len() - 1
@@ -505,8 +574,9 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
     }
 
     /// Call this after the ledger lock is released. Verify each pending
-    /// signature once, in order of first use, then record a gap for every
-    /// line decided under a revision that no signature verified here approved.
+    /// signature, in order of first use, then record a gap for every line
+    /// decided under a revision that no signature verified here, for a
+    /// principal the auditor named, approved.
     ///
     /// Nothing is read again after a check. The verifier gets the bytes read
     /// under the lock, which are the bytes the report describes, so a file
@@ -519,17 +589,12 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
             for used in &mut self.used {
                 used.approval = match std::mem::replace(&mut used.approval, Approval::Missing) {
                     Approval::Pending(record, pending) => {
-                        let verdict = (reverify.check)(&SignatureToCheck {
-                            digest: used.digest,
-                            bytes: &pending.bytes,
-                            signature: &pending.signature,
-                            approval: &record,
-                            principal: reverify.principal.unwrap_or(&record.principal),
-                        })?;
-                        match verdict {
-                            Recheck::Verified => Approval::Verified(record),
-                            Recheck::Rejected(why) => Approval::Rejected(record, why),
-                        }
+                        let as_of = match reverify.as_of {
+                            AsOf::FirstUse => used.first_time,
+                            AsOf::Instant(instant) => instant,
+                        };
+                        used.verify_time = Some(as_of);
+                        verify(reverify, used.digest, record, &pending, as_of)?
                     }
                     other => other,
                 };
@@ -542,7 +607,11 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
             .map_or_else(SignatureCheck::default, |r| SignatureCheck {
                 reverified: true,
                 allowed_signers: Some(r.allowed_signers.to_string()),
-                principal: r.principal.map(str::to_owned),
+                principals: pinned(r.principals).map(str::to_owned).collect(),
+                as_of: Some(match r.as_of {
+                    AsOf::FirstUse => "first-use".to_owned(),
+                    AsOf::Instant(instant) => rfc3339(instant),
+                }),
             });
         Ok(Revisions {
             index: self.index,
@@ -550,6 +619,60 @@ impl<'a, 'r> RevisionTracker<'a, 'r> {
             signatures,
         })
     }
+}
+
+/// The principals named, each once, in the order given.
+fn pinned<'p>(principals: &'p [&'p str]) -> impl Iterator<Item = &'p str> {
+    principals
+        .iter()
+        .enumerate()
+        .filter(|&(i, p)| !principals[..i].contains(p))
+        .map(|(_, p)| *p)
+}
+
+/// Verify one recorded signature as of `as_of`: for the principal its record
+/// names when the auditor named none, else for each principal named, the
+/// record's first, until one verifies. A rejection keeps the reason of the
+/// first try, which is the record's principal when it was named.
+fn verify(
+    reverify: &mut Reverify<'_>,
+    digest: Digest,
+    record: SignedApproval,
+    pending: &Pending,
+    as_of: OffsetDateTime,
+) -> Result<Approval, Error> {
+    let named: Vec<&str> = pinned(reverify.principals).collect();
+    let tries: Vec<String> = if named.is_empty() {
+        vec![record.principal.clone()]
+    } else {
+        let (first, rest): (Vec<&str>, Vec<&str>) =
+            named.iter().partition(|p| **p == record.principal);
+        first.into_iter().chain(rest).map(str::to_owned).collect()
+    };
+    let mut reason = None;
+    for principal in tries {
+        let verdict = (reverify.check)(&SignatureToCheck {
+            digest,
+            bytes: &pending.bytes,
+            signature: &pending.signature,
+            approval: &record,
+            principal: &principal,
+            as_of,
+        })?;
+        match verdict {
+            Recheck::Verified => {
+                return Ok(Approval::Verified {
+                    record,
+                    principal,
+                    pinned: !named.is_empty(),
+                });
+            }
+            Recheck::Rejected(why) => {
+                reason.get_or_insert(why);
+            }
+        }
+    }
+    Ok(Approval::Rejected(record, reason.unwrap_or("unknown")))
 }
 
 /// Record the approval gaps of the lines decided under `used`, which is in
@@ -593,6 +716,14 @@ fn approval_gap(rows: &[&Used]) -> EvidenceGap {
                     Approval::Rejected(_, why) => Some(why),
                     _ => None,
                 },
+                principal: match &used.approval {
+                    Approval::Verified {
+                        principal,
+                        pinned: false,
+                        ..
+                    } => Some(principal.clone()),
+                    _ => None,
+                },
                 key: used.digest,
             })
             .collect(),
@@ -622,7 +753,7 @@ impl Revisions {
             ..RevisionGroup::default()
         };
         for used in self.used {
-            if !matches!(used.approval, Approval::Verified(_)) {
+            if !matches!(used.approval, Approval::Verified { .. }) {
                 group.unverified += 1;
             }
             if group.details.len() < DETAIL_LIMIT {
@@ -630,11 +761,17 @@ impl Revisions {
                     digest: used.digest.to_string(),
                     first_seq: used.first_seq,
                     last_seq: used.last_seq,
+                    first_time: rfc3339(used.first_time),
                     lines: used.lines,
                     provenance: used.approval.as_str(),
                     approval: used.approval.record().cloned(),
                     reason: match used.approval {
                         Approval::Rejected(_, why) => Some(why),
+                        _ => None,
+                    },
+                    verify_time: used.verify_time.map(rfc3339),
+                    verified_for: match &used.approval {
+                        Approval::Verified { principal, .. } => Some(principal.clone()),
                         _ => None,
                     },
                 });
@@ -691,8 +828,11 @@ pub fn audit_receipts(
 }
 
 /// [`audit_receipts`], verifying every recorded signature again with
-/// `reverify` when it is given. A rejected signature is a
-/// `signature-rejected` gap.
+/// `reverify` when it is given.
+///
+/// A rejected signature is a `signature-rejected` gap. A signature that
+/// verified with no [`Reverify::principals`] named is a `signer-not-pinned`
+/// gap.
 ///
 /// The ledger is read under its shared lock, and with it each archived
 /// revision, signature record and signature it used. `reverify.check` runs
@@ -716,7 +856,7 @@ pub fn audit_receipts_with(
         match event {
             // A scalar spend line has no field for a target.
             VerifiedEvent::Spend(s) => {
-                revisions.note(s.digest, s.seq)?;
+                revisions.note(s.digest, s.seq, s.time)?;
                 record_gap(&mut gaps, "targets-unrecorded", s.seq);
             }
             VerifiedEvent::Adopt(a) if !a.carried.is_empty() => {
@@ -724,7 +864,7 @@ pub fn audit_receipts_with(
             }
             VerifiedEvent::Adopt(_) | VerifiedEvent::Reconcile(_) => (),
             VerifiedEvent::Debit(d) => {
-                revisions.note(d.digest, d.seq)?;
+                revisions.note(d.digest, d.seq, d.time)?;
                 let Some(receipt) = d.receipt.as_ref().filter(|r| !r.targets.is_empty()) else {
                     record_gap(&mut gaps, "targets-unrecorded", d.seq);
                     return Ok(());
@@ -1097,13 +1237,17 @@ mod gap_tests {
         }
     }
 
-    /// The approval of revision `n` for kind 0 to 4.
+    /// The approval of revision `n` for kind 0 to 5.
     fn approval(n: u64, kind: u64) -> Approval {
         match kind {
             0 => Approval::Missing,
             1 => Approval::Unsigned,
             2 => Approval::Recorded(record(n)),
-            3 => Approval::Verified(record(n)),
+            3 | 5 => Approval::Verified {
+                record: record(n),
+                principal: format!("owner-{n}@example.org"),
+                pinned: kind == 3,
+            },
             _ => Approval::Rejected(record(n), "untrusted-key"),
         }
     }
@@ -1125,9 +1269,11 @@ mod gap_tests {
                     digest,
                     first_seq: seq,
                     last_seq: seq,
+                    first_time: OffsetDateTime::UNIX_EPOCH,
                     lines: 0,
                     sequences: Vec::new(),
                     approval: approval(n, kind),
+                    verify_time: None,
                 });
                 used.len() - 1
             });
@@ -1144,6 +1290,12 @@ mod gap_tests {
         if let Some(rejected) = expected.get_mut("signature-rejected") {
             for row in &mut rejected.digests {
                 row.reason = Some("untrusted-key");
+            }
+        }
+        if let Some(unpinned) = expected.get_mut("signer-not-pinned") {
+            for row in &mut unpinned.digests {
+                let n = lines[usize::try_from(row.sequences[0] - 1).expect("line")];
+                row.principal = Some(format!("owner-{n}@example.org"));
             }
         }
         let mut actual = BTreeMap::new();
@@ -1170,9 +1322,9 @@ mod gap_tests {
             // Every third case has many revisions, all in one gap.
             let wide = seed % 3 == 0;
             let count = if wide { 70 } else { 1 } + rng.below(if wide { 20 } else { 90 });
-            let same = wide.then(|| rng.below(5));
+            let same = wide.then(|| rng.below(6));
             let kinds: Vec<u64> = (0..count)
-                .map(|_| same.unwrap_or_else(|| rng.below(5)))
+                .map(|_| same.unwrap_or_else(|| rng.below(6)))
                 .collect();
             // Many lines go to a few revisions, so some pass the detail limit.
             let lines: Vec<u64> = (0..if wide { 300 } else { 1 } + rng.below(400))
@@ -1190,9 +1342,10 @@ mod gap_tests {
         }
         assert_eq!(reached, [true; 3]);
 
-        // At each limit and one past it. A verified revision has no gap.
+        // At each limit and one past it. A revision verified for a principal
+        // the auditor named has no gap.
         let limit = DETAIL_LIMIT as u64;
-        for kind in 0..5 {
+        for kind in 0..6 {
             for extra in [0, 1] {
                 let past = extra == 1 && kind != 3;
                 // One revision: the sequences of the gap and of the digest.

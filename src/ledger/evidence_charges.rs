@@ -83,7 +83,7 @@ pub fn audit_charges_with(
     let mut checked = 0;
     let mut debits = 0;
     let view = visit_view(loaded, state, false, &mut |event| {
-        let (seq, digest, charges): (_, _, Vec<(&str, u64)>) = match event {
+        let (seq, time, digest, charges): (_, _, _, Vec<(&str, u64)>) = match event {
             VerifiedEvent::Adopt(a) => {
                 if !a.carried.is_empty() {
                     record_gap(&mut gaps, "adoption-carry", a.seq);
@@ -95,9 +95,10 @@ pub fn audit_charges_with(
             }
             // A reference reconciliation charges nothing.
             VerifiedEvent::Reconcile(_) => return Ok(()),
-            VerifiedEvent::Spend(s) => (s.seq, s.digest, vec![(&s.counter, s.amount)]),
+            VerifiedEvent::Spend(s) => (s.seq, s.time, s.digest, vec![(&s.counter, s.amount)]),
             VerifiedEvent::Debit(d) => (
                 d.seq,
+                d.time,
                 d.digest,
                 d.charges
                     .iter()
@@ -106,7 +107,7 @@ pub fn audit_charges_with(
             ),
         };
         debits += 1;
-        revisions.note(digest, seq)?;
+        revisions.note(digest, seq, time)?;
         if cache.as_ref().is_none_or(|(key, _)| *key != digest) {
             cache = Some((
                 digest,

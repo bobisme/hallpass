@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use hallpass::evidence::{self, Recheck, Reverify, SignatureToCheck};
+use hallpass::evidence::{self, AsOf, Recheck, Reverify, SignatureToCheck};
 use hallpass::{Digest, Error, StateDir, archive_verified_signature};
 use serde_json::{Value, json};
 
@@ -268,7 +268,7 @@ fn without_allowed_signers_a_forged_record_never_reads_as_verified() {
         assert_eq!(audit["result"], "incomplete", "{command}: {audit}");
         assert_eq!(
             audit["signatures"],
-            json!({"reverified": false, "allowed_signers": null, "principal": null})
+            json!({"reverified": false, "allowed_signers": null, "principals": [], "as_of": null})
         );
         assert!(
             !audit.to_string().contains("signature-verified"),
@@ -313,14 +313,14 @@ fn with_allowed_signers_a_forged_record_fails_reverification_and_names_the_diges
     // ssh-keygen rejects the copied signature over the other revision's bytes,
     // and the audit names the digest and the reason.
     let trust = Digest::of(&fs::read(env.path("trust")).expect("trust")).to_string();
-    let with = ["--allowed-signers", "trust"];
+    let with = ["--allowed-signers", "trust", "--principal", OWNER];
     for command in ["audit-receipts", "audit-charges"] {
         let args = [&[command, "p.toml", "arch"][..], &with[..]].concat();
         let audit = env.json(&args, 2);
         assert_eq!(audit["result"], "incomplete", "{command}: {audit}");
         assert_eq!(
             audit["signatures"],
-            json!({"reverified": true, "allowed_signers": trust, "principal": null})
+            json!({"reverified": true, "allowed_signers": trust, "principals": [OWNER], "as_of": "first-use"})
         );
         assert_eq!(
             audit["gaps"]["signature-rejected"]["digests"],
@@ -347,31 +347,25 @@ fn with_allowed_signers_a_forged_record_fails_reverification_and_names_the_diges
         );
         assert!(
             text.contains(&format!(
-                "  {forged_digest} sequences 2 to 2, 1 line(s): recorded signature failed re-verification for principal \"{OWNER}\" (bytes-do-not-match)"
+                "  {forged_digest} sequences 2 to 2, 1 line(s): recorded signature failed re-verification for principal \"{OWNER}\" as of {NOW} (bytes-do-not-match)"
             )),
             "{text}"
         );
         assert!(
             text.contains(&format!(
-                "  {signed} sequences 1 to 1, 1 line(s): signature re-verified for principal \"{OWNER}\""
+                "  {signed} sequences 1 to 1, 1 line(s): signature re-verified for principal \"{OWNER}\" as of {NOW} with"
             )),
             "{text}"
         );
         assert!(
             text.contains(&format!(
-                "Recorded signatures checked with ssh-keygen against trusted signers {trust}, each for the principal its record names."
+                "Recorded signatures checked with ssh-keygen against trusted signers {trust}, as of each revision's first use, for principal \"{OWNER}\"."
             )),
             "{text}"
         );
     }
     let text = env.text(
-        &[
-            "audit-receipts",
-            "p.toml",
-            "arch",
-            "--allowed-signers",
-            "trust",
-        ],
+        &[&["audit-receipts", "p.toml", "arch"][..], &with[..]].concat(),
         2,
     );
     let line = |prefix: &str| {
@@ -405,6 +399,8 @@ fn moving_a_rejected_record_aside_lets_the_owner_record_a_real_signature() {
         "arch",
         "--allowed-signers",
         "trust",
+        "--principal",
+        OWNER,
     ];
     assert_eq!(env.json(&audit, 2)["result"], "incomplete");
     // A record is never replaced: a genuine signature is not stored while the
@@ -476,59 +472,44 @@ fn a_genuinely_signed_engagement_reverifies_clean() {
     let second = env.sign_and_record("owner", "p.toml");
     env.spend();
 
-    for principal in [None, Some(OWNER)] {
-        let mut args = vec!["--allowed-signers", "trust"];
-        args.extend(principal.iter().flat_map(|p| ["--principal", *p]));
-        for command in ["audit-receipts", "audit-charges"] {
-            let all = [&[command, "p.toml", "arch"][..], &args[..]].concat();
-            let audit = env.json(&all, 0);
-            assert_eq!(audit["result"], "complete", "{command}: {audit}");
-            assert_eq!(audit["gaps"], json!({}), "{command}");
-            assert_eq!(audit["signatures"]["reverified"], true);
-            assert_eq!(audit["signatures"]["principal"], json!(principal));
-            let rows = &audit["revisions"]["details"];
-            assert_eq!(rows[0]["digest"], first.as_str());
-            assert_eq!(rows[1]["digest"], second.as_str());
-            for row in rows.as_array().expect("rows") {
-                assert_eq!(row["provenance"], "signature-verified", "{audit}");
-                assert_eq!(row["reason"], Value::Null);
-            }
-            assert_eq!(audit["revisions"]["unverified"], 0);
-            let text = env.text(&all, 0);
-            assert!(text.contains(" audit complete."), "{text}");
-            assert!(
-                text.contains("Revisions used 2, 0 without a verified signature"),
-                "{text}"
-            );
+    let pinned = ["--allowed-signers", "trust", "--principal", OWNER];
+    for command in ["audit-receipts", "audit-charges"] {
+        let all = [&[command, "p.toml", "arch"][..], &pinned[..]].concat();
+        let audit = env.json(&all, 0);
+        assert_eq!(audit["result"], "complete", "{command}: {audit}");
+        assert_eq!(audit["gaps"], json!({}), "{command}");
+        assert_eq!(audit["signatures"]["reverified"], true);
+        assert_eq!(audit["signatures"]["principals"], json!([OWNER]));
+        assert_eq!(audit["signatures"]["as_of"], "first-use");
+        let rows = &audit["revisions"]["details"];
+        assert_eq!(rows[0]["digest"], first.as_str());
+        assert_eq!(rows[1]["digest"], second.as_str());
+        for row in rows.as_array().expect("rows") {
+            assert_eq!(row["provenance"], "signature-verified", "{audit}");
+            assert_eq!(row["reason"], Value::Null);
+            assert_eq!(row["verified_for"], OWNER);
+            assert_eq!(row["first_time"], NOW);
+            assert_eq!(row["verify_time"], NOW);
         }
+        assert_eq!(audit["revisions"]["unverified"], 0);
+        let text = env.text(&all, 0);
+        assert!(text.contains(" audit complete."), "{text}");
+        assert!(
+            text.contains("Revisions used 2, 0 without a verified signature"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                ", as of each revision's first use, for principal \"{OWNER}\"."
+            )),
+            "{text}"
+        );
     }
     let text = env.text(
-        &[
-            "audit-receipts",
-            "p.toml",
-            "arch",
-            "--allowed-signers",
-            "trust",
-        ],
+        &[&["audit-receipts", "p.toml", "arch"][..], &pinned[..]].concat(),
         0,
     );
     assert_eq!(text.matches(" confirmed\n").count(), 3, "{text}");
-    let text = env.text(
-        &[
-            "audit-charges",
-            "p.toml",
-            "arch",
-            "--allowed-signers",
-            "trust",
-            "--principal",
-            OWNER,
-        ],
-        0,
-    );
-    assert!(
-        text.contains(&format!(", all for principal \"{OWNER}\".")),
-        "{text}"
-    );
 
     // The same genuine archive without --allowed-signers is not complete:
     // nothing in it shows who wrote the records.
@@ -727,6 +708,8 @@ fn a_trust_file_that_changes_during_reverification_does_not_change_the_result() 
             "arch",
             "--allowed-signers",
             "trust",
+            "--principal",
+            OWNER,
         ],
         0,
     );
@@ -795,7 +778,7 @@ impl Library {
 fn each_digest_is_verified_once_for_the_principal_required() {
     let lib = Library::new();
     let seen = RefCell::new(Vec::new());
-    for required in [None, Some("deputy@example.org")] {
+    for required in [&[][..], &["deputy@example.org"][..]] {
         seen.borrow_mut().clear();
         let mut check = |s: &SignatureToCheck<'_>| {
             assert_eq!(Digest::of(s.bytes), s.digest);
@@ -806,17 +789,26 @@ fn each_digest_is_verified_once_for_the_principal_required() {
         let audit = lib
             .charges(Some(Reverify {
                 allowed_signers: Digest::of(b"auditor"),
-                principal: required,
+                principals: required,
+                as_of: AsOf::FirstUse,
                 check: &mut check,
             }))
             .expect("audit");
-        assert_eq!(audit.result, "complete");
+        // Without a principal named, a signature that verifies is not
+        // enough: its record chose the principal.
+        let (result, gaps) = if required.is_empty() {
+            ("incomplete", vec!["signer-not-pinned"])
+        } else {
+            ("complete", vec![])
+        };
+        assert_eq!(audit.result, result);
+        assert_eq!(audit.gaps.keys().copied().collect::<Vec<_>>(), gaps);
         assert!(audit.signatures.reverified);
         assert_eq!(
             audit.signatures.allowed_signers,
             Some(Digest::of(b"auditor").to_string())
         );
-        let principal = required.unwrap_or(OWNER).to_owned();
+        let principal = required.first().copied().unwrap_or(OWNER).to_owned();
         assert_eq!(
             *seen.borrow(),
             vec![
@@ -841,7 +833,8 @@ fn a_rejection_is_a_gap_and_a_verifier_error_ends_the_audit() {
     let audit = lib
         .charges(Some(Reverify {
             allowed_signers: Digest::of(b"auditor"),
-            principal: None,
+            principals: &[OWNER],
+            as_of: AsOf::FirstUse,
             check: &mut check,
         }))
         .expect("audit");
@@ -858,7 +851,8 @@ fn a_rejection_is_a_gap_and_a_verifier_error_ends_the_audit() {
     let error = lib
         .charges(Some(Reverify {
             allowed_signers: Digest::of(b"auditor"),
-            principal: None,
+            principals: &[OWNER],
+            as_of: AsOf::FirstUse,
             check: &mut failing,
         }))
         .expect_err("a verifier error is never a pass");
@@ -882,7 +876,8 @@ fn a_signature_replaced_while_it_is_verified_does_not_change_the_result() {
     let audit = lib
         .charges(Some(Reverify {
             allowed_signers: Digest::of(b"auditor"),
-            principal: None,
+            principals: &[OWNER],
+            as_of: AsOf::FirstUse,
             check: &mut swap,
         }))
         .expect("audit");

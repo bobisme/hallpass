@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use hallpass::evidence::{self, Recheck, Reverify, SignatureToCheck};
+use hallpass::evidence::{self, AsOf, Recheck, Reverify, SignatureToCheck};
 use hallpass::time::{OffsetDateTime, macros::datetime};
 use hallpass::{Digest, Error, SpendRequest, StateDir, archive_verified_signature, spend_in};
 
@@ -133,7 +133,8 @@ fn reverify(
 ) -> Reverify<'_> {
     Reverify {
         allowed_signers: Digest::of(b"auditor"),
-        principal: None,
+        principals: &[OWNER],
+        as_of: AsOf::FirstUse,
         check,
     }
 }
@@ -445,7 +446,15 @@ exit $status
         ));
         for command in ["audit-receipts", "audit-charges"] {
             let audit = env.json(
-                &[command, "p.toml", "arch", "--allowed-signers", "trust"],
+                &[
+                    command,
+                    "p.toml",
+                    "arch",
+                    "--allowed-signers",
+                    "trust",
+                    "--principal",
+                    OWNER,
+                ],
                 0,
                 true,
             );
@@ -508,7 +517,15 @@ exec \"$SHIM_REAL\" \"$@\"
         ));
         for (command, lines) in [("audit-receipts", 2), ("audit-charges", 3)] {
             let audit = env.json(
-                &[command, "p.toml", "arch", "--allowed-signers", "trust"],
+                &[
+                    command,
+                    "p.toml",
+                    "arch",
+                    "--allowed-signers",
+                    "trust",
+                    "--principal",
+                    OWNER,
+                ],
                 0,
                 true,
             );

@@ -82,21 +82,26 @@ fn text_time(recorded: &str) -> String {
     .map_or_else(|_| recorded.to_owned(), hallpass::stamp)
 }
 
-fn endpoint_text(row: &evidence::AuditEndpoint) -> String {
+/// `pinned` when the auditor named the principals that may approve.
+fn endpoint_text(row: &evidence::AuditEndpoint, pinned: bool) -> String {
     let name = row
         .recorded
         .name
         .as_deref()
         .map_or_else(String::new, |n| format!(" name {}", safe(n)));
     let verdict = match (&row.matched_label, row.refusal_code) {
-        // Only a revision a verified signature approved can confirm.
-        (Some(label), _) if *label == row.recorded.label && row.provenance == SIGNED => {
+        // Only a revision that a signature verified for a principal the
+        // auditor named approved can confirm.
+        (Some(label), _) if *label == row.recorded.label && row.provenance == SIGNED && pinned => {
             format!("recorded label {} confirmed", safe(label))
         }
         (Some(label), _) if *label == row.recorded.label => format!(
             "recorded label {} matches the archived revision, {}",
             safe(label),
             match row.provenance {
+                SIGNED => {
+                    "whose signature verified for the principal its record names, not for one named with --principal"
+                }
                 "signature-recorded" => "which has a signature record (not re-verified)",
                 "signature-rejected" => "whose recorded signature failed re-verification",
                 _ => "which no verified signature approved",
@@ -138,6 +143,9 @@ fn gap_meaning(reason: &str) -> &'static str {
         "signature-rejected" => {
             "decided under a revision whose recorded signature failed re-verification with the trusted signers file you supplied, so the archive does not show that the owner approved those bytes"
         }
+        "signer-not-pinned" => {
+            "decided under a revision whose signature verified for the principal its record names, and whoever writes the archive chose that principal; the trusted signers file decides whose keys count, and --principal decides who must have approved, so name the owner with --principal"
+        }
         "archive-missing" => {
             "the revision is not in the archive; archive each revision before spending under it"
         }
@@ -173,6 +181,9 @@ fn gaps_text(
             let why = row.reason.map_or_else(String::new, |code| {
                 format!(". Reason {code}: {}", audit_advice(code))
             });
+            let why = row.principal.as_ref().map_or(why, |principal| {
+                format!(". Verified for principal {}", quoted(principal))
+            });
             let _ = writeln!(
                 text,
                 "  {} {} line(s). Sequences {:?}{}{why}",
@@ -186,6 +197,24 @@ fn gaps_text(
             text.push_str("  Additional digests omitted.\n");
         }
     }
+}
+
+/// The principals a signature had to verify for: those the auditor named,
+/// else the one its record names.
+fn checked_for(signatures: &evidence::SignatureCheck, record: &str) -> String {
+    match signatures.principals.as_slice() {
+        [] => format!("principal {}", quoted(record)),
+        [one] => format!("principal {}", quoted(one)),
+        many => format!("principals {}", quoted_list(many)),
+    }
+}
+
+fn quoted_list(principals: &[String]) -> String {
+    principals
+        .iter()
+        .map(|p| quoted(p))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn revisions_text(
@@ -205,18 +234,23 @@ fn revisions_text(
                 _ => "not in the archive".to_owned(),
             },
             |a| {
-                // The principal the signature was (or would be) verified for.
-                let principal = quoted(signatures.principal.as_ref().unwrap_or(&a.principal));
+                let at = row
+                    .verify_time
+                    .as_deref()
+                    .map_or_else(String::new, |t| format!(" as of {}", text_time(t)));
                 match (row.provenance, row.reason) {
                     (SIGNED, _) => format!(
-                        "signature re-verified for principal {principal} with the trusted signers you supplied"
+                        "signature re-verified for principal {}{at} with the trusted signers you supplied",
+                        quoted(row.verified_for.as_ref().unwrap_or(&a.principal))
                     ),
                     ("signature-rejected", Some(code)) => format!(
-                        "recorded signature failed re-verification for principal {principal} ({code}): {}",
+                        "recorded signature failed re-verification for {}{at} ({code}): {}",
+                        checked_for(signatures, &a.principal),
                         audit_advice(code)
                     ),
                     _ => format!(
-                        "signature record present (not re-verified) for principal {principal}, recorded with trusted signers {}",
+                        "signature record present (not re-verified) for principal {}, recorded with trusted signers {}",
+                        quoted(&a.principal),
                         a.allowed_signers
                     ),
                 }
@@ -232,13 +266,19 @@ fn revisions_text(
         text.push_str("  Additional revisions omitted.\n");
     }
     if let Some(trust) = &signatures.allowed_signers {
+        let as_of = match signatures.as_of.as_deref() {
+            None | Some("first-use") => "as of each revision's first use".to_owned(),
+            Some(instant) => format!("as of {}", text_time(instant)),
+        };
         let _ = writeln!(
             text,
-            "Recorded signatures checked with ssh-keygen against trusted signers {trust}{}.",
-            signatures.principal.as_ref().map_or_else(
-                || ", each for the principal its record names".to_owned(),
-                |p| format!(", all for principal {}", quoted(p))
-            )
+            "Recorded signatures checked with ssh-keygen against trusted signers {trust}, {as_of}, {}.",
+            match signatures.principals.as_slice() {
+                [] => "each for the principal its record names, as no --principal named the owner"
+                    .to_owned(),
+                [one] => format!("for principal {}", quoted(one)),
+                many => format!("each for any of principals {}", quoted_list(many)),
+            }
         );
     }
 }
@@ -270,8 +310,9 @@ pub fn audit(file: &Path, directory: &Path, signatures: &SignatureArgs) -> Outpu
         ("mismatches", &report.mismatches),
     ] {
         let _ = writeln!(text, "{name} {}", group.count);
+        let pinned = !report.signatures.principals.is_empty();
         for row in &group.details {
-            let _ = writeln!(text, "  {}", endpoint_text(row));
+            let _ = writeln!(text, "  {}", endpoint_text(row, pinned));
         }
         if group.truncated {
             text.push_str("  Additional endpoint details omitted.\n");

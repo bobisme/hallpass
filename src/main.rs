@@ -287,6 +287,9 @@ enum Command {
         /// Retain the exact verified pass bytes in this private archive.
         #[arg(long, value_name = "DIR")]
         archive: Option<PathBuf>,
+        /// Verify as of this RFC 3339 instant instead of now, such as the time a revision was first used. A key the trusted signers file limits with valid-after or valid-before counts only inside that window.
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
     },
     /// Compare two pass revisions without authorizing either one.
     Diff(DiffArgs),
@@ -2453,12 +2456,14 @@ fn run(cli: &Cli, format: Format) -> Output {
             allowed_signers,
             principal,
             archive,
+            at,
         } => cli_verify::verify_approval(
             file,
             signature,
             allowed_signers,
             principal,
             archive.as_deref(),
+            at.as_deref(),
         ),
         Command::Diff(args) => cli_diff::review_diff(args),
         Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),

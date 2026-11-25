@@ -22,6 +22,19 @@ const WEB: &str = "192.0.2.10:443/tcp@app.example.com";
 const EXTRA: &str = "192.0.2.99:443/tcp";
 const TRUST: &str = "--allowed-signers";
 
+/// An audit with the auditor's trusted signers file, naming the owner.
+fn audited(command: &str) -> [&str; 7] {
+    [
+        command,
+        "p.toml",
+        "arch",
+        TRUST,
+        "trust",
+        "--principal",
+        OWNER,
+    ]
+}
+
 fn pass() -> String {
     format!(
         "{}[ceilings]\nrequests = 100\n",
@@ -215,7 +228,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
 
     // The auditor verifies the recorded signatures again with their own
     // trusted signers file (bn-2ld).
-    let receipts = env.json(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 2);
+    let receipts = env.json(&audited("audit-receipts"), 2);
     assert_eq!(receipts["result"], "incomplete", "{receipts}");
     assert_eq!(receipts["mismatches"]["count"], 0);
     let gap = &receipts["gaps"]["approval-unverified"];
@@ -255,7 +268,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
     );
     assert!(rows[1]["approval"].is_null());
 
-    let text = env.text(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 2);
+    let text = env.text(&audited("audit-receipts"), 2);
     assert!(text.starts_with("Receipt audit incomplete."), "{text}");
     assert!(!text.contains("audit complete"), "{text}");
     let line = |prefix: &str| {
@@ -286,7 +299,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
         "{text}"
     );
 
-    let charges = env.json(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 2);
+    let charges = env.json(&audited("audit-charges"), 2);
     assert_eq!(charges["result"], "incomplete", "{charges}");
     assert_eq!(charges["checked_debits"], 2);
     assert_eq!(
@@ -294,7 +307,7 @@ fn the_evaluator_scenario_names_the_unapproved_revision_and_is_not_complete() {
         unsigned.as_str()
     );
     assert_eq!(charges["revisions"], receipts["revisions"]);
-    let text = env.text(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 2);
+    let text = env.text(&audited("audit-charges"), 2);
     assert!(text.starts_with("Charge audit incomplete."), "{text}");
     assert!(!text.contains("audit complete"), "{text}");
 }
@@ -314,20 +327,20 @@ fn signing_the_revision_later_upgrades_it_and_a_signed_engagement_audits_clean()
         unsigned.as_str()
     );
 
-    let receipts = env.json(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 0);
+    let receipts = env.json(&audited("audit-receipts"), 0);
     assert_eq!(receipts["result"], "complete", "{receipts}");
     assert_eq!(receipts["gaps"], json!({}));
     assert_eq!(receipts["revisions"]["unverified"], 0);
-    let text = env.text(&["audit-receipts", "p.toml", "arch", TRUST, "trust"], 0);
+    let text = env.text(&audited("audit-receipts"), 0);
     assert!(text.starts_with("Receipt audit complete."), "{text}");
     assert_eq!(text.matches(" confirmed\n").count(), 2, "{text}");
     assert!(
         text.contains("Revisions used 2, 0 without a verified signature"),
         "{text}"
     );
-    let charges = env.json(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 0);
+    let charges = env.json(&audited("audit-charges"), 0);
     assert_eq!(charges["result"], "complete", "{charges}");
-    let text = env.text(&["audit-charges", "p.toml", "arch", TRUST, "trust"], 0);
+    let text = env.text(&audited("audit-charges"), 0);
     assert!(text.starts_with("Charge audit complete."), "{text}");
     assert!(text.contains("Gaps none"), "{text}");
 
@@ -648,7 +661,7 @@ fn archive_missing_gaps_name_each_digest_with_its_sequences() {
         let rows = &audit["revisions"]["details"];
         assert_eq!(
             rows[0],
-            json!({"digest": a, "first_seq": 1, "last_seq": 4, "lines": 3, "provenance": "missing", "approval": null, "reason": null}),
+            json!({"digest": a, "first_seq": 1, "last_seq": 4, "first_time": NOW, "lines": 3, "provenance": "missing", "approval": null, "reason": null, "verify_time": null, "verified_for": null}),
             "{command}"
         );
         assert_eq!(rows[1]["provenance"], "missing");

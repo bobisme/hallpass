@@ -270,7 +270,8 @@ mkdir -m 700 approval-archive
 hallpass verify-approval engagement.pass.toml --signature engagement.pass.toml.sig \
   --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive
 hallpass spend engagement.pass.toml calls --to 192.0.2.10:5060/udp --record-target
-hallpass audit-receipts engagement.pass.toml approval-archive --allowed-signers trusted_signers
+hallpass audit-receipts engagement.pass.toml approval-archive \
+  --allowed-signers trusted_signers --principal owner@example.org
 hallpass --format json ledger engagement.pass.toml
 hallpass retrieve approval-archive "$reviewed_digest" --output reviewed-pass.toml
 hallpass --format json checkpoint engagement.pass.toml > checkpoint.json
@@ -288,7 +289,11 @@ do not depend on it. A matching digest identifies bytes, not who approved them.
 without a signature: an audit then puts every debit decided under them in an
 `approval-unverified` gap and is not `complete`. The audit verifies each
 recorded signature again only with `--allowed-signers` and a trusted signers
-file you control; without it no audit is `complete`. Signing is in
+file you control; without it no audit is `complete`. That file decides whose
+keys count. `--principal` decides who must have approved: name the owner, or
+the audit is not `complete` either, because each record names its own
+principal. An audit verifies each signature as of the time its revision was
+first used, so a key that expired later still counts. Signing is in
 [Signing and verifying an approval](docs/INTEGRATING.md#signing-and-verifying-an-approval),
 and what an audit proves is in [EVIDENCE.md](docs/EVIDENCE.md#what-an-audit-proves).
 
