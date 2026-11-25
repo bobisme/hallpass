@@ -16,9 +16,9 @@ use super::{
     exists, inspect_candidate, inspect_candidate_checkpoints, rfc3339, visit_view,
 };
 use crate::{
-    Decision, Digest, Error, HostName, LoadedPass, Pass, SignedApproval, StateDir, Target,
+    Decision, Digest, Error, HostName, LoadedPass, Pass, Problem, SignedApproval, StateDir, Target,
     archive::read_revision,
-    retrieve_pass,
+    display_quoted, retrieve_pass,
     time::{Duration, OffsetDateTime},
 };
 use std::path::{Path, PathBuf};
@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 pub const DETAIL_LIMIT: usize = 64;
 /// Maximum number of explicit backup paths per comparison.
 pub const MAX_BACKUPS: usize = 32;
+/// The most problems a `revision-unparsable` gap names for one digest.
+pub const MAX_PROBLEMS_SHOWN: usize = 4;
+
+/// The gap of a line decided under an archived revision whose bytes match
+/// their digest but break a pass rule of this version.
+const UNPARSABLE: &str = "revision-unparsable";
 
 #[derive(Debug, Serialize)]
 pub struct FoundReceipt {
@@ -187,8 +193,8 @@ pub struct EvidenceGap {
     pub sequences: Vec<u64>,
     pub truncated: bool,
     /// For a gap about a pass revision (`archive-missing`,
-    /// `approval-unverified`), each digest with its own sequences, in order of
-    /// first use. Empty for the other reasons.
+    /// `revision-unparsable` and the approval gaps), each digest with its own
+    /// sequences, in order of first use. Empty for the other reasons.
     pub digests: Vec<GapDigest>,
     /// More digests than [`DETAIL_LIMIT`] had this gap; `count` still covers them.
     pub digests_truncated: bool,
@@ -209,6 +215,15 @@ pub struct GapDigest {
     /// for a `signer-not-pinned` gap only (absent from the other gaps).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+    /// What this version's pass rules find wrong with the archived bytes,
+    /// for a `revision-unparsable` gap only: the first
+    /// [`MAX_PROBLEMS_SHOWN`] problems, each without its advice, because
+    /// archived bytes are never edited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problems: Option<Vec<Problem>>,
+    /// How many problems there are in all, for `revision-unparsable` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem_count: Option<usize>,
     #[serde(skip)]
     key: Digest,
 }
@@ -376,13 +391,14 @@ pub(super) fn record_gap(
     }
 }
 
-/// Record a gap about the revision `digest`, also under that digest.
-pub(super) fn record_revision_gap(
-    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+/// Record a gap about the revision `digest`, also under that digest. Returns
+/// that digest's entry, or None once the gap lists [`DETAIL_LIMIT`] others.
+pub(super) fn record_revision_gap<'g>(
+    gaps: &'g mut BTreeMap<&'static str, EvidenceGap>,
     reason: &'static str,
     seq: u64,
     digest: Digest,
-) {
+) -> Option<&'g mut GapDigest> {
     record_gap(gaps, reason, seq);
     let group = gaps.entry(reason).or_default();
     // Consecutive lines usually share a revision, so look from the end.
@@ -396,12 +412,14 @@ pub(super) fn record_revision_gap(
             truncated: false,
             reason: None,
             principal: None,
+            problems: None,
+            problem_count: None,
             key: digest,
         });
         group.digests.len() - 1
     } else {
         group.digests_truncated = true;
-        return;
+        return None;
     };
     let entry = &mut group.digests[i];
     entry.count += 1;
@@ -410,6 +428,40 @@ pub(super) fn record_revision_gap(
     } else {
         entry.truncated = true;
     }
+    Some(entry)
+}
+
+/// Record that line `seq` was decided under `digest`, an archived revision
+/// that breaks a pass rule of this version: a `revision-unparsable` gap that
+/// names the first problems of the digest.
+fn record_unparsable(
+    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    seq: u64,
+    digest: Digest,
+    problems: &[Problem],
+) {
+    if let Some(row) = record_revision_gap(gaps, UNPARSABLE, seq, digest)
+        && row.problems.is_none()
+    {
+        row.problem_count = Some(problems.len());
+        row.problems = Some(
+            problems
+                .iter()
+                .take(MAX_PROBLEMS_SHOWN)
+                .map(|p| Problem {
+                    field: p.field.clone(),
+                    message: finding(&p.message).to_owned(),
+                })
+                .collect(),
+        );
+    }
+}
+
+/// What a problem says is wrong, without what to do about it: its message up
+/// to the first `; `. A problem's advice is to edit the pass, and archived
+/// bytes must never be edited.
+fn finding(message: &str) -> &str {
+    message.split_once("; ").map_or(message, |(what, _)| what)
 }
 
 /// How one revision's approval stands in this audit.
@@ -724,6 +776,8 @@ fn approval_gap(rows: &[&Used]) -> EvidenceGap {
                     } => Some(principal.clone()),
                     _ => None,
                 },
+                problems: None,
+                problem_count: None,
                 key: used.digest,
             })
             .collect(),
@@ -783,31 +837,82 @@ impl Revisions {
     }
 }
 
-// Cache only the last revision. Consecutive ledger entries usually share it.
-// Missing revisions are cached under the same key as successfully parsed ones.
-pub(super) fn archive_revision(
-    directory: &Path,
-    digest: Digest,
-    id: &str,
-) -> Result<Option<Pass>, Error> {
+/// One archived revision, as an audit replays it.
+enum Archived {
+    /// The archive does not hold it.
+    Missing,
+    Parsed(Box<Pass>),
+    /// Its bytes match their digest, but break a pass rule of this version,
+    /// which the version that recorded the work did not have. Every problem,
+    /// as [`Pass::parse`] gives them.
+    Unparsable(Vec<Problem>),
+}
+
+/// The last archived revision an audit read. Only that one is kept, because
+/// consecutive ledger lines usually share it. Missing and unparsable
+/// revisions are kept too.
+#[derive(Default)]
+pub(super) struct LastRevision(Option<(Digest, Archived)>);
+
+impl LastRevision {
+    /// The archived revision `digest` of pass `id`, parsed, to replay line
+    /// `seq` against. None when it cannot be replayed, after recording why
+    /// in `gaps`: `archive-missing` or `revision-unparsable`.
+    pub(super) fn replay(
+        &mut self,
+        directory: &Path,
+        id: &str,
+        digest: Digest,
+        seq: u64,
+        gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    ) -> Result<Option<&Pass>, Error> {
+        if self.0.as_ref().is_none_or(|(key, _)| *key != digest) {
+            self.0 = Some((digest, archive_revision(directory, digest, id)?));
+        }
+        Ok(match self.0.as_ref().map(|(_, archived)| archived) {
+            Some(Archived::Parsed(pass)) => Some(pass),
+            Some(Archived::Unparsable(problems)) => {
+                record_unparsable(gaps, seq, digest, problems);
+                None
+            }
+            Some(Archived::Missing) | None => {
+                record_revision_gap(gaps, "archive-missing", seq, digest);
+                None
+            }
+        })
+    }
+}
+
+fn archive_revision(directory: &Path, digest: Digest, id: &str) -> Result<Archived, Error> {
     let bytes = match retrieve_pass(directory, digest) {
         Ok(bytes) => bytes,
-        Err(Error::Io { path, .. }) if !exists(&path)? => return Ok(None),
+        Err(Error::Io { path, .. }) if !exists(&path)? => return Ok(Archived::Missing),
         Err(error) => return Err(error),
     };
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| Error::Usage(format!("archived revision {digest} is not UTF-8")))?;
-    let pass = Pass::parse(text).map_err(|problems| Error::Invalid {
-        path: directory.join(digest.to_string()),
-        problems,
-    })?;
-    if pass.id != id {
+    // Bytes that match their digest are what the ledger recorded, and they
+    // are never edited. When a rule added since refuses them, the audit
+    // cannot replay them, but the archive is not damaged: that is a gap.
+    let (named, archived) = match Pass::parse(text) {
+        Ok(pass) => (Some(pass.id.clone()), Archived::Parsed(Box::new(pass))),
+        Err(problems) => (toml_id(text), Archived::Unparsable(problems)),
+    };
+    if let Some(named) = named
+        && named != id
+    {
         return Err(Error::Usage(format!(
             "archived revision {digest} belongs to pass {}, expected {id}",
-            pass.id
+            display_quoted(&named)
         )));
     }
-    Ok(Some(pass))
+    Ok(archived)
+}
+
+/// The `id` of a pass that does not parse, when its TOML still names one.
+fn toml_id(text: &str) -> Option<String> {
+    let table: toml::Table = text.parse().ok()?;
+    table.get("id")?.as_str().map(str::to_owned)
 }
 
 /// Replay retained endpoints at each debit's recorded instant.
@@ -818,7 +923,9 @@ pub(super) fn archive_revision(
 /// reached.
 ///
 /// # Errors
-/// Any failure to verify ledger or archive integrity is an error. Missing archive revisions are reported as gaps.
+/// Any failure to verify ledger or archive integrity is an error. Missing
+/// archive revisions are reported as gaps, and so are archived revisions
+/// whose bytes match their digest but break a pass rule of this version.
 pub fn audit_receipts(
     loaded: &LoadedPass,
     state: &StateDir,
@@ -851,7 +958,7 @@ pub fn audit_receipts_with(
     let mut mismatches = EndpointGroup::default();
     let mut gaps = BTreeMap::new();
     let mut revisions = RevisionTracker::new(directory, reverify);
-    let mut cached: Option<(Digest, Option<Pass>)> = None;
+    let mut last = LastRevision::default();
     let view = visit_view(loaded, state, false, &mut |event| {
         match event {
             // A scalar spend line has no field for a target.
@@ -869,14 +976,8 @@ pub fn audit_receipts_with(
                     record_gap(&mut gaps, "targets-unrecorded", d.seq);
                     return Ok(());
                 };
-                if cached.as_ref().is_none_or(|(key, _)| *key != d.digest) {
-                    cached = Some((
-                        d.digest,
-                        archive_revision(directory, d.digest, &loaded.pass.id)?,
-                    ));
-                }
-                let Some(pass) = cached.as_ref().and_then(|(_, p)| p.as_ref()) else {
-                    record_revision_gap(&mut gaps, "archive-missing", d.seq, d.digest);
+                let replay = last.replay(directory, &loaded.pass.id, d.digest, d.seq, &mut gaps);
+                let Some(pass) = replay? else {
                     return Ok(());
                 };
                 for (index, t) in receipt.targets.iter().enumerate() {

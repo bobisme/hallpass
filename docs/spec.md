@@ -963,8 +963,11 @@ approved. Without `--principal`, each signature is verified for the principal
 its record names, and a revision that verifies is a `signer-not-pinned` gap.
 So the audits are `complete` only when every revision used is
 `signature-verified` for a principal named with `--principal`, and never
-without `--allowed-signers` and `--principal`. They run `ssh-keygen` after
-they release the ledger lock, over copies of the bytes they read under it.
+without `--allowed-signers` and `--principal`. Archived bytes are never
+edited, so a revision whose bytes match their digest but break a pass rule
+added since it was archived is a `revision-unparsable` gap, not an error, and
+its signature is still verified. They run `ssh-keygen` after they release
+the ledger lock, over copies of the bytes they read under it.
 [EVIDENCE.md](EVIDENCE.md) gives their results, exit codes and fields.
 
 ## Command line

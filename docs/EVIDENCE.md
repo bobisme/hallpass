@@ -130,6 +130,7 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | --- | --- | --- |
 | `targets-unrecorded` | A spend or debit line that kept no target: a scalar spend line, which has no field for one, or a debit without `--record-target`. | Spend with `--to` and `--record-target`. |
 | `archive-missing` | A debit with targets whose revision is not in the archive. | Archive each revision before spending under it. |
+| `revision-unparsable` | A debit with targets (`audit-receipts`), or a spend or debit line (`audit-charges`), whose archived revision matches its digest but breaks a pass rule that this hallpass has and the one that recorded the work did not. The audit cannot replay it. | Nothing in the archive: never edit archived bytes. Run the audit with the hallpass version that recorded the work, or accept the gap. |
 | `approval-unverified` | A spend or debit line decided under a revision with no signature record in the archive (`unsigned` or `missing`). | Have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `signature-not-reverified` | A spend or debit line decided under a revision with a signature record that this audit did not verify, because it ran without `--allowed-signers`. | Run the audit with `--allowed-signers` and your own trusted signers file. |
 | `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file, for every `--principal` given. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
@@ -137,12 +138,13 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
 
 `targets-unrecorded` replaces the `legacy-spend` reason that earlier versions
-gave a scalar spend line. The five gaps about a revision, `archive-missing`,
-`approval-unverified`, `signature-not-reverified`, `signature-rejected` and
-`signer-not-pinned`, also name the revision: `digests` lists each digest with
-its own `count`, first 64 `sequences` and `truncated`, in order of first use,
-up to 64 digests (`digests_truncated` marks more). A `signature-rejected`
-entry also has `reason`, the code `verify-approval` uses: `wrong-namespace`,
+gave a scalar spend line. The six gaps about a revision, `archive-missing`,
+`revision-unparsable`, `approval-unverified`, `signature-not-reverified`,
+`signature-rejected` and `signer-not-pinned`, also name the revision:
+`digests` lists each digest with its own `count`, first 64 `sequences` and
+`truncated`, in order of first use, up to 64 digests (`digests_truncated`
+marks more). A `signature-rejected` entry also has `reason`, the code
+`verify-approval` uses: `wrong-namespace`,
 `bytes-do-not-match`, `malformed-signature`, `untrusted-key`,
 `wrong-principal`, `key-not-valid-at-time` or `unknown`, read from
 `ssh-keygen`'s output. `key-not-valid-at-time` means that the key is in the
@@ -151,9 +153,27 @@ trusted signers file for that principal, but its `valid-after` or
 of. It is never reported as `untrusted-key`. With several `--principal`
 values, the reason is that of the first one tried: the record's principal
 when it is among them. A `signer-not-pinned` entry also has `principal`, the
-principal its record names, which the signature verified for. Text output
-prints the digests under the gap, with the reason and what it means, or the
-principal. For the other reasons `digests` is empty.
+principal its record names, which the signature verified for. A
+`revision-unparsable` entry also has `problems`, the first 4 problems that
+this hallpass finds in the archived bytes, each `{field, message}` as `check`
+gives them but without the advice to edit the file, and `problem_count`, how
+many there are in all. Text output prints the digests under the gap, with the
+reason and what it means, the principal, or the problems. For the other
+reasons `digests` is empty.
+
+Pass rules get stricter, and archived bytes are never edited. So a revision
+that an older hallpass archived and spent under can break a rule of this one,
+for example with a hidden character in a comment. Its bytes still match their
+digest, so the archive is not damaged. The audit records a
+`revision-unparsable` gap for the lines decided under it, goes on, and is not
+`complete` (exit 2). To replay those lines, run the audit with the hallpass
+version that recorded the work. Bytes that do not match their digest are
+still an error (exit 1), and so is a revision whose `id`, when its TOML can
+be read, names another pass.
+The audit still verifies the signature of such a revision: a signature over
+the exact bytes still shows who approved them. So the revision has its
+provenance and its approval gap as any other does. When its signature
+verified for a principal you named, `revision-unparsable` is its only gap.
 
 The reader caches one parsed revision at a time. Review the independently reported witness status and warnings when interpreting the history. Replay establishes only the scope of recorded endpoints at the recorded instant. The requested duration, unrecorded endpoints, actual traffic and execution outcomes require other evidence.
 
@@ -285,7 +305,10 @@ was verified as of, or null when this audit did not verify it) and
 `verified_for` (the principal it verified for, for `signature-verified`,
 else null). `count` is the number of distinct digests and `unverified` how
 many are not `signature-verified`. The first 64 are listed and `truncated`
-marks more. Text output prints them after the gaps. To list only the
+marks more. Text output prints them after the gaps. Its first line counts
+the revisions without a verified signature. Without `--principal` but with
+`--allowed-signers`, it also counts the revisions not verified for a
+principal named with `--principal`, which is all of them. To list only the
 revisions:
 
 ```sh
@@ -375,7 +398,8 @@ hallpass --json audit-charges engagement.toml approval-archive \
 
 Each scalar or atomic debit is checked against the exact archived revision and
 pre-debit totals. Missing revisions leave `archive-missing` gaps, which name
-each missing digest with its sequences, while recorded arithmetic still
+each missing digest with its sequences, and revisions that break a newer pass
+rule leave `revision-unparsable` gaps, while recorded arithmetic still
 advances. A report may contain both gaps and found `mismatches`; mismatches
 take precedence in the result. Adoption carry advances totals but is not a
 verified original debit. Like `audit-receipts`, the charge audit takes

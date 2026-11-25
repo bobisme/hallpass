@@ -1,10 +1,10 @@
 //! Replay numerical and mandatory charge terms against archived revisions.
 use super::evidence::{
-    DETAIL_LIMIT, EvidenceGap, Reverify, RevisionGroup, RevisionTracker, SignatureCheck,
-    archive_revision, record_gap, record_revision_gap,
+    DETAIL_LIMIT, EvidenceGap, LastRevision, Reverify, RevisionGroup, RevisionTracker,
+    SignatureCheck, record_gap,
 };
 use super::{VerifiedEvent, add, check_required_charges, decide_ceiling, visit_view};
-use crate::{Digest, Error, LoadedPass, Pass, StateDir};
+use crate::{Error, LoadedPass, StateDir};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -53,6 +53,8 @@ fn mismatch(group: &mut ChargeMismatches, seq: u64, counter: &str, reason: &'sta
 ///
 /// # Errors
 /// Returns an error for invalid archive data or failed ledger verification.
+/// An archived revision whose bytes match their digest but break a pass rule
+/// of this version is a `revision-unparsable` gap, not an error.
 pub fn audit_charges(
     loaded: &LoadedPass,
     state: &StateDir,
@@ -76,7 +78,7 @@ pub fn audit_charges_with(
 ) -> Result<ChargeAudit, Error> {
     crate::archive::check_directory(directory)?;
     let mut totals = BTreeMap::new();
-    let mut cache: Option<(Digest, Option<Pass>)> = None;
+    let mut last = LastRevision::default();
     let mut mismatches = ChargeMismatches::default();
     let mut gaps = BTreeMap::new();
     let mut revisions = RevisionTracker::new(directory, reverify);
@@ -108,13 +110,7 @@ pub fn audit_charges_with(
         };
         debits += 1;
         revisions.note(digest, seq, time)?;
-        if cache.as_ref().is_none_or(|(key, _)| *key != digest) {
-            cache = Some((
-                digest,
-                archive_revision(directory, digest, &loaded.pass.id)?,
-            ));
-        }
-        if let Some(pass) = cache.as_ref().and_then(|(_, p)| p.as_ref()) {
+        if let Some(pass) = last.replay(directory, &loaded.pass.id, digest, seq, &mut gaps)? {
             checked += 1;
             if check_required_charges(pass, |name| charges.iter().any(|(c, _)| *c == name)).is_err()
             {
@@ -130,8 +126,6 @@ pub fn audit_charges_with(
                     mismatch(&mut mismatches, seq, counter, reason.code.as_str());
                 }
             }
-        } else {
-            record_revision_gap(&mut gaps, "archive-missing", seq, digest);
         }
         for (counter, amount) in charges {
             let _ = add(&mut totals, counter, amount);

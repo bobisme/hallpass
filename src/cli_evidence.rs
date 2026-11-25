@@ -149,6 +149,9 @@ fn gap_meaning(reason: &str) -> &'static str {
         "archive-missing" => {
             "the revision is not in the archive; archive each revision before spending under it"
         }
+        "revision-unparsable" => {
+            "decided under a revision that was archived before a pass rule it breaks, so this hallpass cannot replay it; never edit archived bytes, which record what the work was decided under: re-run the audit with the hallpass version that recorded the work, or accept the gap"
+        }
         "targets-unrecorded" => {
             "the line keeps no target; spend with --to and --record-target to keep endpoint evidence"
         }
@@ -192,10 +195,25 @@ fn gaps_text(
                 row.sequences,
                 omitted(row.truncated, "sequences")
             );
+            problems_text(text, row);
         }
         if gap.digests_truncated {
             text.push_str("  Additional digests omitted.\n");
         }
+    }
+}
+
+/// The pass rules of this version that a `revision-unparsable` digest breaks.
+fn problems_text(text: &mut String, row: &evidence::GapDigest) {
+    let (Some(problems), Some(count)) = (&row.problems, row.problem_count) else {
+        return;
+    };
+    let _ = writeln!(text, "    This hallpass finds {count} problem(s) in it:");
+    for problem in problems {
+        let _ = writeln!(text, "    - {}", super::safe_message(&problem.to_string()));
+    }
+    if count > problems.len() {
+        text.push_str("    Additional problems omitted.\n");
     }
 }
 
@@ -222,10 +240,22 @@ fn revisions_text(
     revisions: &evidence::RevisionGroup,
     signatures: &evidence::SignatureCheck,
 ) {
+    // Without --principal, a verified signature is still not pinned.
+    let unpinned = if signatures.principals.is_empty() {
+        revisions.count
+    } else {
+        revisions.unverified
+    };
     let _ = writeln!(
         text,
-        "Revisions used {}, {} without a verified signature",
-        revisions.count, revisions.unverified
+        "Revisions used {}, {} without a verified signature{}",
+        revisions.count,
+        revisions.unverified,
+        if unpinned == revisions.unverified {
+            String::new()
+        } else {
+            format!(", {unpinned} not verified for a principal named with --principal")
+        }
     );
     for row in &revisions.details {
         let how = row.approval.as_ref().map_or_else(
