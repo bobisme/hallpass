@@ -1,5 +1,5 @@
 //! Sample changed destination decisions through the ordinary pure evaluator.
-use crate::{Decision, Destination, HostName, Network, Pass, Target};
+use crate::{Decision, Destination, HostName, MAX_NAMES, Network, Pass, Target};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -7,6 +7,9 @@ use time::{Duration, OffsetDateTime};
 
 const MAX_CANDIDATES: usize = 512;
 const MAX_ROWS: usize = 64;
+/// The most requests tried where a nameless NEW destination opens what
+/// another destination restricts to names: 32 overlaps, two requests each.
+const MAX_RESTRICTION_PROBES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "result", rename_all = "kebab-case")]
@@ -44,8 +47,14 @@ pub struct DecisionExample {
     pub after: ExampleDecision,
     /// `newly-allowed`, `changed` or `refusal-code-only`.
     pub change: &'static str,
+    /// The destination that restricts this address and port to names, when
+    /// NEW allows the request without one of them through a nameless
+    /// destination; null otherwise.
+    pub bypasses_names_of: Option<String>,
     #[serde(skip)]
-    pub(crate) port: u16,
+    pub(crate) request: Target,
+    #[serde(skip)]
+    pub(crate) host: Option<HostName>,
 }
 
 const NEWLY_ALLOWED: &str = "newly-allowed";
@@ -140,26 +149,12 @@ pub fn decision_examples(old: &Pass, new: &Pass, now: OffsetDateTime) -> Example
     decision_examples_with(old, new, now, false)
 }
 
-/// Like [`decision_examples`]. Refused-to-refused changes in which only the
-/// code differs are counted, and listed (last) only when `list_refusal_codes`.
-#[must_use]
-pub fn decision_examples_with(
-    old: &Pass,
-    new: &Pass,
-    now: OffsetDateTime,
-    list_refusal_codes: bool,
-) -> ExampleReport {
-    let mut report = ExampleReport {
-        sampled: true,
-        at: super::exact_stamp(now),
-        candidates: 0,
-        evaluated: 0,
-        truncated: false,
-        refusal_code_changes: 0,
-        refusal_code_changes_listed: list_refusal_codes,
-        rows: Vec::new(),
-    };
-    let mut by_label = BTreeMap::<_, [Option<&Destination>; 2]>::new();
+/// One label's destination in OLD and in NEW.
+type Sides<'a> = [Option<&'a Destination>; 2];
+
+/// The destinations, by label, that NEW adds, removes, edits or moves.
+fn changed_rules<'a>(old: &'a Pass, new: &'a Pass) -> BTreeMap<&'a str, Sides<'a>> {
+    let mut by_label = BTreeMap::<_, Sides<'a>>::new();
     for (side, pass) in [old, new].into_iter().enumerate() {
         for rule in &pass.destinations {
             by_label.entry(rule.label.as_str()).or_default()[side] = Some(rule);
@@ -175,17 +170,221 @@ pub fn decision_examples_with(
         .filter(|(a, b)| a.label != b.label)
         .map(|(a, _)| a.label.as_str())
         .collect();
-    let mut visited = HashSet::new();
-    for (label, sides) in by_label {
-        if let [Some(a), Some(b)] = sides
-            && !moved.contains(label)
-            && a.network == b.network
-            && a.protocol == b.protocol
-            && a.ports == b.ports
-            && a.names == b.names
-        {
-            continue;
+    by_label.retain(|label, sides| match sides {
+        [Some(a), Some(b)] => {
+            moved.contains(label)
+                || a.network != b.network
+                || a.protocol != b.protocol
+                || a.ports != b.ports
+                || a.names != b.names
         }
+        _ => true,
+    });
+    by_label
+}
+
+/// A request in the addresses and ports that one destination restricts to
+/// names, which a nameless destination of NEW also matches.
+pub(super) struct Probe {
+    pub(super) target: Target,
+    /// No name, or a name the restricting destination does not list.
+    pub(super) name: Option<HostName>,
+    /// The destination that restricts names.
+    pub(super) restricted: String,
+    /// The nameless NEW destination, and its port range that holds the port.
+    pub(super) opener: (String, u16, u16),
+}
+
+/// The first port of each range that both sorted, disjoint lists hold, with
+/// the range of `b` it lies in.
+fn common_ports(a: &[(u16, u16)], b: &[(u16, u16)]) -> Vec<(u16, (u16, u16))> {
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    while let (Some(&(a_lo, a_hi)), Some(&(b_lo, b_hi))) = (a.get(i), b.get(j)) {
+        if a_lo.max(b_lo) <= a_hi.min(b_hi) {
+            out.push((a_lo.max(b_lo), (b_lo, b_hi)));
+        }
+        if a_hi <= b_hi {
+            i += 1;
+        }
+        if b_hi <= a_hi {
+            j += 1;
+        }
+    }
+    out
+}
+
+/// A name `rule` does not list: `unlisted.example.net`, or a numbered one
+/// when the rule lists that. A rule lists at most `MAX_NAMES` names.
+fn unlisted_name(rule: &Destination) -> Option<HostName> {
+    std::iter::once("unlisted.example.net".to_owned())
+        .chain((2..=MAX_NAMES + 1).map(|n| format!("unlisted-{n}.example.net")))
+        .filter_map(|text| HostName::canonical(&text).ok())
+        .find(|name| !rule.names.contains(name))
+}
+
+/// Requests where a nameless destination that NEW adds or changes opens an
+/// address and port that another destination, in OLD or NEW, restricts to
+/// names. One address per pair and one port per shared port range, each
+/// tried without a name and with a name the restricting destination does
+/// not list. The flag is true when the list stopped at its limit.
+pub(super) fn restriction_probes(old: &Pass, new: &Pass) -> (Vec<Probe>, bool) {
+    let changed = changed_rules(old, new);
+    let excluded = super::containment::blocked_edges(new);
+    let restricted: Vec<&Destination> = new
+        .destinations
+        .iter()
+        .chain(
+            old.destinations
+                .iter()
+                .filter(|d| changed.contains_key(d.label.as_str())),
+        )
+        .filter(|d| !d.names.is_empty())
+        .collect();
+    let openers = new
+        .destinations
+        .iter()
+        .filter(|d| d.names.is_empty() && changed.contains_key(d.label.as_str()));
+    let mut probes = Vec::new();
+    for opener in openers {
+        let open = opener.ports.normalized_ranges();
+        for rule in &restricted {
+            if rule.label == opener.label
+                || rule.protocol != opener.protocol
+                || !rule.network.overlaps(&opener.network)
+            {
+                continue;
+            }
+            // Two overlapping networks nest: the longer prefix lies in both.
+            let shared = if rule.network.prefix() >= opener.network.prefix() {
+                rule.network
+            } else {
+                opener.network
+            };
+            let ip = super::overlap_example(shared, &excluded);
+            for (port, (lo, hi)) in common_ports(&rule.ports.normalized_ranges(), &open) {
+                for name in std::iter::once(None).chain(unlisted_name(rule).map(Some)) {
+                    if probes.len() == MAX_RESTRICTION_PROBES {
+                        return (probes, true);
+                    }
+                    probes.push(Probe {
+                        target: Target {
+                            ip,
+                            port,
+                            protocol: opener.protocol,
+                        },
+                        name,
+                        restricted: rule.label.clone(),
+                        opener: (opener.label.clone(), lo, hi),
+                    });
+                }
+            }
+        }
+    }
+    (probes, false)
+}
+
+/// Visits candidate requests once each, within the limits.
+struct Sampler<'a> {
+    old: &'a Pass,
+    new: &'a Pass,
+    now: OffsetDateTime,
+    list_refusal_codes: bool,
+    visited: HashSet<(Target, Option<&'a HostName>)>,
+    report: ExampleReport,
+}
+
+impl<'a> Sampler<'a> {
+    /// Evaluate one candidate under both revisions and keep a changed
+    /// decision. False when a limit is reached: the report is truncated.
+    fn visit(
+        &mut self,
+        target: Target,
+        name: Option<&'a HostName>,
+        restricted: Option<&str>,
+    ) -> bool {
+        let report = &mut self.report;
+        if report.candidates == MAX_CANDIDATES || report.rows.len() == MAX_ROWS {
+            report.truncated = true;
+            return false;
+        }
+        report.candidates += 1;
+        if !self.visited.insert((target, name)) {
+            return true;
+        }
+        report.evaluated += 1;
+        let decide = |pass: &Pass| {
+            ExampleDecision::from(pass.permits_named(&target, name, self.now, Duration::ZERO))
+        };
+        let before = decide(self.old);
+        let after = decide(self.new);
+        if before == after {
+            return true;
+        }
+        let change = classify(&before, &after);
+        if change == REFUSAL_CODE_ONLY {
+            report.refusal_code_changes += 1;
+            if !self.list_refusal_codes {
+                return true;
+            }
+        }
+        let bypasses_names_of = restricted
+            .filter(|_| matches!(after, ExampleDecision::Allowed { .. }))
+            .map(ToOwned::to_owned);
+        report.rows.push(DecisionExample {
+            target: target.to_string(),
+            name: name.map(ToString::to_string),
+            at: report.at.clone(),
+            before,
+            after,
+            change,
+            bypasses_names_of,
+            request: target,
+            host: name.cloned(),
+        });
+        true
+    }
+}
+
+/// Like [`decision_examples`]. Refused-to-refused changes in which only the
+/// code differs are counted, and listed (last) only when `list_refusal_codes`.
+///
+/// The requests tried first are those where a nameless destination that NEW
+/// adds or changes opens an address and port that another destination
+/// restricts to names: without a name, and with a name that destination
+/// does not list. Their rows name it in `bypasses_names_of` when NEW allows them.
+#[must_use]
+pub fn decision_examples_with(
+    old: &Pass,
+    new: &Pass,
+    now: OffsetDateTime,
+    list_refusal_codes: bool,
+) -> ExampleReport {
+    let (probes, probes_cut) = restriction_probes(old, new);
+    let mut sampler = Sampler {
+        old,
+        new,
+        now,
+        list_refusal_codes,
+        visited: HashSet::new(),
+        report: ExampleReport {
+            sampled: true,
+            at: super::exact_stamp(now),
+            candidates: 0,
+            evaluated: 0,
+            truncated: probes_cut,
+            refusal_code_changes: 0,
+            refusal_code_changes_listed: list_refusal_codes,
+            rows: Vec::new(),
+        },
+    };
+    // A names list losing its effect shows more than added scope does.
+    for probe in &probes {
+        if !sampler.visit(probe.target, probe.name.as_ref(), Some(&probe.restricted)) {
+            return finish(sampler.report);
+        }
+    }
+    for sides in changed_rules(old, new).into_values() {
         let mut streams = sides.map(|s| s.map(candidates));
         // Alternate revisions so either side can contribute early boundary cases.
         loop {
@@ -194,38 +393,9 @@ pub fn decision_examples_with(
                 let Some((target, name)) = stream.next() else {
                     continue;
                 };
-                if report.candidates == MAX_CANDIDATES || report.rows.len() == MAX_ROWS {
-                    report.truncated = true;
-                    return finish(report);
-                }
                 advanced = true;
-                report.candidates += 1;
-                if !visited.insert((target, name)) {
-                    continue;
-                }
-                report.evaluated += 1;
-                let decide = |pass: &Pass| {
-                    ExampleDecision::from(pass.permits_named(&target, name, now, Duration::ZERO))
-                };
-                let before = decide(old);
-                let after = decide(new);
-                if before != after {
-                    let change = classify(&before, &after);
-                    if change == REFUSAL_CODE_ONLY {
-                        report.refusal_code_changes += 1;
-                        if !list_refusal_codes {
-                            continue;
-                        }
-                    }
-                    report.rows.push(DecisionExample {
-                        target: target.to_string(),
-                        name: name.map(ToString::to_string),
-                        at: report.at.clone(),
-                        before,
-                        after,
-                        change,
-                        port: target.port,
-                    });
+                if !sampler.visit(target, name, None) {
+                    return finish(sampler.report);
                 }
             }
             if !advanced {
@@ -233,7 +403,7 @@ pub fn decision_examples_with(
             }
         }
     }
-    finish(report)
+    finish(sampler.report)
 }
 
 /// Newly allowed rows first; the sort is stable, so discovery order holds within a kind.

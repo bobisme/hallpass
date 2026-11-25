@@ -713,6 +713,23 @@ name-restriction overlap), text adds a `WARNING:` line and JSON lists it in
 `name_restriction_overlaps` and `warnings`, as `check` does; overlaps
 already present in OLD are not repeated.
 
+Comments and layout are part of the signed and digested bytes, so two
+files can have different digests and the same declared fields.
+`same_declared_fields` is true when no field, destination, destination
+order or approval ID differs. When it is true and the digests differ, text
+adds one line, `The digests differ, but no declared field does: the files
+differ only in ...`, and JSON lists each kind of change in `text_changes`:
+`comments` (added, removed, changed or moved), `layout` (whitespace, line
+breaks, key order, or the form of a table or list) and `value-spelling` (a
+value written another way, such as a time with another offset or a list in
+another order). `comment_changes` lists each comment that only one file
+has, as `{change, line, text}`: `change` is `removed` (only OLD has it, and
+`line` is in OLD) or `added` (only NEW has it, and `line` is in NEW), and
+`text` runs from `#` to the end of the line. A changed comment is one
+removed and one added. Text prints each as `Comment removed (OLD line N):
+"TEXT"` or `Comment added (NEW line N): "TEXT"`, escaped like every other
+value. Both lists are empty otherwise.
+
 `diff OLD NEW --examples --at TIMESTAMP` adds a bounded sample of changed
 destination decisions using the ordinary evaluator at the supplied offset
 timestamp. The report retains the field diff and review flags. Each
@@ -729,6 +746,17 @@ reviewer looking for new permissions, so they are counted in
 given (`examples.refusal_code_changes_listed` says which). `--at` takes an RFC 3339
 timestamp with an offset; `now` is refused.
 
+A nameless destination that NEW adds or changes can open an address and
+port that another destination, in OLD or NEW, restricts to names. The
+sample tries those requests first: one address and one port for each such
+pair and shared port range, once without a name and once with an
+`example.net` name the named destination does not list (at most 64
+requests). When the decision for one of them changes and NEW allows it,
+its row names the bypassed destination in `bypasses_names_of`, and text
+adds `, bypassing the names list of LABEL`. These rows come first in their
+kind, so a newly allowed one comes before every other newly allowed row.
+`bypasses_names_of` is null in every other row.
+
 ### Projecting an amendment against live balances
 
 `hallpass diff OLD NEW --budget-impact --json` reads one verified summary from the live ledger. In the documented flow OLD is an archived copy with no ledger and NEW is the live pass, so the ledger beside NEW is used; the ledger beside OLD is used only when NEW has none. `budget_impact.ledger` is the path read and `budget_impact.ledger_source` is `new`, `old` or `none` (neither exists; the projection then starts from zero spend, or fails when the witness records spends). Text prints the same as `Ledger used:`. A read-only command never advises `hallpass adopt`; its ledger and witness errors say only that nothing was changed, and recovery advice appears from `status`, `spend` and `adopt`. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
@@ -737,9 +765,7 @@ timestamp with an offset; `now` is refused.
 
 `hallpass diff OLD NEW --containment --at TIMESTAMP` compares zero-duration endpoint admission at one explicit instant. Both validated revisions must have the same pass ID. When NEW admits nothing at the instant (it is revoked, or its window does not cover the instant), the endpoint result is `contained` with reason `new-admits-nothing`: every endpoint NEW admits, none, is admitted by OLD, whether or not OLD is open. When OLD admits nothing and NEW is open, containment cannot be shown and the endpoint result is `inconclusive` with reason `old-closed-new-open`. Otherwise both windows are open and each proposed rule must fit within a single old rule's address range, protocol, ports and name domain. Every previously excluded IPv4 network or broadcast edge within a proposed destination must still be excluded for this proof. IPv6 transition exclusions apply identically to both revisions.
 
-The endpoint proof gives `containment.endpoint_result`: `contained` certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` by exhibiting a new allowance. `containment.counterexamples` lists up to eight such allowances, at most one per
-distinct widened destination rule and port range, and `more_counterexamples`
-is true when more may exist (the cap or the sampling bound was reached).
+The endpoint proof gives `containment.endpoint_result`: `contained` certifies that every endpoint/name pair admitted by NEW at that instant was admitted by OLD. The proof compares at most 16,384 rule pairs. When the proof fails, the existing bounded example search can establish `expanded` by exhibiting a new allowance. Every new allowance lies in a widened class: a NEW destination and port range that no single OLD destination covers, or an IPv4 network or broadcast address that OLD excludes and NEW does not. A bypassed names list (see `--examples`) is a class of its own, once without a name and once with an unlisted name. `containment.counterexamples` lists up to eight new allowances, in the order of `examples.rows`, each in a class that no earlier one is in; so the bypassed names lists come first. `more_counterexamples` is true when the list is not empty and some widened class has no counterexample in it: the eight were not enough, a class holds no sampled allowance (it may hold none at all, for example when two OLD rules together cover it), or a work limit (16,384 rule pairs, 64 names-list requests) leaves the classes unknown. False means every widened class has a counterexample listed.
 `containment.example` keeps the first of them. Otherwise the endpoint result is `inconclusive`, with a reason such as a work limit or coverage that would require combining old rules.
 
 The overall verdict, `result` at the top level and `containment.result`, also covers the rest of the pass. `containment.loosenings` lists each non-endpoint change that gives NEW more authority, as `{field, before, after}` with the field named as in `changes`: a later `approval.valid_until`, an earlier `approval.valid_from`, a higher `ceilings.NAME`, a new `ceilings.NAME` for a counter NEW does not require every debit to charge (a counter without a ceiling cannot be spent, so removing a ceiling narrows), a counter dropped from `required_counters_v1`, `require_target_v1` turned off, `approval.revoked` turned off, and any change of `approval.owner` or `approval.operator`. A change that only narrows is not listed. The overall verdict is `contained` (exit 0) only when the endpoint result is `contained` and `loosenings` is empty. It is `expanded` when the endpoint result is `expanded`, and `widened` when `loosenings` is not empty and the endpoints are not shown to be expanded; an `inconclusive` endpoint result with no loosenings stays `inconclusive`. Every verdict other than `contained` exits 2, so a gate can rely on the exit code alone. A pure revocation is therefore `contained` (exit 0), while a revocation that also raises a ceiling is `widened`. Before this verdict covered the whole pass, `result` and `containment.result` reported the endpoint result only: a revision that kept the endpoints could be `contained` while it extended the window or raised a ceiling. Read `endpoint_result` for the old meaning. Invalid input exits 1. Label attribution, other instants and costs are outside the endpoint proof. See the accompanying declared-field diff for every edit.
@@ -1176,8 +1202,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `name_restriction_overlaps` (as in `check`, limited to overlaps that
   NEW introduces; their messages are also in `warnings`, acknowledged or
   not, so the reviewer sees what the owner accepted),
-  `order_changed`, `review_required`; `examples`, `budget_impact` or `containment` when
-  requested.
+  `order_changed`, `review_required`, `same_declared_fields`,
+  `text_changes` and `comment_changes` (each `{change, line, text}`; see
+  "Comparing revisions"); `examples`, `budget_impact` or `containment` when
+  requested. Each row of `examples.rows` and `containment.counterexamples`
+  is `{target, name, at, before, after, change, bypasses_names_of}`.
 - **consumer-coverage**: `pass_id`, `digest`, `declared`,
   `require_target`, `findings` (each with its `code`).
 - **lint**: `digest`, `findings`, `truncated`, `window_warnings` (as in "Window warnings").

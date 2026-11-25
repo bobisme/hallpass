@@ -114,14 +114,7 @@ fn render_containment(
         report.at, report.endpoint_result, report.reason, report.compared_pairs
     );
     for row in &report.counterexamples {
-        let _ = writeln!(
-            out.text,
-            "{} ({}): {} -> {}",
-            row.target,
-            row.name.as_deref().unwrap_or("unnamed"),
-            row.before,
-            row.after
-        );
+        let _ = writeln!(out.text, "{}", row_line(row));
     }
     if report.more_counterexamples {
         out.text
@@ -191,15 +184,15 @@ pub fn review_diff(args: &DiffArgs) -> Output {
             );
         }
     };
-    let a = match hallpass::load(old) {
+    let (a, a_bytes) = match hallpass::load_with_bytes(old) {
         Ok(v) => v,
         Err(e) => return error_output("diff", Some(old), &e),
     };
-    let b = match hallpass::load(new) {
+    let (b, b_bytes) = match hallpass::load_with_bytes(new) {
         Ok(v) => v,
         Err(e) => return error_output("diff", Some(new), &e),
     };
-    let mut output = field_output(&a, &b);
+    let mut output = field_output(&a, &b, [&a_bytes, &b_bytes]);
     // NEW's window: the length needs no clock; ended or far-future windows are
     // judged at --at, the only instant diff knows.
     let window = hallpass::review::window_warnings(&b.pass, review_at);
@@ -256,14 +249,7 @@ fn render_examples(
             heading = title;
             let _ = writeln!(out.text, "{title}");
         }
-        let _ = writeln!(
-            out.text,
-            "{} ({}): {} -> {}",
-            row.target,
-            row.name.as_deref().unwrap_or("unnamed"),
-            row.before,
-            row.after
-        );
+        let _ = writeln!(out.text, "{}", row_line(row));
     }
     if sample.refusal_code_changes > 0 && !sample.refusal_code_changes_listed {
         let _ = writeln!(
@@ -279,6 +265,22 @@ fn render_examples(
     out.json["examples"] = json!(sample);
 }
 
+/// One sampled request: `TARGET (NAME or unnamed): BEFORE -> AFTER`, and
+/// the destination whose names list NEW's allowance bypasses.
+fn row_line(row: &hallpass::review::DecisionExample) -> String {
+    let mut line = format!(
+        "{} ({}): {} -> {}",
+        row.target,
+        row.name.as_deref().unwrap_or("unnamed"),
+        row.before,
+        row.after
+    );
+    if let Some(label) = &row.bypasses_names_of {
+        let _ = write!(line, ", bypassing the names list of {label}");
+    }
+    line
+}
+
 /// A changed value as plain text: null and empty read `none`.
 fn plain(value: &serde_json::Value) -> String {
     match value {
@@ -289,10 +291,37 @@ fn plain(value: &serde_json::Value) -> String {
     }
 }
 
-fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
+/// The kinds of `text_changes` as one phrase: `comments (...) and layout (...)`.
+fn text_change_kinds(kinds: &[&str]) -> String {
+    let phrases: Vec<&str> = kinds
+        .iter()
+        .map(|kind| match *kind {
+            "comments" => "comments (added, removed, changed or moved)",
+            "layout" => {
+                "whitespace or layout (spacing, line breaks, key order, or the form of a table or list)"
+            }
+            _ => {
+                "values written another way (such as a time with another offset, or a list in another order)"
+            }
+        })
+        .collect();
+    match phrases.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
+        _ => phrases.concat(),
+    }
+}
+
+fn field_output(a: &LoadedPass, b: &LoadedPass, bytes: [&[u8]; 2]) -> Output {
     let old = &a.path;
     let new = &b.path;
     let report = hallpass::review::diff(a, b);
+    let same_fields = report.same_declared_fields();
+    let changes = if same_fields && report.old_digest != report.new_digest {
+        let [a_text, b_text] = bytes.map(|b| std::str::from_utf8(b).unwrap_or_default());
+        hallpass::review::text_changes(a_text, b_text)
+    } else {
+        hallpass::review::TextChanges::default()
+    };
     let mut text = format!(
         "OLD pass {} digest: {}\nNEW pass {} digest: {}\n",
         report.old_pass_id, report.old_digest, report.new_pass_id, report.new_digest
@@ -341,9 +370,26 @@ fn field_output(a: &LoadedPass, b: &LoadedPass) -> Output {
     if report.order_changed {
         text.push_str("WARNING: common destination order changed; returned label may change.\n");
     }
+    if !changes.kinds.is_empty() {
+        let _ = writeln!(
+            text,
+            "The digests differ, but no declared field does: the files differ only in {}.",
+            text_change_kinds(&changes.kinds)
+        );
+    }
+    for c in &changes.comments {
+        let _ = writeln!(
+            text,
+            "Comment {} ({} line {}): {}",
+            c.change,
+            if c.change == "removed" { "OLD" } else { "NEW" },
+            c.line,
+            super::quoted(&c.text)
+        );
+    }
     Output {
         code: OK,
-        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"introduced_grants":report.introduced_grants,"removed_grants":report.removed_grants,"name_restriction_overlaps":report.name_overlap_warnings,"order_changed":report.order_changed,"review_required":report.review_required,"warnings":report.name_overlap_warnings.iter().map(|w| w.message.as_str()).collect::<Vec<_>>()}),
+        json: json!({"command":"diff","result":"ok","old":old.display().to_string(),"new":new.display().to_string(),"old_pass_id":report.old_pass_id,"new_pass_id":report.new_pass_id,"old_digest":report.old_digest.clone(),"new_digest":report.new_digest.clone(),"approval_id_changed":report.approval_changed,"changes":report.changes,"introduced":report.introduced,"removed":report.removed,"introduced_grants":report.introduced_grants,"removed_grants":report.removed_grants,"name_restriction_overlaps":report.name_overlap_warnings,"order_changed":report.order_changed,"review_required":report.review_required,"same_declared_fields":same_fields,"text_changes":changes.kinds,"comment_changes":changes.comments,"warnings":report.name_overlap_warnings.iter().map(|w| w.message.as_str()).collect::<Vec<_>>()}),
         text,
     }
 }

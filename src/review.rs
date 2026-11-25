@@ -19,6 +19,8 @@ pub use examples::{
 };
 mod coverage;
 pub use coverage::{Capabilities, CoverageFinding, CoverageReport, consumer_coverage};
+mod text;
+pub use text::{CommentChange, TextChanges, text_changes};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldChange {
