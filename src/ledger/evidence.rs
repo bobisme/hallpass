@@ -995,21 +995,37 @@ pub fn compare_backups(
     compare_backups_with_ancestry(loaded, state, paths, false)
 }
 
+/// Refuse a wrong number of backup paths, or a path that is not a regular
+/// file or a link, before reading any of them.
+fn check_backup_paths(paths: &[PathBuf]) -> Result<(), Error> {
+    if !(1..=MAX_BACKUPS).contains(&paths.len()) {
+        return Err(Error::Usage(format!(
+            "supply 1 to {MAX_BACKUPS} explicit backup paths"
+        )));
+    }
+    if let Some(path) = paths.iter().find(|path| {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|meta| !meta.file_type().is_file() && !meta.file_type().is_symlink())
+    }) {
+        return Err(Error::NotRegular { path: path.clone() });
+    }
+    Ok(())
+}
+
 /// Compare backup tips, optionally verifying ancestry among witnessed extensions.
 ///
 /// # Errors
-/// Requires between one and `MAX_BACKUPS` explicit paths.
+/// Requires between one and `MAX_BACKUPS` explicit paths, and refuses with
+/// [`Error::NotRegular`], before reading any, a path that is a FIFO, a
+/// device, a socket or a directory: that is a wrong argument, not a damaged
+/// backup. A link, a missing file or a damaged ledger is reported in its row.
 pub fn compare_backups_with_ancestry(
     loaded: &LoadedPass,
     state: &StateDir,
     paths: &[PathBuf],
     ancestry: bool,
 ) -> Result<BackupReport, Error> {
-    if !(1..=MAX_BACKUPS).contains(&paths.len()) {
-        return Err(Error::Usage(format!(
-            "supply 1 to {MAX_BACKUPS} explicit backup paths"
-        )));
-    }
+    check_backup_paths(paths)?;
     let id = &loaded.pass.id;
     let mut warnings = Vec::new();
     let witness = match state.read(id) {
@@ -1070,6 +1086,8 @@ pub fn compare_backups_with_ancestry(
                 };
                 row.tip = Some(tip);
             }
+            // A lock still held says nothing about the backup: try again.
+            Err(e @ Error::LockTimeout { .. }) => return Err(e),
             Err(e) => {
                 errors += 1;
                 row.error = Some(BackupError {
@@ -1080,7 +1098,9 @@ pub fn compare_backups_with_ancestry(
         }
         candidates.push(row);
     }
-    let ancestry_result = ancestry.then(|| analyze_ancestry(paths, &mut candidates, &mut errors));
+    let ancestry_result = ancestry
+        .then(|| analyze_ancestry(paths, &mut candidates, &mut errors))
+        .transpose()?;
     let extension_count = ancestry_result
         .as_ref()
         .map_or(extensions.len(), |a| a.maximal_groups.len());
@@ -1108,7 +1128,7 @@ fn analyze_ancestry(
     paths: &[PathBuf],
     candidates: &mut [BackupCandidate],
     errors: &mut usize,
-) -> BackupAncestry {
+) -> Result<BackupAncestry, Error> {
     let wanted: BTreeSet<u64> = candidates
         .iter()
         .filter(|c| c.relation == "extended")
@@ -1129,6 +1149,7 @@ fn analyze_ancestry(
             {
                 scans.insert(i + 1, hashes);
             }
+            Err(e @ Error::LockTimeout { .. }) => return Err(e),
             result => {
                 *errors += 1;
                 row.relation = "changed";
@@ -1148,7 +1169,7 @@ fn analyze_ancestry(
         }
     }
     regroup_verified(candidates);
-    ancestry_links(candidates, &scans)
+    Ok(ancestry_links(candidates, &scans))
 }
 
 fn regroup_verified(candidates: &mut [BackupCandidate]) {
@@ -1406,7 +1427,7 @@ mod ancestry_tests {
             .collect();
         spend_in(&pass, &SpendRequest::new("calls", 1), now, &state).expect("advance first copy");
         let mut errors = 0;
-        let ancestry = analyze_ancestry(&paths, &mut candidates, &mut errors);
+        let ancestry = analyze_ancestry(&paths, &mut candidates, &mut errors).expect("ancestry");
         assert_eq!(errors, 1);
         assert_eq!(candidates[0].relation, "changed");
         assert!(candidates[0].tip.is_none());

@@ -198,7 +198,7 @@ impl StateDir {
     pub(crate) fn lock(
         &self,
         pass_id: &str,
-        wait: crate::files::WriterWait,
+        wait: crate::files::LockBudget,
     ) -> Result<File, Error> {
         let dir = self.ensure(pass_id)?;
         let path = dir.join(format!("{pass_id}.lock"));
@@ -497,7 +497,7 @@ mod tests {
             path: resolve(None, None),
         };
         assert!(matches!(
-            none.lock("x", crate::files::WriterWait::default()),
+            none.lock("x", crate::files::LockBudget::default()),
             Err(Error::WitnessUnavailable { .. })
         ));
         assert!(matches!(
@@ -513,7 +513,7 @@ mod tests {
         let state = StateDir::new(tmp.path().join("a").join("hallpass"));
         assert_eq!(state.read("p1").expect("read"), None);
         let lock = state
-            .lock("p1", crate::files::WriterWait::default())
+            .lock("p1", crate::files::LockBudget::default())
             .expect("lock");
         let dir = state.path().expect("dir");
         assert_eq!(
@@ -548,7 +548,7 @@ mod tests {
         ));
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod");
         assert!(matches!(
-            state.lock("p1", crate::files::WriterWait::default()),
+            state.lock("p1", crate::files::LockBudget::default()),
             Err(Error::WitnessUnavailable { .. })
         ));
     }

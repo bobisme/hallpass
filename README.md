@@ -230,7 +230,7 @@ What it does not guard against:
   accidents and casual edits, not a deliberate cheat;
 - the same pass used from two machines or user accounts (each has its own
   witness);
-- a wrong system clock (the window uses the decision clock; status and spends warn if it is strictly earlier than the last ledger event);
+- a wrong system clock (the window uses the decision clock; status, permits and spends warn if it is strictly earlier than the latest time recorded in the ledger);
 - a save over the pass that pauses for more than a quarter second part-way:
   replace the pass with `mv`, and pin the digest (`--digest`) when
   spending while the owner may change the pass;

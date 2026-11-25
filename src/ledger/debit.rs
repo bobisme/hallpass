@@ -326,9 +326,6 @@ impl<'a> SpendChargesRequest<'a> {
     fn validate(&self) -> Result<(), Error> {
         let usage = |message| Error::Usage(format!("{message}; nothing was recorded"));
         validate_unit(self.charges, &self.policy)?;
-        if self.dry_run && self.policy.lock_timeout.is_some() {
-            return Err(usage("a lock timeout applies only to a committing spend"));
-        }
         if self.policy.target.is_none() && self.record_targets {
             return Err(usage("recording a target requires a target"));
         }
@@ -511,7 +508,7 @@ fn spend_using(
         request,
         now,
         warnings,
-        locked.parsed.last_time,
+        locked.parsed.latest,
         reference,
     );
     if result.refusal.is_some() {
@@ -591,10 +588,10 @@ pub(super) fn decide_debit(
     request: &SpendChargesRequest<'_>,
     now: OffsetDateTime,
     mut warnings: Vec<String>,
-    last_time: Option<OffsetDateTime>,
+    latest: Option<(OffsetDateTime, u64)>,
     reference: Option<(Refusal, ReferenceEvidence)>,
 ) -> SpendChargesOutcome {
-    warn_clock_rollback(now, last_time, &mut warnings);
+    warn_clock_rollback(now, latest, &mut warnings);
     let mut charges: Vec<_> = request
         .charges
         .iter()
@@ -687,10 +684,16 @@ fn preview(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendChargesOutcome, Error> {
     let mut matches = request.reference_matches();
-    let (loaded, mut view) = visit_preview_snapshot(pass_path, state, &mut |event| {
-        matches.observe(event);
-        Ok(())
-    })?;
+    let (loaded, mut view) = crate::files::with_requested_wait(
+        request.policy.lock_timeout,
+        request.policy.on_lock_wait,
+        || {
+            visit_preview_snapshot(pass_path, state, &mut |event| {
+                matches.observe(event);
+                Ok(())
+            })
+        },
+    )?;
     let now = clock();
     check_clock(now)?;
     let reference = matches.refusal(
@@ -705,7 +708,7 @@ fn preview(
         request,
         now,
         std::mem::take(&mut view.warnings),
-        view.last_time,
+        view.latest_time,
         reference,
     );
     if outcome.refusal.is_none() {

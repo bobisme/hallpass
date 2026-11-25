@@ -138,8 +138,9 @@ pub fn permits_with_clock_in(
         )));
     }
     let loaded = load(path)?;
-    let view = read_summary(&loaded, state)?;
+    let mut view = read_summary(&loaded, state)?;
     let now = clock();
+    view.warnings.extend(view.clock_warning(now));
     let decision = decide_targets(
         &loaded,
         targets.iter().map(|t| (t.target, t.name.as_ref())),

@@ -84,16 +84,25 @@ enum Command {
         file: PathBuf,
         /// Local version 1 TOML scenario with ordered steps, explicit instants and charge lists.
         scenario: PathBuf,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Count identical debit units that fit the current budgets.
     #[command(
         override_usage = "hallpass capacity [OPTIONS] <FILE> <COUNTER> [--n N]\n       hallpass capacity [OPTIONS] <FILE> --charge COUNTER=N [--charge COUNTER=N ...]"
     )]
-    Capacity(cli_debit::DebitUnit),
+    Capacity {
+        #[command(flatten)]
+        unit: cli_debit::DebitUnit,
+        #[command(flatten)]
+        lock: LockArgs,
+    },
     /// Show who approved, the window, destinations and ceilings.
     Status {
         /// The pass file.
         file: PathBuf,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Say whether a destination is permitted right now.
     Permits {
@@ -111,6 +120,8 @@ enum Command {
         /// Refuse unless the window stays open this many seconds more.
         #[arg(long, value_name = "SECONDS", default_value_t = 0)]
         duration: u32,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Record a spend against a ceiling, atomically, or refuse and record nothing.
     ///
@@ -123,8 +134,8 @@ enum Command {
     Spend {
         #[command(flatten)]
         unit: cli_debit::DebitUnit,
-        /// Maximum milliseconds to acquire both writer locks. Zero tries each once.
-        #[arg(long, value_name = "MILLISECONDS", conflicts_with = "dry_run")]
+        /// Maximum milliseconds to wait in total for both writer locks (with --dry-run, for the ledger lock) while another process holds them. Zero tries each lock once; without it, the spend waits as long as it takes.
+        #[arg(long, value_name = "MILLISECONDS")]
         lock_timeout_ms: Option<u64>,
         /// Retain this caller/run reference with the debit.
         #[arg(long, value_name = "TEXT")]
@@ -160,6 +171,8 @@ enum Command {
         /// Show only entries with sequence number >= SEQ (before --tail). The whole chain is still verified.
         #[arg(long, value_name = "SEQ")]
         since: Option<u64>,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Retain the exact validated pass bytes in a private archive directory.
     Archive {
@@ -186,6 +199,8 @@ enum Command {
         /// Exact, case-sensitive opaque reference supplied at debit time.
         #[arg(long, value_name = "TEXT")]
         caller_ref: String,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Replay retained endpoint decisions using their exact archived passes.
     AuditReceipts {
@@ -195,6 +210,8 @@ enum Command {
         directory: PathBuf,
         #[command(flatten)]
         signatures: cli_verify::SignatureArgs,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Audit historical charges against archived pass revisions.
     AuditCharges {
@@ -204,6 +221,8 @@ enum Command {
         directory: PathBuf,
         #[command(flatten)]
         signatures: cli_verify::SignatureArgs,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Reconcile expected debits from a local JSON manifest.
     Reconcile {
@@ -211,6 +230,8 @@ enum Command {
         file: PathBuf,
         /// Versioned JSON manifest.
         manifest: PathBuf,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Compare explicit ledger backups against a single local witness.
     CompareBackups {
@@ -222,11 +243,15 @@ enum Command {
         /// Verify prefix relationships between witnessed extensions.
         #[arg(long)]
         ancestry: bool,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Export a checkpoint to retain separately from the ledger.
     Checkpoint {
         /// Pass with an existing ledger to checkpoint.
         file: PathBuf,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Verify a ledger against a retained checkpoint JSON file.
     VerifyCheckpoint {
@@ -234,6 +259,8 @@ enum Command {
         ledger: PathBuf,
         /// Retained JSON from the checkpoint command.
         checkpoint: PathBuf,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Accept a ledger that was lost, changed outside hallpass, or has no witness, and record why.
     ///
@@ -251,6 +278,8 @@ enum Command {
         /// Require the exact reviewed preview token.
         #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
         token: Option<String>,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// After an adoption that may have lost lines, record which caller references may be in them, so guarded spends resume.
     ///
@@ -270,6 +299,8 @@ enum Command {
         /// Why the list is complete (one line; it is recorded in the ledger).
         #[arg(long, value_name = "TEXT")]
         reason: String,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Verify an owner's detached SSH signature over the exact validated pass.
     VerifyApproval {
@@ -351,6 +382,17 @@ struct DiffArgs {
     /// RFC 3339 instant for --examples or --containment.
     #[arg(long, value_name = "TIMESTAMP")]
     at: Option<String>,
+    /// With --budget-impact, maximum milliseconds to wait for the ledger lock while another process holds it. Zero tries once; without it, diff waits as long as it takes.
+    #[arg(long, value_name = "MILLISECONDS", requires = "budget_impact")]
+    lock_timeout_ms: Option<u64>,
+}
+
+/// `--lock-timeout-ms` for a command that takes the ledger lock.
+#[derive(clap::Args)]
+struct LockArgs {
+    /// Maximum milliseconds to wait in total for the locks this command takes, while another process holds them. Zero tries each lock once; without it, the command waits as long as it takes.
+    #[arg(long, value_name = "MILLISECONDS")]
+    lock_timeout_ms: Option<u64>,
 }
 
 impl Command {
@@ -361,7 +403,7 @@ impl Command {
             Self::Init { .. } => "init",
             Self::Check { .. } => "check",
             Self::Rehearse { .. } => "rehearse",
-            Self::Capacity(_) => "capacity",
+            Self::Capacity { .. } => "capacity",
             Self::Status { .. } => "status",
             Self::Permits { .. } => "permits",
             Self::Spend { .. } => "spend",
@@ -384,6 +426,43 @@ impl Command {
             Self::Lint { .. } => "lint",
             Self::Cases { .. } => "test-pass",
             Self::ApprovalId { .. } => "approval-id",
+        }
+    }
+
+    /// The `--lock-timeout-ms` of a command that takes the ledger lock.
+    const fn lock_timeout_ms(&self) -> Option<u64> {
+        match self {
+            Self::Rehearse { lock, .. }
+            | Self::Capacity { lock, .. }
+            | Self::Status { lock, .. }
+            | Self::Permits { lock, .. }
+            | Self::Ledger { lock, .. }
+            | Self::Adopt { lock, .. }
+            | Self::ReconcileReferences { lock, .. }
+            | Self::Receipt { lock, .. }
+            | Self::AuditReceipts { lock, .. }
+            | Self::AuditCharges { lock, .. }
+            | Self::Reconcile { lock, .. }
+            | Self::CompareBackups { lock, .. }
+            | Self::Checkpoint { lock, .. }
+            | Self::VerifyCheckpoint { lock, .. } => lock.lock_timeout_ms,
+            Self::Spend {
+                lock_timeout_ms, ..
+            } => *lock_timeout_ms,
+            Self::Diff(args) => args.lock_timeout_ms,
+            // These never take a ledger or witness lock.
+            Self::Help { .. }
+            | Self::Version
+            | Self::Init { .. }
+            | Self::Check { .. }
+            | Self::Digest { .. }
+            | Self::Archive { .. }
+            | Self::Retrieve { .. }
+            | Self::VerifyApproval { .. }
+            | Self::ConsumerCoverage { .. }
+            | Self::Lint { .. }
+            | Self::Cases { .. }
+            | Self::ApprovalId { .. } => None,
         }
     }
 }
@@ -837,9 +916,9 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
         Ok(v) => v,
         Err(e) => return error_output("test-pass", Some(file), &e),
     };
-    let mut file_handle = match std::fs::File::open(cases_file) {
+    let mut file_handle = match hallpass::open_input(cases_file) {
         Ok(v) => v,
-        Err(e) => return error_output("test-pass", Some(cases_file), &Error::Usage(e.to_string())),
+        Err(e) => return error_output("test-pass", Some(cases_file), &e),
     };
     let mut bytes = Vec::new();
     if let Err(e) = file_handle
@@ -1125,9 +1204,7 @@ fn status_with_clock(
         Err(e) => return error_output("status", Some(file), &e),
     };
     let now = sample();
-    if let Some(previous) = view.last_time.filter(|last| now < *last) {
-        view.warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
-    }
+    view.warnings.extend(view.clock_warning(now));
     let tally = &view.tally;
     let pass = &loaded.pass;
     let state = pass.window_at(now);
@@ -1323,16 +1400,19 @@ struct SpendArgs<'a> {
     note: Option<&'a str>,
 }
 
-/// Tell the user, on stderr only (so JSON stdout stays one object), that a
-/// spend is still waiting for the writer lock.
+/// Tell the user, on stderr only (so JSON stdout stays one object), that the
+/// command is still waiting for a lock: the writer lock of a spend, adoption
+/// or reconciliation, or the ledger lock of a read.
 fn announce_lock_wait(wait: &hallpass::LockWait) {
-    let path = wait.path.display();
+    let path = wait.path.display().to_string();
+    let path = safe(&path);
     let who = wait.holder_pid.map_or_else(
         || format!("held by another process; find it with `fuser {path}`"),
         |pid| format!("held by process {pid}"),
     );
+    let lock = if wait.shared { "ledger" } else { "writer" };
     eprintln!(
-        "hallpass: waiting for the writer lock on {path}, {who}. Nothing is recorded yet; press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting."
+        "hallpass: waiting for the {lock} lock on {path}, {who}. Nothing is recorded yet; press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting."
     );
 }
 
@@ -2280,8 +2360,7 @@ fn checkpoint(file: &Path) -> Output {
 
 fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
     let result = (|| {
-        let file = std::fs::File::open(checkpoint)
-            .map_err(|e| Error::Usage(format!("cannot read checkpoint: {e}")))?;
+        let file = hallpass::open_input(checkpoint)?;
         let mut bytes = Vec::new();
         file.take(65537)
             .read_to_end(&mut bytes)
@@ -2346,8 +2425,19 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
     }
 }
 
-#[allow(clippy::too_many_lines)] // One exhaustive dispatch keeps the command mapping reviewable.
+/// Run the command. A command that takes the ledger lock waits for it as long
+/// as its `--lock-timeout-ms` allows, and says on stderr when it has waited a
+/// while.
 fn run(cli: &Cli, format: Format) -> Output {
+    let limit = cli
+        .command
+        .lock_timeout_ms()
+        .map(std::time::Duration::from_millis);
+    hallpass::with_lock_wait(limit, Some(announce_lock_wait), || dispatch(cli, format))
+}
+
+#[allow(clippy::too_many_lines)] // One exhaustive dispatch keeps the command mapping reviewable.
+fn dispatch(cli: &Cli, format: Format) -> Output {
     let name = cli.command.name();
     let clock = match command_clock(&cli.command) {
         Ok(clock) => clock,
@@ -2358,15 +2448,16 @@ fn run(cli: &Cli, format: Format) -> Output {
         Command::Version => cli_help::version(),
         Command::Init { file } => init(file),
         Command::Check { file } => check(file, &clock),
-        Command::Rehearse { file, scenario } => rehearse(file, scenario),
-        Command::Capacity(unit) => cli_debit::run_capacity(unit, &clock),
-        Command::Status { file } => status(file, &clock),
+        Command::Rehearse { file, scenario, .. } => rehearse(file, scenario),
+        Command::Capacity { unit, .. } => cli_debit::run_capacity(unit, &clock),
+        Command::Status { file, .. } => status(file, &clock),
         Command::Permits {
             file,
             to,
             name,
             duration,
             digest,
+            ..
         } => permits(
             file,
             to,
@@ -2401,6 +2492,7 @@ fn run(cli: &Cli, format: Format) -> Output {
             counter,
             tail,
             since,
+            ..
         } => ledger(file, counter.as_deref(), *tail, *since),
         Command::Archive { file, directory } => archive(file, directory),
         Command::Retrieve {
@@ -2408,30 +2500,38 @@ fn run(cli: &Cli, format: Format) -> Output {
             digest,
             output,
         } => retrieve(directory, digest, output.as_deref()),
-        Command::Receipt { file, caller_ref } => cli_evidence::receipt(file, caller_ref),
+        Command::Receipt {
+            file, caller_ref, ..
+        } => cli_evidence::receipt(file, caller_ref),
         Command::AuditReceipts {
             file,
             directory,
             signatures,
+            ..
         } => cli_evidence::audit(file, directory, signatures),
         Command::AuditCharges {
             file,
             directory,
             signatures,
+            ..
         } => cli_evidence::audit_charges(file, directory, signatures),
-        Command::Reconcile { file, manifest } => cli_evidence::reconcile(file, manifest),
+        Command::Reconcile { file, manifest, .. } => cli_evidence::reconcile(file, manifest),
         Command::CompareBackups {
             file,
             candidates,
             ancestry,
+            ..
         } => cli_evidence::backups(file, candidates, *ancestry),
-        Command::Checkpoint { file } => checkpoint(file),
-        Command::VerifyCheckpoint { ledger, checkpoint } => verify_checkpoint(ledger, checkpoint),
+        Command::Checkpoint { file, .. } => checkpoint(file),
+        Command::VerifyCheckpoint {
+            ledger, checkpoint, ..
+        } => verify_checkpoint(ledger, checkpoint),
         Command::Adopt {
             file,
             reason,
             preview,
             token,
+            ..
         } => {
             if *preview {
                 preview_adopt(file)
@@ -2449,6 +2549,7 @@ fn run(cli: &Cli, format: Format) -> Output {
             adoption,
             references,
             reason,
+            ..
         } => reconcile_references(file, *adoption, references, reason, &clock),
         Command::VerifyApproval {
             file,

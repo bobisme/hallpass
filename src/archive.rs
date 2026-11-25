@@ -49,7 +49,17 @@ fn directory(dir: &Path) -> Result<fs::File, Error> {
             advice: "check that nothing in this directory was changed by someone else",
         });
     }
-    let file = fs::File::open(dir).map_err(|e| Error::io(dir, &e))?;
+    // Only a directory opens, and not through a link, so a FIFO swapped in
+    // since the check cannot block the open.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW)
+                .bits()
+                .cast_signed(),
+        )
+        .open(dir)
+        .map_err(|e| Error::io(dir, &e))?;
     let opened = file.metadata().map_err(|e| Error::io(dir, &e))?;
     if opened.dev() != meta.dev() || opened.ino() != meta.ino() || opened.mode() & 0o077 != 0 {
         return Err(Error::Usage(

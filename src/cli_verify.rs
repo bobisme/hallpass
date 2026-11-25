@@ -20,35 +20,20 @@ use serde_json::json;
 /// audits digest.
 const MAX_TRUST_BYTES: u64 = 16 * 1024 * 1024;
 
-fn input_path(path: &Path) -> Result<PathBuf, Error> {
+/// The bytes of a signature or trust file, read once. It is opened as a pass
+/// is: never through a link, only a regular file, without blocking on a FIFO.
+fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
     // An absolute name also keeps a literal "-" from acquiring stdin semantics.
     let full = std::path::absolute(path).map_err(|e| Error::Io {
         path: path.into(),
         message: e.to_string(),
     })?;
-    let meta = std::fs::metadata(&full).map_err(|e| Error::Io {
-        path: full.clone(),
-        message: e.to_string(),
-    })?;
-    if !meta.is_file() {
-        return Err(Error::Usage(format!(
-            "expected a regular signature or trust file at {}",
-            full.display()
-        )));
-    }
-    Ok(full)
-}
-
-/// The bytes of a signature or trust file, read once.
-fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
-    let full = input_path(path)?;
     let io = |e: &io::Error| Error::Io {
         path: full.clone(),
         message: e.to_string(),
     };
     let mut bytes = Vec::new();
-    std::fs::File::open(&full)
-        .map_err(|e| io(&e))?
+    hallpass::open_input(&full)?
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| io(&e))?;

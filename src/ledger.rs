@@ -30,7 +30,9 @@ use time::{Duration, OffsetDateTime};
 use crate::address::Target;
 use crate::decision::{Refusal, RefusalCode, in_utc, stamp};
 use crate::error::{ElsewhereLedger, Error, MissingLedger};
-use crate::files::{Digest, LoadedPass, WriterWait, load, open_no_follow};
+use crate::files::{
+    Digest, LoadedPass, LockBudget, load, lock_shared, open_no_follow, with_requested_wait,
+};
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
 use crate::request::{TargetRefusal, decide_targets};
@@ -121,11 +123,14 @@ pub struct SpendRequest<'a> {
     /// the work this spend pays for may take. Zero means "right now"; a
     /// negative duration is a usage error.
     pub needed: Duration,
-    /// Maximum total wait for the writer locks on a real spend. Zero asks once
-    /// per lock; None waits indefinitely. This excludes post-lock I/O.
+    /// Maximum total wait for the locks: both writer locks on a real spend,
+    /// the shared ledger lock on a preview. Zero asks once per lock; None
+    /// waits indefinitely, or as an enclosing [`crate::with_lock_wait`]
+    /// allows. This excludes post-lock I/O.
     pub lock_timeout: Option<std::time::Duration>,
-    /// Called once, from the waiting thread, when a writer lock has been
-    /// busy for about two seconds. The library prints nothing itself.
+    /// Called once, from the waiting thread, when a lock has been busy for
+    /// about two seconds. The library prints nothing itself. None uses the
+    /// function of an enclosing [`crate::with_lock_wait`], if any.
     pub on_lock_wait: Option<fn(&crate::files::LockWait)>,
     /// What is about to be touched. When set, the spend is also refused,
     /// and nothing is recorded, unless the pass permits this target now
@@ -600,8 +605,12 @@ pub struct LedgerView {
     pub unreconciled_adoption: Option<u64>,
     /// The totals (spends and carried amounts).
     pub tally: Tally,
-    /// Timestamp of the latest recorded event, if any.
+    /// The time of the last line, if any. A line after one written with a
+    /// clock set ahead can have an earlier time: see `latest_time`.
     pub last_time: Option<OffsetDateTime>,
+    /// The latest time recorded on any line, and the sequence number of the
+    /// first line that records it. A decision clock before it was set back.
+    pub latest_time: Option<(OffsetDateTime, u64)>,
     /// Number of adoption records.
     pub adoption_count: u64,
     /// How the ledger compares with its witness.
@@ -631,6 +640,8 @@ struct Parsed {
     tail: Digest,
     prefix: Option<(u64, Digest)>,
     last_time: Option<OffsetDateTime>,
+    /// The latest time on any line, and the first line that records it.
+    latest: Option<(OffsetDateTime, u64)>,
     adoption_count: u64,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
@@ -876,6 +887,7 @@ fn scan_ledger(
         tail: Digest::of(&first),
         prefix: (requested == Some(0)).then(|| (0, Digest::of(&first))),
         last_time: None,
+        latest: None,
         adoption_count: 0,
         seq: 0,
         valid_targets: Vec::new(),
@@ -951,6 +963,11 @@ fn scan_ledger(
             }
         }
         parsed.seq = seq;
+        if let Some(time) = parsed.last_time
+            && parsed.latest.is_none_or(|(latest, _)| time > latest)
+        {
+            parsed.latest = Some((time, seq));
+        }
         parsed.tail = Digest::of(&line);
         record_checkpoint(&mut checkpoints, seq, parsed.tail);
         if requested == Some(seq) {
@@ -1195,7 +1212,7 @@ fn read_shared(
     }
     let file = open_no_follow(&path, OpenOptions::new().read(true))?;
     check_private(&path, &file)?;
-    file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+    lock_shared(&file, &path)?;
     let parsed = parse_ledger(
         &path,
         BufReader::new(&file),
@@ -1413,7 +1430,7 @@ fn visit_view(
     let file = if exists(&path)? {
         let file = open_no_follow(&path, OpenOptions::new().read(true))?;
         check_private(&path, &file)?;
-        file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+        lock_shared(&file, &path)?;
         Some(file)
     } else {
         None
@@ -1455,6 +1472,7 @@ fn visit_view(
         tail: Digest::of(b""),
         prefix: None,
         last_time: None,
+        latest: None,
         adoption_count: 0,
         seq: 0,
         valid_targets: Vec::new(),
@@ -1477,6 +1495,7 @@ fn visit_view(
         reconciliations: parsed.reconciliations,
         tally: parsed.tally,
         last_time: parsed.last_time,
+        latest_time: parsed.latest,
         adoption_count: parsed.adoption_count,
         witness,
         moved_from: moved,
@@ -1599,7 +1618,7 @@ pub fn export_checkpoint_observed(
     }
     let file = open_no_follow(&path, OpenOptions::new().read(true))?;
     check_private(&path, &file)?;
-    file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+    lock_shared(&file, &path)?;
     let witness = state.read(&loaded.pass.id)?;
     let parsed = parse_ledger(
         &path,
@@ -1668,7 +1687,7 @@ pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<Checkpo
 fn inspect_candidate(path: &Path, requested: Option<u64>) -> Result<Parsed, Error> {
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     check_private(path, &file)?;
-    file.lock_shared().map_err(|e| Error::io(path, &e))?;
+    lock_shared(&file, path)?;
     scan_ledger(
         path,
         BufReader::new(&file),
@@ -1685,7 +1704,7 @@ fn inspect_candidate_checkpoints(
 ) -> Result<(Parsed, BTreeMap<u64, Digest>), Error> {
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     check_private(path, &file)?;
-    file.lock_shared().map_err(|e| Error::io(path, &e))?;
+    lock_shared(&file, path)?;
     let mut found = BTreeMap::new();
     let parsed = scan_ledger(
         path,
@@ -1896,7 +1915,7 @@ fn lock_for_writing_notifying(
         check_token_shape(token, pass_path)?;
     }
     let id = load(pass_path)?.pass.id;
-    let wait = WriterWait::new(lock_timeout).notifying(on_wait);
+    let wait = LockBudget::requested(lock_timeout, on_wait);
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
     if let Some(expected) = guard {
@@ -2127,14 +2146,13 @@ pub fn spend_with_clock_in(
     let (here, warnings) = prepare_witness(pass_path, &locked, state, true)?;
     let now = clock();
     check_clock(now)?;
-    let last = locked.parsed.last_time;
     let mut outcome = evaluate_spend(
         &locked.loaded,
         request,
         &locked.parsed.tally,
         now,
         warnings,
-        last,
+        locked.parsed.latest,
     );
     if outcome.refusal.is_some() {
         return Ok(outcome);
@@ -2176,14 +2194,26 @@ pub fn spend_with_clock_in(
     Ok(outcome)
 }
 
+/// The warning for a decision clock before `latest`, the latest time recorded
+/// in the ledger and the line that records it, when it is before.
+fn clock_rollback_warning(
+    now: OffsetDateTime,
+    latest: Option<(OffsetDateTime, u64)>,
+) -> Option<String> {
+    let (time, seq) = latest.filter(|(time, _)| now < *time)?;
+    Some(format!(
+        "the decision clock ({}) precedes {}, the latest time recorded in the ledger (sequence {seq}); check the system clock before continuing",
+        stamp(now),
+        stamp(time)
+    ))
+}
+
 fn warn_clock_rollback(
     now: OffsetDateTime,
-    last_time: Option<OffsetDateTime>,
+    latest: Option<(OffsetDateTime, u64)>,
     warnings: &mut Vec<String>,
 ) {
-    if let Some(previous) = last_time.filter(|t| now < *t) {
-        warnings.push(format!("the decision clock ({}) precedes the last ledger entry ({}); check the system clock before continuing", stamp(now), stamp(previous)));
-    }
+    warnings.extend(clock_rollback_warning(now, latest));
 }
 
 fn evaluate_spend(
@@ -2192,9 +2222,9 @@ fn evaluate_spend(
     tally: &Tally,
     now: OffsetDateTime,
     mut warnings: Vec<String>,
-    last_time: Option<OffsetDateTime>,
+    latest: Option<(OffsetDateTime, u64)>,
 ) -> SpendOutcome {
-    warn_clock_rollback(now, last_time, &mut warnings);
+    warn_clock_rollback(now, latest, &mut warnings);
     let total = loaded.pass.ceilings.get(request.counter).copied();
     let spent = tally.spent(request.counter);
     let mut outcome = SpendOutcome {
@@ -2257,12 +2287,10 @@ pub fn preview_spend_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<SpendOutcome, Error> {
     validate_request(request)?;
-    if request.lock_timeout.is_some() {
-        return Err(Error::Usage(
-            "a lock timeout applies only to a committing spend".into(),
-        ));
-    }
-    let (loaded, mut view) = preview_snapshot(path, state)?;
+    let (loaded, mut view) =
+        with_requested_wait(request.lock_timeout, request.on_lock_wait, || {
+            preview_snapshot(path, state)
+        })?;
     let now = clock();
     check_clock(now)?;
     let outcome = evaluate_spend(
@@ -2271,7 +2299,7 @@ pub fn preview_spend_with_clock_in(
         &view.tally,
         now,
         std::mem::take(&mut view.warnings),
-        view.last_time,
+        view.latest_time,
     );
     if outcome.refusal.is_none() {
         let projected = view.tally.spent(request.counter) + request.amount;
@@ -2284,6 +2312,15 @@ pub fn preview_spend_with_clock_in(
 }
 
 impl LedgerView {
+    /// A warning when the decision clock `now` is before the latest time
+    /// recorded in the ledger, naming that time and its sequence number: the
+    /// clock was set back, or a line was written with a clock set ahead.
+    /// Spends, previews, `permits` and `status` give it.
+    #[must_use]
+    pub fn clock_warning(&self, now: OffsetDateTime) -> Option<String> {
+        clock_rollback_warning(now, self.latest_time)
+    }
+
     fn check_next_witness(&self, state: &StateDir, id: &str) -> Result<(), Error> {
         check_projected_witness_size(
             state,
@@ -2532,7 +2569,7 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
     let file = if exists(&path)? {
         let file = open_no_follow(&path, OpenOptions::new().read(true))?;
         check_private(&path, &file)?;
-        file.lock_shared().map_err(|e| Error::io(&path, &e))?;
+        lock_shared(&file, &path)?;
         Some(file)
     } else {
         None
@@ -2821,7 +2858,7 @@ mod tests {
             assert_eq!(
                 out.warnings
                     .iter()
-                    .any(|s| s.contains("precedes the last ledger entry")),
+                    .any(|s| s.contains("the latest time recorded in the ledger")),
                 warn
             );
         }
@@ -2944,7 +2981,7 @@ mod tests {
         let id = &loaded.pass.id;
         let ledger = ledger_path(&path);
         let witness_path = state.witness_path(id).expect("witness");
-        let fixture_lock = state.lock(id, WriterWait::default()).expect("lock");
+        let fixture_lock = state.lock(id, LockBudget::default()).expect("lock");
         let mut witness = Witnessed {
             ledger: ledger_identity(&ledger),
             seq: 1,

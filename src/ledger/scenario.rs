@@ -164,7 +164,7 @@ impl ValidatedStep {
         &self,
         pass: &LoadedPass,
         tally: &Tally,
-        last: Option<OffsetDateTime>,
+        latest: Option<(OffsetDateTime, u64)>,
     ) -> SpendChargesOutcome {
         let charges: Vec<_> = self
             .input
@@ -183,7 +183,15 @@ impl ValidatedStep {
             request.policy.name = first.name.as_ref();
             request.policy.additional_targets = rest;
         }
-        decide_debit(pass, tally, &request, self.instant, Vec::new(), last, None)
+        decide_debit(
+            pass,
+            tally,
+            &request,
+            self.instant,
+            Vec::new(),
+            latest,
+            None,
+        )
     }
 }
 
@@ -212,7 +220,9 @@ pub fn rehearse(
         let mut refusal = None;
         let mut status = "unevaluated";
         if stopped_at.is_none() {
-            let decision = step.decide(&loaded, &view.tally, view.last_time);
+            // Steps are in time order, so only a time recorded in the ledger
+            // can be later than a step.
+            let decision = step.decide(&loaded, &view.tally, view.latest_time);
             view.warnings.extend(decision.warnings);
             labels = decision.labels;
             for c in decision.charges {
@@ -237,7 +247,6 @@ pub fn rehearse(
                 });
             } else {
                 status = "would-allow";
-                view.last_time = Some(step.instant);
             }
         }
         results.push(StepResult {

@@ -86,15 +86,13 @@ pub fn capacity_with_clock_in(
     clock: impl FnOnce() -> OffsetDateTime,
 ) -> Result<CapacityOutcome, Error> {
     validate_unit(charges, policy)?;
-    if policy.lock_timeout.is_some() {
-        return Err(Error::Usage(
-            "a lock timeout applies only to a committing spend".into(),
-        ));
-    }
-    let (loaded, mut view) = preview_snapshot(path, state)?;
+    let (loaded, mut view) =
+        crate::files::with_requested_wait(policy.lock_timeout, policy.on_lock_wait, || {
+            preview_snapshot(path, state)
+        })?;
     let now = clock();
     check_clock(now)?;
-    warn_clock_rollback(now, view.last_time, &mut view.warnings);
+    warn_clock_rollback(now, view.latest_time, &mut view.warnings);
     let decision = decide_debit_policy(&loaded, policy, charges, now).and_then(|labels| {
         let mut counters = Vec::with_capacity(charges.len());
         for charge in charges {

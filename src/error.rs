@@ -22,7 +22,7 @@ pub enum Error {
     },
     /// The path is a symbolic link, which hallpass never follows.
     #[error(
-        "{} is a symbolic link; hallpass does not follow links for a pass or a ledger. Use the path of the real file.",
+        "{} is a symbolic link; hallpass does not follow links for a pass, a ledger or any other file it reads. Use the path of the real file.",
         path.display()
     )]
     Symlink {
@@ -30,7 +30,7 @@ pub enum Error {
         path: PathBuf,
     },
     /// The path is not a regular file.
-    #[error("{} is not a regular file (it is a directory, pipe, device or other special file). hallpass reads only regular files. For a pass, give the path of the pass file. For a ledger, check the path and restore the ledger file from a backup.", path.display())]
+    #[error("{} is not a regular file (it is a directory, pipe, device or other special file). hallpass reads only regular files. For a pass, give the path of the pass file. For a ledger, check the path and restore the ledger file from a backup. For any other input, save it to a regular file and give that path.", path.display())]
     NotRegular {
         /// The path.
         path: PathBuf,
@@ -189,8 +189,9 @@ pub enum Error {
         event: String,
         detail: String,
     },
-    /// The lock-wait budget expired before any debit was appended.
-    #[error("timed out acquiring the writer lock on {}; this spend recorded no debit. Retry, or find and stop the process holding it (`fuser {}`). The lock is released automatically when its holder exits or crashes, so a stale lock does not need removing.", path.display(), path.display())]
+    /// The lock-wait budget ran out before the command took the lock, so it
+    /// read and recorded nothing.
+    #[error("timed out waiting for the lock on {}, which another process holds; this command recorded nothing. Retry, or find and stop the process holding it (`fuser {}`). The lock is released automatically when its holder exits or crashes, so a stale lock does not need removing.", path.display(), path.display())]
     LockTimeout { path: PathBuf },
     /// The file already exists (`init` and `retrieve --output` never overwrite).
     #[error("{} already exists; hallpass never overwrites a file or follows a link (`init`, `retrieve --output`). Choose another path.", path.display())]

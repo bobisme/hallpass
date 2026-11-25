@@ -13,12 +13,14 @@ use sha2::{Digest as _, Sha256};
 use crate::error::Error;
 use crate::pass::Pass;
 
-/// How long a spend waits for a writer lock before it reports the wait.
+/// How long a command waits for a lock before it reports the wait.
 pub const LOCK_WAIT_NOTICE_AFTER: Duration = Duration::from_secs(2);
 
-/// A report that a writer lock has been busy for a while. The library never
-/// prints; a caller that wants to tell its user sets
-/// [`crate::SpendRequest::on_lock_wait`].
+/// A report that a ledger or witness lock has been busy for a while.
+///
+/// The library never prints; a caller that wants to tell its user sets
+/// [`crate::SpendRequest::on_lock_wait`], or passes a function to
+/// [`with_lock_wait`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LockWait {
@@ -27,6 +29,9 @@ pub struct LockWait {
     /// The process holding the lock, when it could be found (Linux, from
     /// `/proc/locks`; the id is as seen from this process's namespace).
     pub holder_pid: Option<u32>,
+    /// True for a shared lock, taken to read the ledger; false for an
+    /// exclusive lock, taken to write the ledger or the witness.
+    pub shared: bool,
 }
 
 /// The holder of the `flock` on `file`, from `/proc/locks`. None when it is
@@ -53,24 +58,129 @@ fn lock_holder(file: &File) -> Option<u32> {
     })
 }
 
-/// One monotonic budget for the witness and ledger writer locks.
-#[derive(Clone, Copy, Default)]
-pub struct WriterWait {
-    limit: Option<(std::time::Instant, Duration)>,
+/// The lock wait that [`with_lock_wait`] set on this thread: what is left of
+/// its budget, and who hears about a long wait.
+#[derive(Clone, Copy)]
+struct Scope {
+    left: Option<Duration>,
     notify: Option<fn(&LockWait)>,
 }
 
-impl WriterWait {
+thread_local! {
+    static SCOPE: std::cell::Cell<Option<Scope>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with a bound on how long it waits for ledger and witness locks.
+///
+/// A read ([`crate::read_ledger`], [`crate::permits_in`], an audit, a
+/// checkpoint, a preview) takes a shared lock on the ledger, and waits while
+/// a spend, an adoption or another process holds it exclusively. The read
+/// functions have no request to carry a limit, so it is set around the call:
+///
+/// ```no_run
+/// use std::time::Duration;
+/// # let path = std::path::Path::new("engagement.pass.toml");
+/// # let state = hallpass::StateDir::from_env();
+/// let view = hallpass::with_lock_wait(Some(Duration::from_secs(5)), None, || {
+///     hallpass::read_summary(&hallpass::load(path)?, &state)
+/// })?;
+/// # Ok::<(), hallpass::Error>(())
+/// ```
+///
+/// `lock_timeout` means what [`crate::SpendRequest::lock_timeout`] means:
+/// the most time, in total, that the calls in `f` wait for every lock they
+/// take. Zero tries each lock once, and `None` waits without limit. A wait
+/// that reaches the limit fails with [`Error::LockTimeout`]. Time spent
+/// reading is not counted, only time spent waiting. `on_lock_wait` is called
+/// once for each lock that stays busy for about two seconds, from the waiting
+/// thread or a helper thread.
+///
+/// The bound holds on this thread only, for the duration of `f`; the scope
+/// before it is restored afterwards, even if `f` panics. A
+/// [`crate::SpendRequest`] whose own `lock_timeout` or `on_lock_wait` is set
+/// uses that field instead of this one.
+pub fn with_lock_wait<T>(
+    lock_timeout: Option<Duration>,
+    on_lock_wait: Option<fn(&LockWait)>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Scope>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCOPE.set(self.0);
+        }
+    }
+    let _restore = Restore(SCOPE.replace(Some(Scope {
+        left: lock_timeout,
+        notify: on_lock_wait,
+    })));
+    f()
+}
+
+/// Run `f` with a request's own limit and notice, each one that is not set
+/// taken from the current [`with_lock_wait`] scope.
+pub fn with_requested_wait<T>(
+    lock_timeout: Option<Duration>,
+    on_lock_wait: Option<fn(&LockWait)>,
+    f: impl FnOnce() -> T,
+) -> T {
+    if lock_timeout.is_none() && on_lock_wait.is_none() {
+        return f();
+    }
+    let scope = SCOPE.get();
+    with_lock_wait(
+        lock_timeout.or_else(|| scope.and_then(|s| s.left)),
+        on_lock_wait.or_else(|| scope.and_then(|s| s.notify)),
+        f,
+    )
+}
+
+/// Take away `waited` from what is left of the current scope's budget.
+fn charge_scope(waited: Duration) {
+    if let Some(mut scope) = SCOPE.get() {
+        scope.left = scope.left.map(|left| left.saturating_sub(waited));
+        SCOPE.set(Some(scope));
+    }
+}
+
+/// Take a shared lock on the ledger `file`, waiting as the current
+/// [`with_lock_wait`] scope allows.
+pub fn lock_shared(file: &File, path: &Path) -> Result<(), Error> {
+    LockBudget::requested(None, None).shared(file, path, |e| Error::io(path, e))
+}
+
+/// One monotonic budget for the locks a call takes: the witness and ledger
+/// writer locks of a spend, or the shared ledger lock of a read.
+#[derive(Clone, Copy, Default)]
+pub struct LockBudget {
+    limit: Option<(std::time::Instant, Duration)>,
+    notify: Option<fn(&LockWait)>,
+    /// True when the limit is the scope's, so the time waited is taken from it.
+    scoped: bool,
+}
+
+impl LockBudget {
     pub(crate) fn new(limit: Option<Duration>) -> Self {
         Self {
             limit: limit.map(|limit| (std::time::Instant::now(), limit)),
             notify: None,
+            scoped: false,
         }
     }
 
     pub(crate) const fn notifying(mut self, notify: Option<fn(&LockWait)>) -> Self {
         self.notify = notify;
         self
+    }
+
+    /// A request's own limit and notice; each one that is not set comes from
+    /// the current [`with_lock_wait`] scope, or is none.
+    pub(crate) fn requested(limit: Option<Duration>, notify: Option<fn(&LockWait)>) -> Self {
+        let scope = SCOPE.get();
+        let mut budget = Self::new(limit.or_else(|| scope.and_then(|s| s.left)))
+            .notifying(notify.or_else(|| scope.and_then(|s| s.notify)));
+        budget.scoped = limit.is_none();
+        budget
     }
 
     fn poll_interval(left: Duration) -> Duration {
@@ -81,19 +191,67 @@ impl WriterWait {
             .min(left)
     }
 
+    /// Take the exclusive lock on `file`.
     pub(crate) fn exclusive(
         self,
         file: &File,
         path: &Path,
         io_error: impl FnOnce(&std::io::Error) -> Error,
     ) -> Result<(), Error> {
+        self.acquire(file, path, false, io_error)
+    }
+
+    /// Take a shared lock on `file`.
+    pub(crate) fn shared(
+        self,
+        file: &File,
+        path: &Path,
+        io_error: impl FnOnce(&std::io::Error) -> Error,
+    ) -> Result<(), Error> {
+        self.acquire(file, path, true, io_error)
+    }
+
+    fn acquire(
+        self,
+        file: &File,
+        path: &Path,
+        shared: bool,
+        io_error: impl FnOnce(&std::io::Error) -> Error,
+    ) -> Result<(), Error> {
+        let began = std::time::Instant::now();
+        let result = self.wait(file, path, shared, io_error);
+        if self.scoped {
+            charge_scope(began.elapsed());
+        }
+        result
+    }
+
+    fn wait(
+        self,
+        file: &File,
+        path: &Path,
+        shared: bool,
+        io_error: impl FnOnce(&std::io::Error) -> Error,
+    ) -> Result<(), Error> {
         use std::fs::TryLockError;
+        let lock = || {
+            if shared {
+                file.lock_shared()
+            } else {
+                file.lock()
+            }
+        };
+        let report = || LockWait {
+            path: path.to_owned(),
+            holder_pid: lock_holder(file),
+            shared,
+        };
         let Some((start, limit)) = self.limit else {
             // No budget: take the blocking lock, so the kernel queues and
             // wakes waiters instead of pollers racing. A notice, when wanted,
             // comes from a timer thread that stands down once the lock is held.
             let Some(notify) = self.notify else {
-                return file.lock().map_err(|e| io_error(&e));
+                return lock().map_err(|e| io_error(&e));
             };
             return std::thread::scope(|scope| {
                 let (done, timer) = std::sync::mpsc::channel::<()>();
@@ -103,13 +261,10 @@ impl WriterWait {
                     if timer.recv_timeout(LOCK_WAIT_NOTICE_AFTER)
                         == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                     {
-                        notify(&LockWait {
-                            path: path.to_owned(),
-                            holder_pid: lock_holder(file),
-                        });
+                        notify(&report());
                     }
                 });
-                let result = file.lock().map_err(|e| io_error(&e));
+                let result = lock().map_err(|e| io_error(&e));
                 drop(done);
                 result
             });
@@ -121,7 +276,12 @@ impl WriterWait {
         let began = std::time::Instant::now();
         let mut told = false;
         loop {
-            match file.try_lock() {
+            let attempt = if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            };
+            match attempt {
                 Ok(()) => return Ok(()),
                 Err(TryLockError::Error(e)) => return Err(io_error(&e)),
                 Err(TryLockError::WouldBlock) => {}
@@ -131,10 +291,7 @@ impl WriterWait {
                 && began.elapsed() >= LOCK_WAIT_NOTICE_AFTER
             {
                 told = true;
-                notify(&LockWait {
-                    path: path.to_owned(),
-                    holder_pid: lock_holder(file),
-                });
+                notify(&report());
             }
             let left = limit.saturating_sub(start.elapsed());
             if left.is_zero() {
@@ -251,7 +408,13 @@ pub struct LoadedPass {
 /// Open `path` with `options` only if it is a regular file and not a
 /// symbolic link. The file opened is checked to be the one inspected, so a
 /// link swapped in between is refused too.
+///
+/// The open itself neither follows a link nor blocks: a FIFO or a device
+/// swapped in after the check is opened without waiting for a writer, then
+/// refused as [`Error::NotRegular`].
 pub fn open_no_follow(path: &Path, options: &OpenOptions) -> Result<File, Error> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let before = fs::symlink_metadata(path).map_err(|e| Error::io(path, &e))?;
     if before.file_type().is_symlink() {
         return Err(Error::Symlink {
@@ -263,14 +426,47 @@ pub fn open_no_follow(path: &Path, options: &OpenOptions) -> Result<File, Error>
             path: path.to_path_buf(),
         });
     }
-    let file = options.open(path).map_err(|e| Error::io(path, &e))?;
+    let mut options = options.clone();
+    options.custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed());
+    let file = options.open(path).map_err(|e| {
+        if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            Error::Symlink {
+                path: path.to_path_buf(),
+            }
+        } else {
+            Error::io(path, &e)
+        }
+    })?;
     let after = file.metadata().map_err(|e| Error::io(path, &e))?;
+    if !after.file_type().is_file() {
+        return Err(Error::NotRegular {
+            path: path.to_path_buf(),
+        });
+    }
     if after.dev() != before.dev() || after.ino() != before.ino() {
         return Err(Error::Symlink {
             path: path.to_path_buf(),
         });
     }
+    // Reads and writes of a regular file do not block anyway; clear the
+    // flag so that the descriptor is the one a plain open gives.
+    let flags = rustix::fs::fcntl_getfl(&file).map_err(|e| Error::io(path, &e.into()))?;
+    rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK)
+        .map_err(|e| Error::io(path, &e.into()))?;
     Ok(file)
+}
+
+/// Open an input file for reading as hallpass opens a pass.
+///
+/// It is never opened through a symbolic link, only a regular file is
+/// opened, and a FIFO or a device does not block the open. A case suite, a
+/// checkpoint, a signature or a trusted signers file is opened this way.
+///
+/// # Errors
+///
+/// [`Error::Symlink`], [`Error::NotRegular`] or [`Error::Io`].
+pub fn open_input(path: &Path) -> Result<File, Error> {
+    open_no_follow(path, OpenOptions::new().read(true))
 }
 
 pub fn writable_directory(path: &Path) -> Result<(), Error> {
@@ -566,18 +762,18 @@ mod tests {
     #[test]
     fn short_writer_deadlines_leave_time_for_more_probes() {
         let short = Duration::from_millis(4);
-        let first = WriterWait::poll_interval(short);
+        let first = LockBudget::poll_interval(short);
         assert!(first > Duration::ZERO && first < short);
         let remaining = short.checked_sub(first).expect("within deadline");
-        let second = WriterWait::poll_interval(remaining);
+        let second = LockBudget::poll_interval(remaining);
         assert!(second > Duration::ZERO && second < remaining);
         assert_eq!(
-            WriterWait::poll_interval(Duration::from_secs(1)),
+            LockBudget::poll_interval(Duration::from_secs(1)),
             Duration::from_millis(5)
         );
         // Honor even the smallest residual budget, without a zero-length sleep.
         assert_eq!(
-            WriterWait::poll_interval(Duration::from_nanos(1)),
+            LockBudget::poll_interval(Duration::from_nanos(1)),
             Duration::from_nanos(1)
         );
     }

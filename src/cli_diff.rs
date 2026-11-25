@@ -150,6 +150,7 @@ pub fn review_diff(args: &DiffArgs) -> Output {
         budget_impact,
         containment,
         refusal_changes,
+        ..
     } = args;
     if at.is_some() && !*examples && !*containment {
         return error_output(

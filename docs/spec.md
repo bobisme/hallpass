@@ -360,27 +360,58 @@ compare-backups`, and not editing lines by hand. The error code stays
 
 #### Lock wait
 
-On a committing spend, `--lock-timeout-ms N` gives both writer locks one
-shared monotonic wait budget. Zero requests one nonblocking attempt per lock.
-Omitting the option uses blocking locks. A timeout exits 1 with
-`error.code = "lock-timeout"` and `error.recording = "not-recorded"`.
-The budget covers lock acquisition. It places no deadline on a subsequent
-append or sync. An external process timeout can leave the outcome unknown.
+Every command that takes the ledger lock accepts `--lock-timeout-ms N`:
+`spend` (with `--dry-run` too), `adopt` (with `--preview` too),
+`reconcile-references`, `permits`, `status`, `ledger`, `capacity`,
+`rehearse`, `receipt`, `audit-receipts`, `audit-charges`, `reconcile`,
+`compare-backups`, `checkpoint`, `verify-checkpoint`, and `diff` with
+`--budget-impact`. A read takes a shared lock on the ledger, so it waits only
+while a writer holds the ledger lock: a spend, an adoption, a reference
+reconciliation, or another process. A writer takes the witness lock and then
+the ledger lock, both exclusive.
+
+N is one monotonic wait budget for every lock the command takes: on a
+committing spend, both writer locks; on a read, the ledger lock (and the lock
+of each candidate, for `compare-backups`). Only time spent waiting is
+counted, not time spent reading. Zero requests one nonblocking attempt per
+lock. Omitting the option uses blocking locks and waits without limit. A
+timeout exits 1 with `error.code = "lock-timeout"` and
+`error.recording = "not-recorded"`. For `compare-backups`, a timeout on any
+candidate fails the whole command; it is not reported as a row. The budget
+covers lock acquisition. It places no deadline on a subsequent append or
+sync. An external process timeout can leave the outcome unknown.
+
+A preflight (`permits` before each further address) should pass
+`--lock-timeout-ms`. Then a writer that stopped while it held the lock (a
+`SIGSTOP`, a hung disk, a debugger) makes the worker fail with
+`lock-timeout`, instead of making it wait with no end.
 
 The locks are operating-system file locks (`flock`). The system releases one
 when its holder exits or crashes, so a stale lock never needs removing; a
 `lock-timeout` means a live process holds it. The message ends with the next
 step: retry, or find and stop that process (`fuser PATH`).
 
-A spend with no timeout waits without limit. After about two seconds of
-waiting, the CLI writes one line to **stderr** (in text and JSON mode alike;
-it is never put in `warnings`, so stdout stays one JSON object and the
-result is unchanged): `waiting for the writer lock on PATH, held by process
-PID` where the holder can be found (Linux, `/proc/locks`), otherwise
-`held by another process; find it with fuser PATH`. A spend that gets the
-lock sooner prints nothing. The library never prints: set
-`SpendRequest::on_lock_wait` to a function that receives a `LockWait`
-(`path`, `holder_pid`) to report the wait yourself.
+After about two seconds of waiting for one lock, the CLI writes one line to
+**stderr** (in text and JSON mode alike; it is never put in `warnings`, so
+stdout stays one JSON object and the result is unchanged):
+`waiting for the writer lock on PATH, held by process PID` for a writer lock,
+or `waiting for the ledger lock on PATH, held by process PID` for the shared
+lock of a read, where the holder can be found (Linux, `/proc/locks`),
+otherwise `held by another process; find it with fuser PATH`. A command that
+gets the lock sooner prints nothing, and so does a command whose
+`--lock-timeout-ms` ends first. The library never prints: set
+`SpendRequest::on_lock_wait`, or pass a function to `with_lock_wait`, that
+receives a `LockWait` (`path`, `holder_pid`, `shared`) to report the wait
+yourself.
+
+The library's reads have no request to carry a limit, so
+`with_lock_wait(lock_timeout, on_lock_wait, f)` sets one around the call `f`:
+every ledger and witness lock that the library takes in `f`, on the calling
+thread, shares the budget `lock_timeout`, with the meaning above. A
+`SpendRequest` whose own `lock_timeout` or `on_lock_wait` is set uses that
+field instead. A preview (`preview_spend_in`, a dry-run `SpendChargesRequest`,
+`capacity_in`) uses its request's `lock_timeout` for the shared lock; that
+was a usage error before.
 
 ### The witness
 
@@ -607,11 +638,21 @@ and says that a newer hallpass may have written it.
 
 Every error below exits 1. The caller must stop. An append or witness failure can leave a debit on disk.
 
+Every file a command reads is opened the way a pass is: never through a
+symbolic link, only a regular file, and without blocking. That covers the
+pass, the ledger, the witness and lock files, and every input: a scenario, a
+case suite, a checkpoint, a backup candidate, a manifest, a reference list,
+a signature, a trusted signers file and the archived files. A FIFO in place of
+any of them is refused at once with `not-regular-file`.
+`compare-backups` refuses the whole comparison when a candidate is not a
+regular file, before it reads any; a link, a missing file or a damaged copy
+is still reported in that candidate's row.
+
 | Case | Code |
 |---|---|
 | the pass or ledger file is missing, unreadable, or fails to write | `io` |
-| the pass or ledger path is a symbolic link (also if swapped in while opening) | `symlink` |
-| the path is not a regular file | `not-regular-file` |
+| the pass or ledger path, or any other file a command reads, is a symbolic link (also if swapped in while opening) | `symlink` |
+| the path of a file a command reads is not a regular file: a FIFO, a device, a socket or a directory (also if swapped in while opening; the open never waits for a FIFO's writer) | `not-regular-file` |
 | the pass is larger than 1 MiB | `too-large` |
 | `spend` (not `--dry-run`), `adopt` (not `--preview`) or `reconcile-references`, when the directory that holds the pass can be written by others and lacks the sticky bit | `shared-directory` |
 | the pass is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
@@ -623,7 +664,7 @@ Every error below exits 1. The caller must stop. An append or witness failure ca
 | the ledger is missing, but the ledger the witness last saw at another path is intact (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`, `reconcile-references`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
-| the spend exhausted its optional writer lock wait budget before appending | `lock-timeout` |
+| the command used up its `--lock-timeout-ms` (or `lock_timeout`) waiting for a ledger or witness lock, before it read or recorded anything | `lock-timeout` |
 | the append or its sync failed and the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
@@ -984,7 +1025,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `audit-receipts` | `complete`: and `--allowed-signers` verified a signature over every revision used again, for a `--principal` | `incomplete`, `mismatch` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature, or does not accept `-O verify-time` |
 | `audit-charges` | `complete`: and `--allowed-signers` verified a signature over every revision used again, for a `--principal` | `incomplete`, `mismatch`, `empty` | unusable ledger, archive entry, signature record or trusted signers file; `ssh-keygen` cannot run for a recorded signature, or does not accept `-O verify-time` |
 | `reconcile` | `match` | `discrepancy` | invalid manifest, pass or history |
-| `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass |
+| `compare-backups` | `preserved` | `no-match`, `ambiguous`, `inconclusive` | `partial-error` (a candidate failed), invalid pass, a candidate that is not a regular file, `lock-timeout` |
 | `checkpoint` | exported | `empty`: nothing recorded yet | invalid pass, ledger error (as `status`) |
 | `verify-checkpoint` | `exact` or `extended` | `mismatch` | malformed checkpoint, missing or damaged ledger |
 | `verify-approval` | `verified` | `unverified` | invalid pass, unavailable verifier or input |
@@ -1307,6 +1348,9 @@ Crate `hallpass` (re-exports `time`):
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
+| `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any line of the ledger and the sequence number of the first line with it; the warning for a decision clock before it |
+| `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
+| `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |
 | `archive_provenance` (`Provenance`, `SignedApproval`), `archive_verified_signature` (`ArchivedSignature`), `APPROVAL_NAMESPACE`, `MAX_SIGNATURE_BYTES` | signature records beside archived bytes; recording one does not verify anything |

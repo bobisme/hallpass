@@ -158,7 +158,7 @@ The media address of that call is another destination question. It is not
 another call, so ask without counting:
 
 ```console
-$ hallpass --format json permits --to 192.0.2.10:10000/udp --duration 120 -- engagement.pass.toml
+$ hallpass --format json permits --to 192.0.2.10:10000/udp --duration 120 --lock-timeout-ms 5000 -- engagement.pass.toml
 exit 0
 {"result": "allowed", "label": "sip-edge", "refusal": null}
 ```
@@ -259,6 +259,14 @@ what a real disk gives. All the numbers, with the setup, are in
 - **Ask about every address you send to**: signalling, media (RTP and
   RTCP), redirects, a second address of the same host. One `spend --to` for
   the unit of work, `permits` for each further address.
+- **Bound the wait in a preflight.** Give `permits` (and `spend`)
+  `--lock-timeout-ms`, for example 5000. A read waits while a writer holds
+  the ledger lock. A writer that stopped while it held the lock (a `SIGSTOP`,
+  a hung disk, a debugger) would otherwise stop every worker's preflight,
+  with nothing to say why. With a limit, the call fails with
+  `error.code = "lock-timeout"` and `recording = "not-recorded"`: do not send,
+  and try again later. After two seconds of waiting, hallpass writes one line
+  to stderr that names the lock and the process that holds it.
 - **Give `--duration`** the longest time the work can still send, in
   seconds. Without it the answer is for this instant only.
 - **Count at first send.** Call `spend` immediately before the first packet
@@ -376,6 +384,15 @@ omission waits indefinitely. Exit 1 with `error.code = "lock-timeout"` and
 state files or a ledger header may exist. The limit ends at lock acquisition.
 An external process timeout, an uncertain append, or a failed witness update
 still calls for reconciliation. Subsequent requests reevaluate live policy.
+
+Every other command that takes the ledger lock accepts the same option with
+the same meaning: `permits`, `status`, `ledger`, a preview, `capacity`,
+`rehearse`, `receipt`, the audits, `reconcile`, `compare-backups`,
+`checkpoint`, `verify-checkpoint`, `adopt`, `reconcile-references` and `diff
+--budget-impact` ([Lock wait](spec.md#lock-wait)). In Rust, a preview takes
+the limit from its request's `lock_timeout`, and every other read takes it
+from `hallpass::with_lock_wait(Some(limit), None, || ...)` around the call,
+for example around `permits_in`.
 
 A `witness-unavailable` error also has `recording = "not-recorded"`: the
 spend stopped before it appended a debit. The exception is `adopt` when the
@@ -647,8 +664,11 @@ the file again.
 - **A whole pass from a slow save.** A save over the pass that pauses for
   more than a quarter second part-way can be read part-way. Replace the pass
   with `mv`, and pin the digest.
-- **A correct clock.** The window is checked against the caller's clock. A
-  spend warns if the decision instant precedes the most recent entry. An incorrect clock can still make the window appear open.
+- **A correct clock.** The window is checked against the caller's clock.
+  `spend`, a preview, `capacity`, `permits` and `status` warn if the
+  decision instant precedes the latest time recorded in the ledger, and name
+  that time and its sequence number. An incorrect clock can still make the
+  window appear open.
 - **Protection from the operator's own account.** The ledger and the
   witness belong to the same user; someone who deletes both starts from
   zero. The witness catches accidents (a copied pass, a cleaned directory,

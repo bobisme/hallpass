@@ -636,6 +636,15 @@ queued, so under heavy contention a bounded wait is not fair, and one waiter
 can lose many races in a row. Before bn-mti the CLI always polled, even with
 no limit, because it always set the notice callback.
 
+A read (`permits`, `status`, `ledger`, an audit) takes a shared lock on the
+ledger in the same way: blocking without `--lock-timeout-ms`, polling with
+it, and with the same notice after about 2 seconds. Readers do not wait for
+one another, only for a writer. The library's reads have no request to
+carry the limit, so `with_lock_wait` keeps it in a thread-local scope for
+the duration of the call. Each wait takes the time it waited from that one
+budget, so a command that takes several locks (`compare-backups`) waits no
+longer in total than its limit.
+
 Latency of one CLI `spend`, with 8 writer processes each making 50 spends
 against one pass (an earlier run on the same ext4 home disk, not repeated
 here; a release build, receipts-style lines; the script is the evaluator's

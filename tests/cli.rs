@@ -2195,7 +2195,7 @@ fn charged_unit_preview_and_receipt_bind_every_target_in_order() {
             .iter()
             .any(|w| {
                 w.as_str()
-                    .is_some_and(|w| w.contains("precedes the last ledger entry"))
+                    .is_some_and(|w| w.contains("the latest time recorded in the ledger"))
             })
     );
     assert_eq!(fs::read(&ledger).expect("unchanged ledger"), bytes_before);
@@ -2213,7 +2213,7 @@ fn status_warns_on_strict_clock_rollback_for_each_event_kind() {
             .iter()
             .any(|w| {
                 w.as_str()
-                    .is_some_and(|s| s.contains("precedes the last ledger entry"))
+                    .is_some_and(|s| s.contains("the latest time recorded in the ledger"))
             })
     };
     assert_eq!(spend(&file, "calls", NOW).0, 0);
