@@ -690,6 +690,13 @@ Keep the reference exactly as written when revising destinations or ceilings.
 (PASS-FORMAT.md, "General rules") and prints no ID for text a pass could
 not hold, such as a zero-width space or a no-break space. In Rust,
 `hallpass::review::approval_id` returns the same problems as an error.
+The ID depends on the exact characters. When the owner or reference holds
+a combining mark (Unicode general category Mn, Mc or Me, such as U+0301
+after an `e`) or two or more spaces in a row, `approval-id`, `check` and
+`lint` warn but still give the ID: a copy typed or pasted another way that
+looks the same (`é` as one character, one space) gives another ID. Share
+the ID itself rather than a retyped copy of the text.
+`hallpass::review::approval_identity_warnings` returns the same advice.
 If that message omits the start instant, obtain it from the owner before
 issuing the pass.
 

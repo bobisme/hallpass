@@ -221,7 +221,9 @@ tool that pinned the old digest, which is the point.
   variation selectors, the Hangul fillers) or a space other than the
   ASCII space (the no-break, em and ideographic spaces, which look like a
   plain space). New caller references and reasons follow the same rule,
-  and so do pass text fields and `approval-id`. The tables are written by
+  and so do pass text fields and `approval-id`. A pass file refuses them
+  anywhere, comments included, with every control character but a tab
+  and a line end: the owner approves every byte. The tables are written by
   hand from Unicode 16.0, with no dependency, and a test pins them to
   lists taken from Python's `unicodedata` and `DerivedCoreProperties.txt`. Reading keeps the earlier, looser rules (for
   notes the 0.1 rule), so an older ledger stays readable. Text output escapes every such

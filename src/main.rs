@@ -298,7 +298,7 @@ enum Command {
         #[arg(long, required = true, value_name = "CAPABILITY")]
         can: Vec<String>,
     },
-    /// Report name-restriction overlaps as advisory findings.
+    /// Report name-restriction overlaps and wide port grants as advisory findings.
     Lint {
         /// Pass whose destination rules should be reviewed.
         file: PathBuf,
@@ -646,6 +646,7 @@ fn check(file: &Path, clock: &Clock) -> Output {
             warnings.extend(overlaps.iter().map(|w| w.message.clone()));
             let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
             warnings.extend(window.iter().map(|w| w.message.clone()));
+            warnings.extend(approval_text_warnings(&loaded.pass));
             warnings.extend(hallpass::shared_directory_warning(file));
             Output {
                 code: OK,
@@ -714,6 +715,19 @@ fn consumer_coverage(file: &Path, tokens: &[String]) -> Output {
     }
 }
 
+/// The advice of [`hallpass::review::approval_identity_warnings`] for the
+/// owner and reference of `pass`, each message after its field, as `check`
+/// and `lint` give it.
+fn approval_text_warnings(pass: &hallpass::Pass) -> Vec<String> {
+    hallpass::review::approval_identity_warnings(&pass.approval.owner, &pass.approval.reference)
+        .into_iter()
+        .map(|p| format!("{} {}", p.field, p.message))
+        .collect()
+}
+
+/// The lint report. Its first line counts every finding it lists and every
+/// warning `emit` prints for it, so a report with only a warning does not
+/// read as clean.
 fn review_lint(file: &Path, clock: &Clock) -> Output {
     let loaded = match hallpass::load(file) {
         Ok(v) => v,
@@ -721,10 +735,21 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
     };
     let report = hallpass::review::lint(&loaded.pass, clock.now);
     let findings = report.findings;
+    let ports = report.port_findings;
     let truncated = report.truncated;
+    let stale: Vec<String> = hallpass::review::name_overlap_warnings(&loaded.pass)
+        .into_iter()
+        .filter(|w| w.code == "overlap-acknowledgement-unmatched")
+        .map(|w| w.message)
+        .collect();
+    let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
+    let mut warnings = stale;
+    warnings.extend(window.iter().map(|w| w.message.clone()));
+    warnings.extend(approval_text_warnings(&loaded.pass));
     let mut text = format!(
-        "{} advisory finding(s) for {}\n",
-        findings.len(),
+        "{} advisory finding(s) and {} warning(s) for {}\n",
+        findings.len() + ports.len(),
+        warnings.len(),
         loaded.pass.id
     );
     if truncated {
@@ -753,17 +778,16 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
             }
         );
     }
-    let stale: Vec<String> = hallpass::review::name_overlap_warnings(&loaded.pass)
-        .into_iter()
-        .filter(|w| w.code == "overlap-acknowledgement-unmatched")
-        .map(|w| w.message)
-        .collect();
-    let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
-    let mut stale = stale;
-    stale.extend(window.iter().map(|w| w.message.clone()));
+    for f in &ports {
+        let _ = writeln!(text, "{}: {}", f.code, f.message);
+    }
+    let mut listed = json!(findings);
+    if let Some(list) = listed.as_array_mut() {
+        list.extend(ports.iter().map(|f| json!(f)));
+    }
     Output {
         code: OK,
-        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":findings,"truncated":truncated,"warnings":stale,"window_warnings":window}),
+        json: json!({"command":"lint","result":"ok","file":file.display().to_string(),"digest":loaded.digest.to_string(),"findings":listed,"truncated":truncated,"warnings":warnings,"window_warnings":window}),
         text,
     }
 }
@@ -887,19 +911,31 @@ fn review_cases(file: &Path, cases_file: &Path, strength: bool) -> Output {
 
 /// The id for an owner and reference, or a usage error when a pass could not
 /// hold them: each problem names the option, its pass field and what is
-/// wrong, as `check` does, and JSON lists them under `problems`.
+/// wrong, as `check` does, and JSON lists them under `problems`. An id that
+/// depends on how the text was typed comes with a warning for each field
+/// that makes it so.
 fn approval_id(owner: &str, reference: &str) -> Output {
+    let flag = |field: &str| {
+        let name = field.strip_prefix("approval.").unwrap_or(field);
+        format!("--{name} ({field})")
+    };
     match hallpass::review::approval_id(owner, reference) {
-        Ok(id) => Output {
-            code: OK,
-            json: json!({"command":"approval-id","result":"ok","id":id,"owner":owner,"reference":reference,"warnings":[]}),
-            text: format!("{id}\n"),
-        },
+        Ok(id) => {
+            let warnings: Vec<String> =
+                hallpass::review::approval_identity_warnings(owner, reference)
+                    .into_iter()
+                    .map(|p| format!("{} {}", flag(&p.field), p.message))
+                    .collect();
+            Output {
+                code: OK,
+                json: json!({"command":"approval-id","result":"ok","id":id,"owner":owner,"reference":reference,"warnings":warnings}),
+                text: format!("{id}\n"),
+            }
+        }
         Err(problems) => {
             let mut message = String::new();
             for p in &problems {
-                let flag = p.field.strip_prefix("approval.").unwrap_or(&p.field);
-                let _ = write!(message, "--{flag} ({}) {}. ", p.field, p.message);
+                let _ = write!(message, "{} {}. ", flag(&p.field), p.message);
             }
             message.push_str(
                 "A pass with this owner and reference would not load, so no id was printed",

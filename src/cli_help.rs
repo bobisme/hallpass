@@ -117,7 +117,7 @@ fn guide(name: &str) -> Guide {
         ),
         "lint" => (
             &["hallpass --format json lint engagement.pass.toml"],
-            "Inspect findings for overlapping destination names and ports, and truncated for omitted findings. Lint is advisory and can return exit 0 with findings.",
+            "Inspect findings for overlapping destination names and ports and for destinations that grant more than 1024 ports (wide-port-grant), truncated for omitted overlaps, and warnings. Lint is advisory and can return exit 0 with findings.",
         ),
         "test-pass" => (
             &[

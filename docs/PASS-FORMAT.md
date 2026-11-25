@@ -83,6 +83,22 @@ requests = 500
   `--owner` and `--reference`, so it never prints an id that no pass can
   carry. Text output escapes these characters as `\u{...}` wherever it
   shows caller- or pass-supplied text; JSON carries the exact text.
+- **The whole file** refuses the same characters, comments, keys and
+  whitespace included, and every control character other than a tab and
+  a line end (LF or CRLF). The owner approves, and a reviewer reads, every
+  byte of the file: a bidirectional control in a comment can reorder how
+  the rest of its line shows in an editor or a code review tool, and a
+  zero-width character can hide text. The problem gives the line and the
+  column (from 1, in characters) and names the character:
+  - `(file): line 18, column 40 holds a bidirectional text control (U+202E)`;
+  - `(file): the file starts with a byte order mark (U+FEFF)`.
+
+  A character inside a string value is reported once, by its field's own
+  rule. The first 16 characters are reported one by one, and one more
+  problem counts the rest. This is new after 0.2.0: a pass that holds such
+  a character outside its text fields, such as in a comment or as a byte
+  order mark, no longer loads. Delete the character, then have the owner
+  approve the edited file.
 - **Numbers** (`format`, ports, ceilings) are plain decimal digits. TOML's
   other spellings are refused: `0x10`, `0o17`, `0b110`, `1_000`, `+6`. A
   reviewer who reads `0x10` as 10 would approve less than the 16 a tool
@@ -182,7 +198,7 @@ spend of every running tool that asks.
 
 | Key | Required | Rule |
 |---|---|---|
-| `label` | yes | unique within the pass; same characters as `id`. Every decision names it |
+| `label` | yes | unique within the pass, ignoring ASCII letter case (`web` and `WEB` are refused together: people read, type and match labels); same characters as `id`. Every decision names it |
 | `address` | one of the two | one literal IP address |
 | `network` | one of the two | one CIDR network (`192.0.2.0/28`, `2001:db8::/120`) |
 | `protocol` | yes | `"tcp"` or `"udp"` |
@@ -328,7 +344,15 @@ JSON reports each total as a decimal string to preserve its exact value.
 ### Ports and protocols
 
 Ports are 1-65535. A range is `"start-end"` (inclusive, start not above end,
-no spaces, no leading zeros). An empty list is refused.
+no spaces, no leading zeros). An empty list is refused, and so is a port
+listed twice in one destination: `[443, 443]`, or `[80, "1-1024"]`, whose
+range holds 80 again. The problem names the port. Ranges that only touch,
+such as `["1-80", "81-100"]`, are accepted.
+
+`hallpass lint` gives a `wide-port-grant` finding for a destination that
+grants more than 1,024 ports, or every port (`"1-65535"`), with the count.
+A test normally reaches a few services, so such a grant is more often a
+shortcut than what the owner approved. It is advice only: the pass loads.
 
 Only `tcp` and `udp` are accepted: every consumer's transport maps onto one
 of them (TLS, HTTP/1 and HTTP/2 are tcp; QUIC, DTLS and RTP are udp), and

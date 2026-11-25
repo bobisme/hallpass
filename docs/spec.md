@@ -110,10 +110,15 @@ Validation rules, all reported together with field paths
   refused range; loopback only when listed;
 - networks broader than /24 (IPv4) or /64 (IPv6) need
   `whole_network_approved = true`; broader than /8 or /32 is always refused;
-- ports 1-65535, ranges `"start-end"`; protocols `tcp`, `udp`;
+- ports 1-65535, ranges `"start-end"`, no port listed twice in one
+  destination (new after 0.2.0); protocols `tcp`, `udp`;
+- labels unique ignoring ASCII letter case (new after 0.2.0);
 - ceiling names `[a-z][a-z0-9_-]{0,31}`, totals 0 to 10^12, at most 64;
 - the file: UTF-8, at most 1 MiB, regular file, not a symbolic link, not
   writable by group or others, ending with a newline (new after 0.2.0);
+  anywhere in it, comments included, none of the characters a text field
+  refuses and no control character but a tab and a line end, each named
+  with its line and column (new after 0.2.0);
 - a file whose modification time is less than 0.25 s old (2.25 s when the
   time has no fraction of a second) is read again 0.25 s (2.25 s) after that
   time, or after that long if the time is in the future, and is
@@ -780,6 +785,16 @@ is `name-restriction-overlap`. `check` and `status` also warn about each
 such pair, in text and in `warnings` and `name_restriction_overlaps`. The
 pass stays valid and `check` exits 0.
 
+Lint also gives a `wide-port-grant` finding, after the overlaps, for each
+destination that grants more than 1,024 ports or every port, as `{code,
+label, protocol, ports, port_count, message}`; `ports` is sorted and
+merged, as `1-65535`. The first line of the text report counts what the
+report gives: `N advisory finding(s) and M warning(s) for ID`. The
+findings are the lines that follow it and the rows of `findings`; the
+warnings are the `hallpass: warning:` lines on standard error and the
+entries of `warnings` (an unmatched acknowledgement, the window warnings
+and the approval text warnings of `approval-id`).
+
 The owner may accept one overlap in the pass: the named destination lists the
 label of the nameless destination in `overlap_acknowledged`. That is advice
 only and never changes a decision. `status` then prints one `Note:` line
@@ -1209,13 +1224,19 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   is `{target, name, at, before, after, change, bypasses_names_of}`.
 - **consumer-coverage**: `pass_id`, `digest`, `declared`,
   `require_target`, `findings` (each with its `code`).
-- **lint**: `digest`, `findings`, `truncated`, `window_warnings` (as in "Window warnings").
+- **lint**: `digest`, `findings` (`name-restriction-overlap` rows, then
+  `wide-port-grant` rows `{code, label, protocol, ports, port_count,
+  message}`; see "Name overlaps and declared breadth"), `truncated`,
+  `window_warnings` (as in "Window warnings").
 - **test-pass**: `cases` (the suite path), `digest`, `results`,
   `mismatches`; `mutation_strength` with `--strength`.
 - **approval-id**: `id`, `owner`, `reference`. When `--owner` or
   `--reference` holds text that `approval.owner` or `approval.reference`
   may not hold, the usage error lists each problem under `problems` as
-  `{field, message}`, as `check` does.
+  `{field, message}`, as `check` does. When it holds a combining mark or
+  two or more spaces in a row, the ID is printed and `warnings` says the
+  ID depends on those exact characters; `check` and `lint` give the same
+  warning for the pass.
 
 `window` is `{state, valid_from, valid_until, seconds_remaining,
 seconds_until_open, seconds_since_end, revoked_reason}`; `state` is

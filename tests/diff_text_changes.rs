@@ -68,7 +68,9 @@ fn a_comment_only_change_is_named_and_the_comments_are_shown_escaped() {
             "",
         )
         .replace("revoked = false\n", "revoked = false # owner said \"ok\"\n");
-    let new = format!("{new}# owner also approved port 22 by phone \u{202e}\u{200b}\n");
+    // A pass refuses hidden characters even in comments (bn-3qp), so a
+    // backslash shows the escaping instead.
+    let new = format!("{new}# owner also approved port 22 by phone, see C:\\notes\n");
     let (text, value) = diff(BASE, &new);
     assert_same_fields(&text, &value);
     assert_eq!(value["text_changes"], json!(["comments"]), "{value}");
@@ -83,18 +85,18 @@ fn a_comment_only_change_is_named_and_the_comments_are_shown_escaped() {
         json!([
             {"change": "removed", "line": 1, "text": "# Historical documentation fixture for the offline owner case suite."},
             {"change": "added", "line": 10, "text": "# owner said \"ok\""},
-            {"change": "added", "line": 17, "text": "# owner also approved port 22 by phone \u{202e}\u{200b}"},
+            {"change": "added", "line": 17, "text": "# owner also approved port 22 by phone, see C:\\notes"},
         ]),
         "{value}"
     );
     for line in [
         "Comment removed (OLD line 1): \"# Historical documentation fixture for the offline owner case suite.\"\n",
         "Comment added (NEW line 10): \"# owner said \\\"ok\\\"\"\n",
-        "Comment added (NEW line 17): \"# owner also approved port 22 by phone \\u{202e}\\u{200b}\"\n",
+        "Comment added (NEW line 17): \"# owner also approved port 22 by phone, see C:\\\\notes\"\n",
     ] {
         assert!(text.contains(line), "{line}\n{text}");
     }
-    assert!(!text.contains('\u{202e}'), "{text}");
+    assert!(!text.contains("C:\\notes"), "{text}");
 }
 
 #[test]

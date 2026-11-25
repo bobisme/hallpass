@@ -445,6 +445,68 @@ pub struct OverlapFinding {
 pub struct LintReport {
     pub findings: Vec<OverlapFinding>,
     pub truncated: bool,
+    /// The destinations that grant more than [`WIDE_PORT_GRANT`] ports, by
+    /// label.
+    pub port_findings: Vec<PortGrantFinding>,
+}
+
+/// The most ports one destination grants without a lint finding: 1,024.
+///
+/// A test normally reaches a few services, so a grant of more ports, or of
+/// every port (`"1-65535"`), is more often a shortcut or a typo than what
+/// the owner approved. Advice only: the owner may approve it.
+pub const WIDE_PORT_GRANT: u32 = 1024;
+
+/// A destination that grants more than [`WIDE_PORT_GRANT`] ports.
+#[derive(Clone, Debug, Serialize)]
+pub struct PortGrantFinding {
+    /// `wide-port-grant`.
+    pub code: &'static str,
+    pub label: String,
+    pub protocol: String,
+    /// The ports, sorted and merged, as `1-1024, 8080`.
+    pub ports: String,
+    /// How many ports the destination grants.
+    pub port_count: u32,
+    pub message: String,
+}
+
+/// A [`PortGrantFinding`] for each destination of `pass` that grants more
+/// than [`WIDE_PORT_GRANT`] ports, sorted by label.
+fn port_grant_findings(pass: &Pass) -> Vec<PortGrantFinding> {
+    let mut out: Vec<PortGrantFinding> = pass
+        .destinations
+        .iter()
+        .filter_map(|d| {
+            let ranges = d.ports.normalized_ranges();
+            let count: u32 = ranges
+                .iter()
+                .map(|&(start, end)| u32::from(end) - u32::from(start) + 1)
+                .sum();
+            if count <= WIDE_PORT_GRANT {
+                return None;
+            }
+            let ports = ports_text(&ranges);
+            let how_many = if count == u32::from(u16::MAX) {
+                "every port, 1-65535".to_owned()
+            } else {
+                format!("{count} ports ({ports}), more than the {WIDE_PORT_GRANT} that raise no finding")
+            };
+            Some(PortGrantFinding {
+                code: "wide-port-grant",
+                label: d.label.clone(),
+                protocol: d.protocol.to_string(),
+                message: format!(
+                    "destination `{}` grants {how_many}, on {}; check that the owner's written approval names these ports",
+                    d.label, d.protocol
+                ),
+                ports,
+                port_count: count,
+            })
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| a.label.cmp(&b.label));
+    out
 }
 
 fn overlap_example(net: crate::Network, excluded: &BTreeSet<u32>) -> IpAddr {
@@ -475,7 +537,8 @@ fn overlap_example(net: crate::Network, excluded: &BTreeSet<u32>) -> IpAddr {
     }
 }
 
-/// Find a concrete unnamed request in each shared network and port interval.
+/// Find a concrete unnamed request in each shared network and port interval,
+/// and each destination that grants more than [`WIDE_PORT_GRANT`] ports.
 #[must_use]
 pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
     const LIMIT: usize = 256;
@@ -500,6 +563,7 @@ pub fn lint(pass: &Pass, now: OffsetDateTime) -> LintReport {
     let mut report = LintReport {
         findings: vec![],
         truncated: false,
+        port_findings: port_grant_findings(pass),
     };
     for (named, left) in rules.iter().filter(|(d, _)| !d.names.is_empty()) {
         for (unnamed, right) in rules.iter().filter(|(d, _)| d.names.is_empty()) {
@@ -696,6 +760,8 @@ pub struct Breadth {
     pub ipv4: String,
     pub ipv6: String,
 }
+
+pub use crate::pass::approval_identity_warnings;
 
 /// Derive the stable format-1 approval identifier from its written identity.
 ///

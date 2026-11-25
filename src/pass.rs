@@ -4,7 +4,7 @@
 //! `docs/PASS-FORMAT.md`. It reports every problem it finds, each with the
 //! field path and what to do, rather than stopping at the first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::IpAddr;
 
@@ -15,6 +15,8 @@ use toml::{Table, Value};
 use crate::address::{AddressError, Network, Protocol, parse_address, parse_network};
 use crate::name::{HostName, MAX_NAMES};
 use crate::ports::PortSet;
+
+mod marks;
 
 /// The one pass format version this library reads.
 pub const FORMAT_VERSION: i64 = 1;
@@ -252,6 +254,42 @@ pub fn approval_identity_problems(owner: &str, reference: &str) -> Vec<Problem> 
         .collect()
 }
 
+/// Advice about `owner` and `reference` as `approval.owner` and
+/// `approval.reference`, with those fields.
+///
+/// It is for text a pass can hold whose approval id still depends on how it
+/// was typed. A combining mark (general category Mn, Mc or Me) means the
+/// same text can often be written in other characters that look the same
+/// (`é` as one character, or `e` and U+0301), and a run of spaces is easily
+/// copied as one; either copy gives another id. Advice only: nothing is
+/// refused.
+#[must_use]
+pub fn approval_identity_warnings(owner: &str, reference: &str) -> Vec<Problem> {
+    const SAME: &str = "The approval id depends on the exact characters, so a copy typed or pasted";
+    const SHARE: &str = "share the id itself, not a retyped copy of the text";
+    let mut out = Vec::new();
+    for (field, text) in [("approval.owner", owner), ("approval.reference", reference)] {
+        if let Some(mark) = text.chars().find(|c| marks::is_combining_mark(*c)) {
+            out.push(Problem {
+                field: field.to_owned(),
+                message: format!(
+                    "holds a combining mark (U+{:04X}), so the same text can also be written in other characters that look the same (an accented letter as one character, for example). {SAME} differently gives another id; {SHARE}",
+                    u32::from(mark)
+                ),
+            });
+        }
+        if text.contains("  ") {
+            out.push(Problem {
+                field: field.to_owned(),
+                message: format!(
+                    "holds two or more spaces in a row. {SAME} with one space gives another id; write one space, or {SHARE}"
+                ),
+            });
+        }
+    }
+    out
+}
+
 /// Free text: printable, without line separators, Unicode format
 /// characters, other invisible characters or spaces other than the ASCII
 /// space ([`crate::ledger::is_disguising`]), no surrounding spaces, 1 to
@@ -334,28 +372,39 @@ impl Pass {
     /// # Errors
     ///
     /// Every problem found, each with its field path. A TOML syntax error is
-    /// reported alone, since nothing else can be read.
+    /// reported alone, since nothing else can be read, but for the
+    /// characters that can make the file display as something else: those
+    /// are reported anywhere in the file, comments included, with their
+    /// line and column.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
-        let table: Table = text.parse().map_err(|e: toml::de::Error| {
-            let at = e
-                .span()
-                .and_then(|span| text.get(..span.start))
-                .map_or_else(String::new, |before| {
-                    let line = before.matches('\n').count() + 1;
-                    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-                    format!(" at line {line}, column {column}")
+        // A character that can disguise the file is reported wherever it is,
+        // comments included, and before a syntax error it may explain.
+        let mut problems = crate::literal::hidden_characters(text);
+        let table: Table = match text.parse() {
+            Ok(table) => table,
+            Err(e) => {
+                let e: toml::de::Error = e;
+                let at = e
+                    .span()
+                    .and_then(|span| text.get(..span.start))
+                    .map_or_else(String::new, |before| {
+                        let line = before.matches('\n').count() + 1;
+                        let column =
+                            before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+                        format!(" at line {line}, column {column}")
+                    });
+                problems.push(Problem {
+                    field: "(file)".to_owned(),
+                    message: format!(
+                        "the file is not valid TOML{at}: {}; fix the syntax there",
+                        e.message().trim()
+                    ),
                 });
-            vec![Problem {
-                field: "(file)".to_owned(),
-                message: format!(
-                    "the file is not valid TOML{at}: {}; fix the syntax there",
-                    e.message().trim()
-                ),
-            }]
-        })?;
-        let mut w = Walker {
-            problems: crate::literal::problems(text),
+                return Err(problems);
+            }
         };
+        problems.extend(crate::literal::problems(text));
+        let mut w = Walker { problems };
         w.unknown_keys(
             &table,
             "",
@@ -566,8 +615,10 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
         return None;
     }
     // Labels are checked over the raw entries, so a duplicate is reported
-    // even when either destination has other problems.
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    // even when either destination has other problems. People read, type
+    // and match labels, so two that differ only in ASCII letter case are
+    // refused too.
+    let mut seen: BTreeMap<String, (usize, &str)> = BTreeMap::new();
     for (i, entry) in entries.iter().enumerate() {
         let Some(label) = entry
             .as_table()
@@ -576,15 +627,23 @@ fn parse_destinations(w: &mut Walker, table: &Table) -> Option<Vec<Destination>>
         else {
             continue;
         };
-        if let Some(first) = seen.insert(label, i + 1) {
-            w.problem(
-                format!("destination[{}].label", i + 1),
-                format!(
-                    "{} is also the label of destination[{first}]; labels must be unique",
-                    crate::display_quoted(label)
-                ),
-            );
-        }
+        let Some(&(first, earlier)) = seen.get(&label.to_ascii_lowercase()) else {
+            seen.insert(label.to_ascii_lowercase(), (i + 1, label));
+            continue;
+        };
+        let message = if earlier == label {
+            format!(
+                "{} is also the label of destination[{first}]; labels must be unique",
+                crate::display_quoted(label)
+            )
+        } else {
+            format!(
+                "{} differs from {}, the label of destination[{first}], only in letter case; people read and type labels, so make the two differ in more than case",
+                crate::display_quoted(label),
+                crate::display_quoted(earlier)
+            )
+        };
+        w.problem(format!("destination[{}].label", i + 1), message);
     }
     let mut out = Vec::new();
     let mut complete = true;
@@ -983,6 +1042,13 @@ fn parse_ports(w: &mut Walker, t: &Table, p: &str) -> Option<PortSet> {
     if !ok {
         return None;
     }
+    let repeated = repeated_ports(&ranges);
+    if !repeated.is_empty() {
+        for message in repeated {
+            w.problem(&field, message);
+        }
+        return None;
+    }
     match PortSet::from_ranges(ranges) {
         Ok(set) => Some(set),
         Err(message) => {
@@ -990,6 +1056,53 @@ fn parse_ports(w: &mut Walker, t: &Table, p: &str) -> Option<PortSet> {
             None
         }
     }
+}
+
+/// A problem for each port that `ranges`, the elements of one `ports` list
+/// in file order, lists more than once: twice the same element, or two
+/// elements that overlap. Each names the first port the two share, and no
+/// port is named twice.
+fn repeated_ports(ranges: &[(u16, u16)]) -> Vec<String> {
+    let shown = |(start, end): (u16, u16)| {
+        if start == end {
+            format!("`{start}`")
+        } else {
+            format!("`{start}-{end}`")
+        }
+    };
+    let mut sorted: Vec<((u16, u16), usize)> = ranges.iter().copied().zip(0..).collect();
+    sorted.sort_unstable();
+    let mut out: Vec<String> = Vec::new();
+    let mut named: BTreeSet<u16> = BTreeSet::new();
+    // The element that reaches furthest so far, and where it was written.
+    let mut reach: Option<((u16, u16), usize)> = None;
+    for (range, at) in sorted {
+        let Some((covering, written)) = reach else {
+            reach = Some((range, at));
+            continue;
+        };
+        if range.0 <= covering.1 && named.insert(range.0) {
+            out.push(if range == covering {
+                format!("lists {} twice; remove one", shown(range))
+            } else {
+                let (first, second) = if written < at {
+                    (covering, range)
+                } else {
+                    (range, covering)
+                };
+                format!(
+                    "lists port {} twice, in {} and in {}; list each port once",
+                    range.0,
+                    shown(first),
+                    shown(second)
+                )
+            });
+        }
+        if range.1 > covering.1 {
+            reach = Some((range, at));
+        }
+    }
+    out
 }
 
 fn parse_required_counters(
@@ -1482,5 +1595,40 @@ requests = 500
             .map(|i| format!("\"h{i}.example\""))
             .collect();
         assert!(with_names(&format!("[{}]", many.join(", "))).is_err());
+    }
+
+    #[test]
+    fn a_port_listed_twice_is_named_once() {
+        for (ranges, expected) in [
+            (
+                vec![(443, 443), (443, 443)],
+                vec!["lists `443` twice; remove one"],
+            ),
+            (
+                vec![(8000, 8100), (8000, 8100)],
+                vec!["lists `8000-8100` twice; remove one"],
+            ),
+            (
+                vec![(80, 80), (1, 1024), (80, 80)],
+                vec!["lists port 80 twice, in `80` and in `1-1024`; list each port once"],
+            ),
+            (
+                vec![(8050, 8200), (8000, 8100), (9000, 9000), (8100, 8100)],
+                vec![
+                    "lists port 8050 twice, in `8050-8200` and in `8000-8100`; list each port once",
+                    "lists port 8100 twice, in `8050-8200` and in `8100`; list each port once",
+                ],
+            ),
+        ] {
+            assert_eq!(repeated_ports(&ranges), expected, "{ranges:?}");
+        }
+        for apart in [
+            vec![(443, 443)],
+            vec![(1, 80), (81, 100)],
+            vec![(443, 443), (80, 80), (8443, 8443)],
+            vec![(1, 65535)],
+        ] {
+            assert_eq!(repeated_ports(&apart), Vec::<String>::new(), "{apart:?}");
+        }
     }
 }
