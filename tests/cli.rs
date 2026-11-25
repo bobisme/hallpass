@@ -1026,7 +1026,7 @@ fn ledger_lists_entries_and_totals() {
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(stdout.contains("matrix run 1"), "{stdout}");
     assert!(
-        stdout.contains("3 line(s) after the header, chain verified, the witness matches"),
+        stdout.contains("logical entries after the header: 3; chain verified, the witness matches"),
         "{stdout}"
     );
     assert!(stdout.contains(&digest[..19]), "{stdout}");

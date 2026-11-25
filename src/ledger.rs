@@ -2,9 +2,11 @@
 //! whole engagement and not only for one command.
 //!
 //! The ledger is `<pass file>.ledger`, beside the pass, mode 0600. It is
-//! JSON Lines: a header line naming the pass id, then one line per spend.
-//! Every entry carries its sequence number and the SHA-256 of the line
-//! before it, so a damaged, reordered or cut line is detected. A ledger that
+//! JSON Lines: a header line naming the pass id, then one line per scalar
+//! event or atomic batch. Every event carries its first sequence number and
+//! the SHA-256 of the line before it; a batch assigns a distinct logical
+//! sequence to each unit in its one line. A damaged, reordered or cut line is
+//! detected. A ledger that
 //! cannot be read exactly fails closed: nothing more can be spent.
 //!
 //! [`spend`] takes an exclusive lock on the ledger, re-reads the pass from
@@ -48,7 +50,7 @@ mod reference;
 pub mod scenario;
 mod written;
 pub use debit::*;
-use debit::{DebitLine, parse_debit};
+use debit::{DEBIT_BATCH_EVENT, DebitBatchLine, DebitLine, parse_debit, parse_debit_batch};
 pub use reference::{
     MAX_RECONCILED_REFERENCES, MAX_REFERENCE_LIST_BYTES, ReconcileReferencesOutcome,
     ReferenceEvidence, ReferenceReconciliation, read_reference_list, reconcile_references,
@@ -551,7 +553,7 @@ pub enum WitnessStatus {
     /// only ever added, so the count cannot have gone down; they are
     /// counted.
     Extended {
-        /// Lines after the witnessed one.
+        /// Logical entries after the witnessed one.
         added: u64,
     },
     /// There is a ledger but no witness for this pass id: a pass brought
@@ -605,11 +607,11 @@ pub struct LedgerView {
     pub unreconciled_adoption: Option<u64>,
     /// The totals (spends and carried amounts).
     pub tally: Tally,
-    /// The time of the last line, if any. A line after one written with a
+    /// The time of the last logical entry, if any. An entry after one written with a
     /// clock set ahead can have an earlier time: see `latest_time`.
     pub last_time: Option<OffsetDateTime>,
-    /// The latest time recorded on any line, and the sequence number of the
-    /// first line that records it. A decision clock before it was set back.
+    /// The latest time recorded on any entry, and the sequence number of the
+    /// first entry that records it. A decision clock before it was set back.
     pub latest_time: Option<(OffsetDateTime, u64)>,
     /// Number of adoption records.
     pub adoption_count: u64,
@@ -635,8 +637,7 @@ struct Parsed {
     lossy_adoption: Option<u64>,
     /// The adoption that the latest reference reconciliation names, if any.
     reconciled_adoption: Option<u64>,
-    /// The hash of every line; index 0 is the header, index `n` the line
-    /// with sequence number `n`.
+    /// The hash of the last physical line scanned.
     tail: Digest,
     prefix: Option<(u64, Digest)>,
     last_time: Option<OffsetDateTime>,
@@ -695,6 +696,7 @@ impl Parsed {
 enum Line {
     Spend(Entry),
     Debit(DebitLine),
+    DebitBatch(DebitBatchLine),
     Adopt(AdoptLine),
     Reconcile(ReconcileLine),
 }
@@ -704,6 +706,7 @@ enum Line {
 enum Shape {
     Spend,
     Debit,
+    DebitBatch,
     Adopt,
     Reconcile,
 }
@@ -738,15 +741,22 @@ impl Line {
         let attempt = |shape: Shape| match shape {
             Shape::Spend => serde_json::from_str(text).ok().map(Self::Spend),
             Shape::Debit => serde_json::from_str(text).ok().map(Self::Debit),
+            Shape::DebitBatch => serde_json::from_str(text).ok().map(Self::DebitBatch),
             Shape::Adopt => serde_json::from_str(text).ok().map(Self::Adopt),
             Shape::Reconcile => serde_json::from_str(text).ok().map(Self::Reconcile),
         };
         let first = Shape::guess(text);
         attempt(first).or_else(|| {
-            [Shape::Spend, Shape::Debit, Shape::Adopt, Shape::Reconcile]
-                .into_iter()
-                .filter(|shape| *shape != first)
-                .find_map(attempt)
+            [
+                Shape::Spend,
+                Shape::Debit,
+                Shape::DebitBatch,
+                Shape::Adopt,
+                Shape::Reconcile,
+            ]
+            .into_iter()
+            .filter(|shape| *shape != first)
+            .find_map(attempt)
         })
     }
 }
@@ -756,6 +766,8 @@ impl Shape {
     fn guess(text: &str) -> Self {
         if text.contains("\"charges\":") {
             Self::Debit
+        } else if text.contains("\"units\":") {
+            Self::DebitBatch
         } else if text.contains("\"carried\":") {
             Self::Adopt
         } else if text.contains("\"references\":") {
@@ -923,11 +935,23 @@ fn scan_ledger(
             }
             corrupt(number, "the line is not a complete ledger entry")
         })?;
-        let (seq, prev) = match &record {
-            Line::Spend(e) => (e.seq, &e.prev),
-            Line::Debit(e) => (e.seq, &e.prev),
-            Line::Adopt(a) => (a.seq, &a.prev),
-            Line::Reconcile(r) => (r.seq, &r.prev),
+        let (seq, last_seq, prev) = match &record {
+            Line::Spend(e) => (e.seq, e.seq, &e.prev),
+            Line::Debit(e) => (e.seq, e.seq, &e.prev),
+            Line::DebitBatch(e) => {
+                let Some(last) = e
+                    .units
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .and_then(|n| e.seq.checked_add(n))
+                else {
+                    return Err(corrupt(number, "the debit batch sequence range is invalid"));
+                };
+                (e.seq, last, &e.prev)
+            }
+            Line::Adopt(a) => (a.seq, a.seq, &a.prev),
+            Line::Reconcile(r) => (r.seq, r.seq, &r.prev),
         };
         if seq != parsed.seq + 1 {
             return Err(corrupt(
@@ -944,41 +968,56 @@ fn scan_ledger(
                 ),
             ));
         }
-        let event = match record {
-            Line::Spend(entry) => parse_spend(&mut parsed, entry).map(VerifiedEvent::Spend),
-            Line::Debit(debit) => parse_debit(&mut parsed, debit).map(VerifiedEvent::Debit),
-            Line::Adopt(adopt) => parse_adopt(&mut parsed, adopt).map(VerifiedEvent::Adopt),
-            Line::Reconcile(line) => {
-                parse_reconcile(&mut parsed, line).map(VerifiedEvent::Reconcile)
-            }
+        let events = match record {
+            Line::Spend(entry) => parse_spend(&mut parsed, entry)
+                .map(VerifiedEvent::Spend)
+                .map(|event| vec![event]),
+            Line::Debit(debit) => parse_debit(&mut parsed, debit)
+                .map(VerifiedEvent::Debit)
+                .map(|event| vec![event]),
+            Line::DebitBatch(batch) => parse_debit_batch(&mut parsed, batch)
+                .map(|debits| debits.into_iter().map(VerifiedEvent::Debit).collect()),
+            Line::Adopt(adopt) => parse_adopt(&mut parsed, adopt)
+                .map(VerifiedEvent::Adopt)
+                .map(|event| vec![event]),
+            Line::Reconcile(line) => parse_reconcile(&mut parsed, line)
+                .map(VerifiedEvent::Reconcile)
+                .map(|event| vec![event]),
         }
         .map_err(|detail| corrupt(number, detail))?;
-        visit(&event)?;
-        if collect {
-            match event {
-                VerifiedEvent::Spend(entry) => parsed.entries.push(entry),
-                VerifiedEvent::Debit(debit) => parsed.debits.push(debit),
-                VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(adopt),
-                VerifiedEvent::Reconcile(r) => parsed.reconciliations.push(r),
+        for event in events {
+            visit(&event)?;
+            if collect {
+                match event {
+                    VerifiedEvent::Spend(entry) => parsed.entries.push(entry),
+                    VerifiedEvent::Debit(debit) => parsed.debits.push(debit),
+                    VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(adopt),
+                    VerifiedEvent::Reconcile(r) => parsed.reconciliations.push(r),
+                }
             }
         }
-        parsed.seq = seq;
+        parsed.seq = last_seq;
         if let Some(time) = parsed.last_time
             && parsed.latest.is_none_or(|(latest, _)| time > latest)
         {
             parsed.latest = Some((time, seq));
         }
         parsed.tail = Digest::of(&line);
-        record_checkpoint(&mut checkpoints, seq, parsed.tail);
-        if requested == Some(seq) {
-            parsed.prefix = Some((seq, parsed.tail));
+        record_checkpoint(&mut checkpoints, last_seq, parsed.tail);
+        if requested == Some(last_seq) {
+            parsed.prefix = Some((last_seq, parsed.tail));
         }
     }
     Ok(parsed)
 }
 
 /// The events that the line shapes of this hallpass record.
-const KNOWN_EVENTS: [&str; 3] = ["debit", "adopt", reference::RECONCILE_EVENT];
+const KNOWN_EVENTS: [&str; 4] = [
+    "debit",
+    DEBIT_BATCH_EVENT,
+    "adopt",
+    reference::RECONCILE_EVENT,
+];
 
 /// For a line that no shape decodes: when it is a complete JSON object
 /// whose `event` this hallpass does not know, say so. A newer hallpass may
@@ -1003,6 +1042,10 @@ fn invalid_record(line: &[u8]) -> Option<String> {
     value.as_object()?;
     let (record, error) = match Shape::guess(text) {
         Shape::Debit => ("debit", serde_json::from_str::<DebitLine>(text).err()),
+        Shape::DebitBatch => (
+            "debit batch",
+            serde_json::from_str::<DebitBatchLine>(text).err(),
+        ),
         Shape::Adopt => ("adoption", serde_json::from_str::<AdoptLine>(text).err()),
         Shape::Reconcile => (
             "reconciliation",
@@ -1264,7 +1307,7 @@ fn compare(
             }
             let mut detail = if w.seq > p.seq {
                 format!(
-                    "the witness recorded {} line(s) after the header (spent: {}) on {}, but this ledger has only {}: lines were removed, or this is an older copy",
+                    "the witness recorded logical sequence {} (spent: {}) on {}, but this ledger ends at sequence {}: entries were removed, or this is an older copy",
                     w.seq,
                     totals_text(&w.totals),
                     w.updated,
@@ -1372,7 +1415,7 @@ fn warnings(
             "there is no witness for pass `{pass_id}` (a pass brought from another machine, user or state directory?); an allowed spend records one, and so does a spend refused by the pass itself (a ceiling, a destination, the dates); a spend that --require-new-ref refuses for want of a witness, and a --dry-run preview, record none. Until one is recorded, a lost or rewound ledger would not be noticed"
         )),
         WitnessStatus::Extended { added } => out.push(format!(
-            "the ledger has {added} line(s) after the last one the witness recorded (a spend, adoption or reference reconciliation that stopped before updating the witness, or a hallpass that keeps none); they are counted"
+            "the ledger extends the witness by {added} logical entries (a spend, debit batch, adoption or reference reconciliation stopped before updating the witness, or a hallpass that keeps none); they are counted"
         )),
         WitnessStatus::NotChecked { reason } => {
             out.push(format!("the ledger was not checked against its witness: {reason}"));

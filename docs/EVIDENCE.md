@@ -21,6 +21,13 @@ If the result is `found`, compare the receipt's digest, charge names and amounts
 
 A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. `reconciled_at` lists the first 64 sequences of the reference reconciliations that name the reference: the operator recorded that its debit may be in lines an adoption lost, so `absent` does not show that it was never debited, and a warning says so. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
 
+The Rust `spend_charges_batch*` API gives every member of a committed atomic
+batch its own logical sequence and ordinary receipt, even though all members
+occupy one physical ledger line. Look up and compare each caller reference
+exactly as above. All receipts are present or none is a valid debit prefix;
+after any API error the caller still sends nothing and reconciles the whole
+saved reference set.
+
 Use `--require-new-ref` with `--caller-ref` so cooperating workers on the same
 local history submit a given reference at most once. Record the intended unit
 and reference before submitting the guarded spend.

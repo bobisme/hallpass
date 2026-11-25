@@ -84,13 +84,15 @@ pub use files::{
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
     CheckpointExport, CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry,
-    LedgerView, MAX_CALLER_REF, MAX_NOTE, MAX_RECONCILED_REFERENCES, MAX_REFERENCE_LIST_BYTES,
-    ReconcileReferencesOutcome, RecordedTarget, ReferenceEvidence, ReferenceReconciliation,
-    SpendChargesOutcome, SpendChargesRequest, SpendOutcome, SpendRequest, Tally, WitnessRelation,
-    WitnessStatus, adopt, adopt_guarded, display_quoted, display_safe, export_checkpoint,
-    export_checkpoint_observed, ledger_path, preview_adopt, preview_spend_in,
-    preview_spend_with_clock_in, read_ledger, read_reference_list, read_summary,
-    reconcile_references, rfc3339, spend, spend_charges, spend_charges_in,
+    LedgerView, MAX_CALLER_REF, MAX_DEBIT_BATCH_UNITS, MAX_NOTE, MAX_RECONCILED_REFERENCES,
+    MAX_REFERENCE_LIST_BYTES, ReconcileReferencesOutcome, RecordedTarget, ReferenceEvidence,
+    ReferenceReconciliation, SpendChargesBatchOutcome, SpendChargesBatchRequest,
+    SpendChargesBatchUnitOutcome, SpendChargesOutcome, SpendChargesRequest, SpendOutcome,
+    SpendRequest, Tally, WitnessRelation, WitnessStatus, adopt, adopt_guarded, display_quoted,
+    display_safe, export_checkpoint, export_checkpoint_observed, ledger_path, preview_adopt,
+    preview_spend_in, preview_spend_with_clock_in, read_ledger, read_reference_list, read_summary,
+    reconcile_references, rfc3339, spend, spend_charges, spend_charges_batch,
+    spend_charges_batch_in, spend_charges_batch_with_clock_in, spend_charges_in,
     spend_charges_with_clock_in, spend_in, spend_with_clock_in, tally, verify_checkpoint,
 };
 pub use ledger::{capacity, evidence, scenario};

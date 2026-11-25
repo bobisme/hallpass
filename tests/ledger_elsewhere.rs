@@ -149,7 +149,7 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
         "This pass file: q.toml.",
         "Expected ledger: q.toml.ledger (does not exist)",
         &format!("Live ledger: {}", live.display()),
-        "(3 ledger line(s), spent: calls 3)",
+        "(last logical sequence 3, spent: calls 3)",
         &format!(
             "Pass file beside the live ledger: {}, so this pass file is a second pass file with the same id",
             case.path("p.toml").display()

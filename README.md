@@ -119,7 +119,7 @@ Ledger of pass example-2026-11 (engagement.pass.toml.ledger)
       1  2026-11-20T09:00:00Z  calls                   1  sha256:b28f258fae01  note: first call
 Totals:
   calls            1 spent of 6
-Ledger: 1 line(s) after the header, chain verified, the witness matches
+Ledger: logical entries after the header: 1; chain verified, the witness matches
 Current pass digest: sha256:…
 ```
 
@@ -148,7 +148,7 @@ preview adoption and review the totals before recording recovery. Set
 
 ```text
 $ hallpass status engagement.pass.toml
-hallpass status: error: the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says hallpass recorded 1 ledger line(s) for this pass id (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
+hallpass status: error: the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says its last logical ledger sequence was 1 (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
 
 $ hallpass adopt engagement.pass.toml --preview --json
 …

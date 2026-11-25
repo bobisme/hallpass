@@ -624,6 +624,29 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+### Reserve a compound call without a paid prefix
+
+Use `spend_charges_batch*` when one external operation will submit several
+distinct requests only if all of them can be reserved. Build one
+`SpendChargesRequest` per request with exactly one `Charge { amount: 1, ..
+}`, a distinct `caller_ref`, `require_new_ref = true`, and an optional
+`policy.target` with `record_targets = true`. Pass their slice to
+`SpendChargesBatchRequest::new`. The batch accepts at most
+`MAX_DEBIT_BATCH_UNITS` (1024) units and one common counter. Its
+`lock_timeout` and `on_lock_wait` govern the one lock acquisition; per-unit
+lock settings are refused.
+
+A refusal has `units.is_empty()`, leaves the actual `spent` unchanged and
+names `refused_unit`; do not send any member. Success has one
+`SpendChargesBatchUnitOutcome` per request, in order, with a distinct
+sequence and the exact receipt retained in the ledger. Persist the intended
+references before calling and persist those outcomes before sending. After
+any error, send nothing and reconcile every reference with
+`evidence::lookup_receipt`; a synced batch with a failed witness update is
+visible there as all of its ordinary receipts. A partial append is one
+incomplete final line, never a valid subset of the batch, and the ledger
+fails closed until recovered.
+
 `Pass::permits` and `Pass::permits_named` are pure: they answer for a
 `Pass` already in memory and read nothing. Use them for further addresses of
 a unit that `spend` has counted, and load the pass again (`hallpass::load`)

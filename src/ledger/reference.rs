@@ -188,7 +188,7 @@ pub(super) struct ReferenceMatches<'a> {
     /// The first reconciliations that list the reference: their sequence
     /// and the adoption each names.
     reconciled: Vec<(u64, u64)>,
-    /// Lines after the header (spends, debits, adoptions, reconciliations).
+    /// Logical entries after the header (spends, debits, adoptions, reconciliations).
     lines: u64,
     /// The latest adoption that may have lost references, while no
     /// reconciliation follows it.
@@ -297,7 +297,7 @@ impl<'a> ReferenceMatches<'a> {
             (
                 RefusalCode::ReferenceInconclusive,
                 format!(
-                    "cannot establish that the caller reference is new because the ledger has {} line(s) but no local witness, so hallpass cannot tell whether later lines were lost (for example in a partial copy). If this ledger is the complete history (for example it moved here with the pass), run `hallpass adopt {} --reason \"...\"`: the adoption keeps every line and carries nothing, a witness is recorded, and later guarded spends check references against this ledger. Otherwise reconcile the reference with your run record",
+                    "cannot establish that the caller reference is new because the ledger's last logical sequence is {} but there is no local witness, so hallpass cannot tell whether later ledger data was lost (for example in a partial copy). If this ledger is the complete history (for example it moved here with the pass), run `hallpass adopt {} --reason \"...\"`: the adoption keeps every line and carries nothing, a witness is recorded, and later guarded spends check references against this ledger. Otherwise reconcile the reference with your run record",
                     self.lines,
                     loaded.path.display()
                 ),

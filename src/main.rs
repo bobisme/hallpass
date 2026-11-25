@@ -1917,7 +1917,7 @@ fn ledger_state_text(view: &hallpass::LedgerView) -> String {
     if !view.exists {
         return "none yet (nothing spent)".to_owned();
     }
-    let lines = view.tip.as_ref().map_or(0, |tip| tip.seq);
+    let entries = view.tip.as_ref().map_or(0, |tip| tip.seq);
     let witness = match &view.witness {
         W::Matches => "the witness matches",
         W::Extended { .. } => "the witness is behind (see the warning)",
@@ -1926,7 +1926,7 @@ fn ledger_state_text(view: &hallpass::LedgerView) -> String {
         _ => "",
     };
     format!(
-        "{lines} line(s) after the header, chain verified, {witness}{}",
+        "logical entries after the header: {entries}; chain verified, {witness}{}",
         if view.moved_from.is_some() {
             "; it was moved or copied (see the warning)"
         } else {

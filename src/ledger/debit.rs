@@ -12,6 +12,12 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const DEBIT_VERSION: u32 = 1;
 
+/// The `event` of an atomic batch of referenced unit debits.
+pub(super) const DEBIT_BATCH_EVENT: &str = "debit-batch";
+
+/// The most unit debits one atomic batch may hold.
+pub const MAX_DEBIT_BATCH_UNITS: usize = 1_024;
+
 /// Maximum length of a caller reference, in characters.
 pub const MAX_CALLER_REF: usize = 128;
 
@@ -91,6 +97,27 @@ pub(super) struct DebitLine {
     pub(super) note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) receipt: Option<DebitReceipt>,
+    pub(super) prev: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DebitBatchUnit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) note: Option<String>,
+    pub(super) receipt: DebitReceipt,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DebitBatchLine {
+    pub(super) seq: u64,
+    pub(super) time: String,
+    pub(super) event: String,
+    pub(super) version: u32,
+    pub(super) counter: String,
+    pub(super) units: Vec<DebitBatchUnit>,
+    pub(super) digest: String,
     pub(super) prev: String,
 }
 
@@ -273,6 +300,64 @@ pub(super) fn parse_debit(
     })
 }
 
+pub(super) fn parse_debit_batch(
+    parsed: &mut Parsed,
+    line: DebitBatchLine,
+) -> Result<Vec<LedgerDebit>, &'static str> {
+    if line.event != DEBIT_BATCH_EVENT
+        || line.version != DEBIT_VERSION
+        || !(1..=MAX_DEBIT_BATCH_UNITS).contains(&line.units.len())
+        || !is_counter_name(&line.counter)
+    {
+        return Err("the debit batch header is invalid");
+    }
+    let (Some(digest), Ok(time)) = (
+        parsed.pass_digest(&line.digest),
+        OffsetDateTime::parse(&line.time, &Rfc3339),
+    ) else {
+        return Err("the debit batch time or digest is invalid");
+    };
+    let mut references = BTreeSet::new();
+    for unit in &line.units {
+        let Some(reference) = unit.receipt.caller_ref.as_deref() else {
+            return Err("a debit batch unit has no caller reference");
+        };
+        if !valid_text(reference, MAX_CALLER_REF)
+            || !references.insert(reference)
+            || unit.receipt.targets.len() > 1
+            || !valid_receipt(&unit.receipt, &mut parsed.valid_targets)
+            || unit.note.as_deref().is_some_and(|n| check_note(n).is_err())
+        {
+            return Err("a debit batch unit is invalid");
+        }
+    }
+    let count = u64::try_from(line.units.len()).map_err(|_| "the debit batch is too large")?;
+    add(&mut parsed.tally.spent, &line.counter, count)
+        .ok_or("the recorded amounts add up beyond any ceiling")?;
+    parsed.tally.entries = parsed
+        .tally
+        .entries
+        .checked_add(count)
+        .ok_or("the recorded entry count is too large")?;
+    parsed.last_time = Some(time);
+    Ok(line
+        .units
+        .into_iter()
+        .enumerate()
+        .map(|(index, unit)| LedgerDebit {
+            seq: line.seq + index as u64,
+            time,
+            charges: vec![DebitCharge {
+                counter: line.counter.clone(),
+                amount: 1,
+            }],
+            digest,
+            note: unit.note,
+            receipt: Some(unit.receipt),
+        })
+        .collect())
+}
+
 use std::path::Path;
 
 use super::{
@@ -415,6 +500,135 @@ pub struct SpendChargesOutcome {
     pub warnings: Vec<String>,
 }
 
+/// Several referenced one-unit debits decided and committed as one ledger record.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SpendChargesBatchRequest<'a> {
+    /// Unit requests, in the order their distinct sequences are assigned.
+    pub units: &'a [SpendChargesRequest<'a>],
+    /// Maximum total wait for the witness and ledger locks.
+    pub lock_timeout: Option<std::time::Duration>,
+    /// Called once when a lock has been busy for about two seconds.
+    pub on_lock_wait: Option<fn(&crate::files::LockWait)>,
+}
+
+impl<'a> SpendChargesBatchRequest<'a> {
+    /// Construct one atomic batch.
+    #[must_use]
+    pub const fn new(units: &'a [SpendChargesRequest<'a>]) -> Self {
+        Self {
+            units,
+            lock_timeout: None,
+            on_lock_wait: None,
+        }
+    }
+
+    fn validate(&self) -> Result<&'a str, Error> {
+        let usage = |message| Error::Usage(format!("{message}; nothing was recorded"));
+        if !(1..=MAX_DEBIT_BATCH_UNITS).contains(&self.units.len()) {
+            return Err(usage(&format!(
+                "an atomic debit batch needs between 1 and {MAX_DEBIT_BATCH_UNITS} units"
+            )));
+        }
+        let mut references = BTreeSet::new();
+        let mut counter = None;
+        for (index, unit) in self.units.iter().enumerate() {
+            unit.validate()?;
+            let number = index + 1;
+            if unit.dry_run {
+                return Err(usage(&format!("unit {number} is a dry run")));
+            }
+            if unit.policy.lock_timeout.is_some() || unit.policy.on_lock_wait.is_some() {
+                return Err(usage(&format!(
+                    "unit {number} sets a per-unit lock wait; set the batch lock_timeout or on_lock_wait instead"
+                )));
+            }
+            if unit.charges.len() != 1 || unit.charges[0].amount != 1 {
+                return Err(usage(&format!(
+                    "unit {number} must contain exactly one charge with amount 1"
+                )));
+            }
+            let this_counter = unit.charges[0].counter;
+            if counter
+                .replace(this_counter)
+                .is_some_and(|first| first != this_counter)
+            {
+                return Err(usage(&format!(
+                    "unit {number} charges a different counter; every unit must charge the same counter"
+                )));
+            }
+            let Some(reference) = unit.caller_ref else {
+                return Err(usage(&format!("unit {number} has no caller reference")));
+            };
+            if !unit.require_new_ref {
+                return Err(usage(&format!(
+                    "unit {number} does not require a new caller reference"
+                )));
+            }
+            if !references.insert(reference) {
+                return Err(usage(&format!(
+                    "unit {number} repeats a caller reference in this batch"
+                )));
+            }
+            if !unit.policy.additional_targets.is_empty() {
+                return Err(usage(&format!(
+                    "unit {number} has more than one target; an atomic unit debit accepts one optional target"
+                )));
+            }
+            if unit.policy.target.is_some() != unit.record_targets {
+                return Err(usage(&format!(
+                    "unit {number} must record its target when it has one, and cannot record one when it has none"
+                )));
+            }
+        }
+        Ok(counter.expect("a nonempty batch has a counter"))
+    }
+}
+
+/// Sequence and receipt evidence for one committed unit of a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpendChargesBatchUnitOutcome {
+    /// The caller reference retained in the receipt.
+    pub caller_ref: String,
+    /// This unit's distinct logical ledger sequence.
+    pub seq: u64,
+    /// Matched destination labels, empty for a targetless unit.
+    pub labels: Vec<String>,
+    /// The receipt retained in the ledger.
+    pub receipt: DebitReceipt,
+}
+
+/// The all-or-none result of an atomic referenced-unit batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SpendChargesBatchOutcome {
+    /// The first refusal in unit order. A refusal records no unit.
+    pub refusal: Option<Refusal>,
+    /// One-based index of the refused unit.
+    pub refused_unit: Option<usize>,
+    /// Historical evidence for a duplicate or inconclusive caller reference.
+    pub reference_evidence: Option<ReferenceEvidence>,
+    /// The common counter charged once by each unit.
+    pub counter: String,
+    /// The pass's ceiling for the counter.
+    pub total: Option<u64>,
+    /// The actual recorded total: unchanged on refusal, increased by every unit on success.
+    pub spent: u64,
+    /// The budget available after this decision.
+    pub remaining: Option<u64>,
+    /// One entry per committed unit, empty on refusal.
+    pub units: Vec<SpendChargesBatchUnitOutcome>,
+    /// The digest used for the decision.
+    pub digest: Digest,
+    /// The clock used for the decision under the locks.
+    pub now: OffsetDateTime,
+    /// The pass identifier.
+    pub pass_id: String,
+    /// Ledger or witness warnings.
+    pub warnings: Vec<String>,
+}
+
 /// Decide an atomic debit using the process's state directory.
 ///
 /// # Errors
@@ -426,6 +640,210 @@ pub fn spend_charges(
     now: OffsetDateTime,
 ) -> Result<SpendChargesOutcome, Error> {
     spend_charges_in(pass_path, request, now, &StateDir::from_env())
+}
+
+/// Atomically decide and commit several distinct referenced one-unit debits.
+///
+/// # Errors
+///
+/// See [`spend_charges_batch_in`].
+pub fn spend_charges_batch(
+    pass_path: &Path,
+    request: &SpendChargesBatchRequest<'_>,
+    now: OffsetDateTime,
+) -> Result<SpendChargesBatchOutcome, Error> {
+    spend_charges_batch_in(pass_path, request, now, &StateDir::from_env())
+}
+
+/// Atomically decide and commit several distinct referenced one-unit debits.
+///
+/// Every unit must charge amount 1 from the same counter, carry a distinct
+/// caller reference with `require_new_ref`, and have at most one target. All
+/// references, policy inputs, targets and the aggregate ceiling are checked
+/// under one witness/ledger lock. A refusal records nothing. Success appends
+/// one synced batch line whose units expand to distinct logical sequences and
+/// ordinary receipts, then publishes one witness for the final sequence.
+/// Consequently a short append cannot form a valid paid prefix of the batch:
+/// the whole line verifies or the ledger fails closed. A failure after the
+/// line syncs is reconciled exactly like a scalar debit by looking up each
+/// receipt; [`Error::WitnessNotUpdated`] reports the batch's final sequence.
+///
+/// # Errors
+///
+/// Invalid requests, unverifiable state and I/O errors stop the caller. On an
+/// append error the final line may be complete or partial; do not send, and
+/// reconcile the references against the verified ledger before retrying.
+pub fn spend_charges_batch_in(
+    pass_path: &Path,
+    request: &SpendChargesBatchRequest<'_>,
+    now: OffsetDateTime,
+    state: &StateDir,
+) -> Result<SpendChargesBatchOutcome, Error> {
+    check_clock(now)?;
+    spend_charges_batch_with_clock_in(pass_path, request, state, || now)
+}
+
+/// As [`spend_charges_batch_in`], sampling the clock after both locks.
+///
+/// # Errors
+///
+/// See [`spend_charges_batch_in`].
+pub fn spend_charges_batch_with_clock_in(
+    pass_path: &Path,
+    request: &SpendChargesBatchRequest<'_>,
+    state: &StateDir,
+    clock: impl FnOnce() -> OffsetDateTime,
+) -> Result<SpendChargesBatchOutcome, Error> {
+    spend_batch_using(pass_path, request, state, clock, StateDir::publish)
+}
+
+#[allow(clippy::too_many_lines)]
+fn spend_batch_using(
+    pass_path: &Path,
+    request: &SpendChargesBatchRequest<'_>,
+    state: &StateDir,
+    clock: impl FnOnce() -> OffsetDateTime,
+    write_witness: impl FnOnce(&StateDir, &str, &PreparedWitness) -> Result<(), Error>,
+) -> Result<SpendChargesBatchOutcome, Error> {
+    let counter = request.validate()?;
+    let mut matches: Vec<_> = request
+        .units
+        .iter()
+        .map(SpendChargesRequest::reference_matches)
+        .collect();
+    let mut locked = lock_for_writing_notifying(
+        pass_path,
+        state,
+        false,
+        None,
+        request.lock_timeout,
+        request.on_lock_wait,
+        &mut |event| {
+            for matches in &mut matches {
+                matches.observe(event);
+            }
+            Ok(())
+        },
+    )?;
+    let (identity, mut warnings) = prepare_witness(pass_path, &locked, state, false)?;
+    let now = clock();
+    check_clock(now)?;
+    warn_clock_rollback(now, locked.parsed.latest, &mut warnings);
+    let initial = locked.parsed.tally.spent(counter);
+    let total = locked.loaded.pass.ceilings.get(counter).copied();
+    let digest = locked.loaded.digest;
+    let pass_id = locked.loaded.pass.id.clone();
+    let common =
+        |refusal, refused_unit, reference_evidence, spent, units| SpendChargesBatchOutcome {
+            refusal,
+            refused_unit,
+            reference_evidence,
+            counter: counter.to_owned(),
+            total,
+            spent,
+            remaining: total.map(|limit| limit.saturating_sub(spent)),
+            units,
+            digest,
+            now,
+            pass_id: pass_id.clone(),
+            warnings: warnings.clone(),
+        };
+    let witnessed = locked.witness.is_some();
+    let mut projected = locked.parsed.tally.clone();
+    let mut decided = Vec::with_capacity(request.units.len());
+    for (index, (unit, matches)) in request.units.iter().zip(matches).enumerate() {
+        let reference = matches.refusal(&locked.loaded, &unit.policy, now, witnessed);
+        let outcome = decide_debit(
+            &locked.loaded,
+            &projected,
+            unit,
+            now,
+            Vec::new(),
+            None,
+            reference,
+        );
+        if let Some(refusal) = outcome.refusal {
+            return Ok(common(
+                Some(refusal),
+                Some(index + 1),
+                outcome.reference_evidence,
+                initial,
+                Vec::new(),
+            ));
+        }
+        projected.spent.insert(
+            counter.to_owned(),
+            projected.spent(counter).checked_add(1).ok_or_else(|| {
+                Error::Usage("the batch total is too large; nothing was recorded".to_owned())
+            })?,
+        );
+        let receipt = make_receipt(unit, &outcome.labels)
+            .expect("a validated batch unit always carries a caller reference");
+        decided.push((outcome.labels, receipt));
+    }
+    let start = locked.parsed.seq.checked_add(1).ok_or_else(|| {
+        Error::Usage("the ledger sequence is exhausted; nothing was recorded".to_owned())
+    })?;
+    let end = start
+        .checked_add(request.units.len() as u64 - 1)
+        .ok_or_else(|| {
+            Error::Usage("the ledger sequence is exhausted; nothing was recorded".to_owned())
+        })?;
+    let line = DebitBatchLine {
+        seq: start,
+        time: rfc3339(now),
+        event: DEBIT_BATCH_EVENT.to_owned(),
+        version: DEBIT_VERSION,
+        counter: counter.to_owned(),
+        units: request
+            .units
+            .iter()
+            .zip(&decided)
+            .map(|(unit, (_, receipt))| DebitBatchUnit {
+                note: unit.policy.note.map(str::to_owned),
+                receipt: receipt.clone(),
+            })
+            .collect(),
+        digest: locked.loaded.digest.to_string(),
+        prev: locked.parsed.tail().to_string(),
+    };
+    let text = serde_json::to_string(&line).map_err(|e| Error::Usage(e.to_string()))?;
+    let prepared = state.prepare(
+        &locked.loaded.pass.id,
+        &Witnessed {
+            ledger: identity,
+            seq: end,
+            tail: Digest::of(text.as_bytes()),
+            totals: projected.spent.clone(),
+            updated: stamp(now),
+        },
+    )?;
+    append(&mut locked, &text, "debit batch")?;
+    write_witness(state, &locked.loaded.pass.id, &prepared).map_err(|e| {
+        Error::WitnessNotUpdated {
+            path: locked.path.clone(),
+            seq: end,
+            detail: e.to_string(),
+        }
+    })?;
+    let units = request
+        .units
+        .iter()
+        .zip(decided)
+        .enumerate()
+        .map(
+            |(index, (request, (labels, receipt)))| SpendChargesBatchUnitOutcome {
+                caller_ref: request
+                    .caller_ref
+                    .expect("a validated batch unit has a caller reference")
+                    .to_owned(),
+                seq: start + index as u64,
+                labels,
+                receipt,
+            },
+        )
+        .collect();
+    Ok(common(None, None, None, projected.spent(counter), units))
 }
 
 /// Decide an atomic debit using an explicit clock and state directory.
@@ -725,7 +1143,9 @@ fn preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Error, RefusalCode, WitnessStatus, adopt, load, read_ledger, spend_in};
+    use crate::{
+        Error, RefusalCode, WitnessStatus, adopt, ledger_path, load, read_ledger, spend_in,
+    };
     use proptest::prelude::*;
     use std::{fmt::Write as _, fs, io::Cursor, os::unix::fs::PermissionsExt, path::PathBuf};
     use time::macros::datetime;
@@ -958,6 +1378,326 @@ mod tests {
                 .entries,
             1
         );
+    }
+
+    fn batch_units<'a>(
+        charges: &'a [Charge<'a>],
+        references: &'a [&'a str],
+    ) -> Vec<SpendChargesRequest<'a>> {
+        references
+            .iter()
+            .map(|reference| {
+                let mut unit = SpendChargesRequest::new(charges);
+                unit.caller_ref = Some(reference);
+                unit.require_new_ref = true;
+                unit
+            })
+            .collect()
+    }
+
+    #[test]
+    fn referenced_unit_batch_commits_distinct_sequences_receipts_and_one_line() {
+        let (_dir, path, state) = setup();
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 1", "requests = 3");
+        fs::write(&path, pass).expect("pass");
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let references = ["race/1", "race/2", "race/3"];
+        let mut units = batch_units(&charges, &references);
+        units[1].policy.target = Some("192.0.2.10:5060/udp".parse().expect("target"));
+        units[1].record_targets = true;
+
+        let outcome =
+            spend_charges_batch_in(&path, &SpendChargesBatchRequest::new(&units), NOW, &state)
+                .expect("batch decision");
+        assert!(outcome.refusal.is_none());
+        assert_eq!(outcome.spent, 3);
+        assert_eq!(outcome.remaining, Some(0));
+        assert_eq!(
+            outcome
+                .units
+                .iter()
+                .map(|unit| unit.seq)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(outcome.units[1].receipt.targets.len(), 1);
+
+        let ledger = fs::read_to_string(ledger_path(&path)).expect("ledger");
+        assert_eq!(
+            ledger.lines().count(),
+            2,
+            "header and one atomic batch line"
+        );
+        let loaded = load(&path).expect("pass");
+        let view = read_ledger(&loaded, &state).expect("view");
+        assert_eq!(view.tally.entries, 3);
+        assert_eq!(view.tally.spent("requests"), 3);
+        assert_eq!(
+            view.debits
+                .iter()
+                .map(|debit| debit.seq)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        for (index, reference) in references.into_iter().enumerate() {
+            let receipt = crate::evidence::lookup_receipt(&loaded, &state, reference)
+                .expect("receipt lookup");
+            assert_eq!(receipt.result, "found");
+            assert_eq!(receipt.matches[0].seq, index as u64 + 1);
+            assert_eq!(receipt.matches[0].charges[0].amount, 1);
+        }
+    }
+
+    #[test]
+    fn batch_sequence_range_links_scalar_entries_on_both_sides() {
+        let (_dir, path, state) = setup();
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 1", "requests = 4");
+        fs::write(&path, pass).expect("pass");
+        assert_eq!(
+            spend_in(&path, &SpendRequest::new("requests", 1), NOW, &state)
+                .expect("first scalar")
+                .seq,
+            Some(1)
+        );
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let references = ["race/1", "race/2"];
+        let units = batch_units(&charges, &references);
+        let batch =
+            spend_charges_batch_in(&path, &SpendChargesBatchRequest::new(&units), NOW, &state)
+                .expect("batch");
+        assert_eq!(
+            batch.units.iter().map(|unit| unit.seq).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert_eq!(
+            spend_in(&path, &SpendRequest::new("requests", 1), NOW, &state)
+                .expect("following scalar")
+                .seq,
+            Some(4)
+        );
+        let view = read_ledger(&load(&path).expect("pass"), &state).expect("mixed ledger");
+        assert_eq!(
+            view.entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            [1, 4]
+        );
+        assert_eq!(
+            view.debits
+                .iter()
+                .map(|debit| debit.seq)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert_eq!(view.tally.spent("requests"), 4);
+        assert_eq!(view.witness, WitnessStatus::Matches);
+    }
+
+    #[test]
+    fn batch_ceiling_and_policy_refusals_record_no_unit() {
+        let (_dir, path, state) = setup();
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 1", "requests = 2");
+        fs::write(&path, pass).expect("pass");
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let references = ["race/1", "race/2", "race/3"];
+        let units = batch_units(&charges, &references);
+        let ceiling =
+            spend_charges_batch_in(&path, &SpendChargesBatchRequest::new(&units), NOW, &state)
+                .expect("ceiling decision");
+        assert_eq!(ceiling.refused_unit, Some(3));
+        assert_eq!(
+            ceiling.refusal.expect("refusal").code,
+            RefusalCode::CeilingReached
+        );
+        assert_eq!(ceiling.spent, 0);
+        assert_eq!(ceiling.units.len(), 0);
+        assert_eq!(
+            read_ledger(&load(&path).expect("pass"), &state)
+                .expect("ledger")
+                .tally
+                .spent("requests"),
+            0
+        );
+
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 2", "requests = 3");
+        fs::write(&path, pass).expect("pass");
+        let mut units = batch_units(&charges, &references);
+        units[1].policy.target = Some("192.0.2.99:5060/udp".parse().expect("target"));
+        units[1].record_targets = true;
+        let policy =
+            spend_charges_batch_in(&path, &SpendChargesBatchRequest::new(&units), NOW, &state)
+                .expect("policy decision");
+        assert_eq!(policy.refused_unit, Some(2));
+        assert!(policy.refusal.is_some());
+        assert_eq!(policy.spent, 0);
+        assert_eq!(policy.units.len(), 0);
+        assert_eq!(
+            read_ledger(&load(&path).expect("pass"), &state)
+                .expect("ledger")
+                .tally
+                .spent("requests"),
+            0
+        );
+    }
+
+    #[test]
+    fn batch_duplicate_reference_refuses_the_whole_batch_with_evidence() {
+        let (_dir, path, state) = setup();
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 1", "requests = 4");
+        fs::write(&path, pass).expect("pass");
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let mut existing = SpendChargesRequest::new(&charges);
+        existing.caller_ref = Some("race/2");
+        assert_eq!(
+            spend_charges_in(&path, &existing, NOW, &state)
+                .expect("existing debit")
+                .seq,
+            Some(1)
+        );
+        let references = ["race/1", "race/2", "race/3"];
+        let units = batch_units(&charges, &references);
+        let duplicate =
+            spend_charges_batch_in(&path, &SpendChargesBatchRequest::new(&units), NOW, &state)
+                .expect("duplicate decision");
+        assert_eq!(duplicate.refused_unit, Some(2));
+        assert_eq!(
+            duplicate.refusal.expect("refusal").code,
+            RefusalCode::DuplicateReference
+        );
+        assert_eq!(
+            duplicate
+                .reference_evidence
+                .expect("reference evidence")
+                .sequences,
+            [1]
+        );
+        assert_eq!(duplicate.spent, 1);
+        assert_eq!(duplicate.units.len(), 0);
+        let view = read_ledger(&load(&path).expect("pass"), &state).expect("ledger");
+        assert_eq!(view.tally.spent("requests"), 1);
+        assert_eq!(view.tally.entries, 1);
+    }
+
+    #[test]
+    fn batch_validates_new_distinct_one_unit_references_before_creating_a_ledger() {
+        let (_dir, path, state) = setup();
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let references = ["same", "same"];
+        let units = batch_units(&charges, &references);
+        assert!(matches!(
+            spend_charges_batch_in(
+                &path,
+                &SpendChargesBatchRequest::new(&units),
+                NOW,
+                &state
+            ),
+            Err(Error::Usage(message)) if message.contains("repeats a caller reference")
+        ));
+        assert!(!ledger_path(&path).exists());
+
+        let references = ["one", "two"];
+        let mut units = batch_units(&charges, &references);
+        units[1].require_new_ref = false;
+        assert!(matches!(
+            spend_charges_batch_in(
+                &path,
+                &SpendChargesBatchRequest::new(&units),
+                NOW,
+                &state
+            ),
+            Err(Error::Usage(message)) if message.contains("does not require a new caller reference")
+        ));
+        assert!(!ledger_path(&path).exists());
+    }
+
+    #[test]
+    fn batch_witness_failure_and_every_partial_byte_count_have_no_paid_prefix() {
+        let (_dir, path, state) = setup();
+        let pass = fs::read_to_string(&path)
+            .expect("pass")
+            .replace("requests = 1", "requests = 3");
+        fs::write(&path, pass).expect("pass");
+        let charges = [Charge {
+            counter: "requests",
+            amount: 1,
+        }];
+        let references = ["race/1", "race/2", "race/3"];
+        let units = batch_units(&charges, &references);
+        let request = SpendChargesBatchRequest::new(&units);
+        let failure = spend_batch_using(
+            &path,
+            &request,
+            &state,
+            || NOW,
+            |_, _, _| Err(Error::Usage("simulated witness failure".to_owned())),
+        );
+        assert!(matches!(
+            failure,
+            Err(Error::WitnessNotUpdated { seq: 3, .. })
+        ));
+        let loaded = load(&path).expect("pass");
+        let view = read_ledger(&loaded, &state).expect("verified extension");
+        assert_eq!(view.witness, WitnessStatus::Extended { added: 3 });
+        assert_eq!(view.tally.spent("requests"), 3);
+        for (index, reference) in references.into_iter().enumerate() {
+            let receipt = crate::evidence::lookup_receipt(&loaded, &state, reference)
+                .expect("receipt after witness failure");
+            assert_eq!(receipt.matches[0].seq, index as u64 + 1);
+        }
+
+        let bytes = fs::read(ledger_path(&path)).expect("ledger bytes");
+        let split = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .expect("header newline")
+            + 1;
+        let (header, batch) = bytes.split_at(split);
+        for cut in 0..=batch.len() {
+            let mut candidate = header.to_vec();
+            candidate.extend_from_slice(&batch[..cut]);
+            let parsed = super::super::parse_ledger(
+                Path::new("byte-count.ledger"),
+                Cursor::new(candidate),
+                &loaded.pass.id,
+                true,
+                None,
+            );
+            match cut {
+                0 => assert_eq!(parsed.expect("no append").tally.spent("requests"), 0),
+                n if n == batch.len() => {
+                    let parsed = parsed.expect("complete batch");
+                    assert_eq!(parsed.tally.spent("requests"), 3);
+                    assert_eq!(parsed.debits.len(), 3);
+                }
+                _ => assert!(parsed.is_err(), "byte cut {cut} formed a paid prefix"),
+            }
+        }
     }
 
     #[test]

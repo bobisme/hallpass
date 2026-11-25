@@ -273,6 +273,38 @@ reported current balances and the ledger unchanged. Historical scalar debits
 and adoption carry-forward remain valid, and tallying counts a multi-charge
 unit once while adding each charge to its counter.
 
+#### Several referenced units in one atomic batch
+
+The Rust library can reserve a compound call with
+`spend_charges_batch*`. A `SpendChargesBatchRequest` holds 1 to 1024
+`SpendChargesRequest` units. Every unit has exactly one charge of amount 1,
+all units charge the same counter, each supplies a distinct caller reference
+with `require_new_ref = true`, and each has either no target or one checked
+and retained target. Lock-wait options belong to the batch. Invalid input is
+rejected before a ledger is created.
+
+Hallpass takes the witness and ledger locks once, verifies every reference,
+applies every unit's digest, window and target policy, and advances a
+prospective tally in request order. The first refusal names its one-based
+unit and records none of them. Thus an aggregate ceiling shortage cannot
+leave a paid prefix.
+
+Success appends and syncs one `debit-batch` JSON line. Its units are ordinary
+logical debits with contiguous, distinct sequences and receipts; `ledger`,
+`receipt`, audits and reference guards expose them like scalar versioned
+debits. The line hash is the checkpoint for the last sequence, and the
+witness records that sequence and all resulting totals. Sequence counts are
+therefore logical entry counts, not physical JSON-line counts. An older
+Hallpass does not recognize `debit-batch` and fails closed at that line.
+
+This single-line encoding is the partial-I/O boundary. A write of zero bytes
+commits no unit, the complete newline-terminated line commits every unit, and
+every strict byte prefix is an incomplete final line that forms no paid
+prefix and makes the ledger fail closed. The caller must not perform the
+external work after any append or witness error. After a synced line and a
+failed witness update, each ordinary receipt lookup supplies the unique
+sequence needed to reconcile the caller's durable run record.
+
 #### Preview
 
 `spend --dry-run` returns 0 / `would-allow`, 2 / `refused` or 1 / `error`.
@@ -347,6 +379,12 @@ the same rules and reports observed matches without a reservation. The
 guard coordinates cooperating guarded writers on the same local history.
 External execution requires a separate record. The Rust option is
 `SpendChargesRequest::require_new_ref`.
+
+For a compound call, `SpendChargesBatchRequest` requires that option and a
+distinct reference on every unit. One duplicate or inconclusive reference
+refuses the whole batch; `refused_unit` and `reference_evidence` identify the
+first one in request order. On success each
+`SpendChargesBatchUnitOutcome` supplies its sequence and retained receipt.
 
 #### Damaged ledger advice
 
@@ -1345,13 +1383,14 @@ Crate `hallpass` (re-exports `time`):
 | `spend_in(path, &SpendRequest, now, &StateDir)` | the same with an explicit state directory |
 | `spend_with_clock_in`, `preview_spend_in`, `preview_spend_with_clock_in` | the same with the clock sampled under the locks, and read-only previews |
 | `spend_charges`, `spend_charges_in`, `spend_charges_with_clock_in`, `SpendChargesRequest`, `SpendChargesOutcome`, `Charge`, `ChargeOutcome` | one debit with several charges, an optional caller reference, receipt and reference guard |
+| `spend_charges_batch`, `spend_charges_batch_in`, `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`, `SpendChargesBatchOutcome`, `SpendChargesBatchUnitOutcome`, `MAX_DEBIT_BATCH_UNITS` | 1 to 1024 distinct guarded caller-reference debits, each one unit of the same counter and with one optional retained target, decided under one lock and committed as one all-or-none ledger line |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
 | `preview_adopt`, `adopt_guarded`, `AdoptPreview` | the adoption preview and its token |
 | `reconcile_references(path, adoption, &[String], reason, now, &StateDir) -> Result<ReconcileReferencesOutcome, Error>`, `read_reference_list(path, pass_id)`, `ReferenceReconciliation`, `MAX_RECONCILED_REFERENCES`, `MAX_REFERENCE_LIST_BYTES` | record a reference reconciliation (`ReconcileReferencesOutcome { reconciliation, ledger, pass_id, warnings }`) and read its list |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
-| `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any line of the ledger and the sequence number of the first line with it; the warning for a decision clock before it |
+| `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any logical entry of the ledger and the sequence number of the first entry with it; the warning for a decision clock before it |
 | `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
 | `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |

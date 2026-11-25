@@ -295,7 +295,7 @@ Ceilings:
   requests         5 total, 1 spent, 4 left
 Digest: sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb
 Declared breadth: IPv4 1, IPv6 0.
-Ledger: 1 line(s) after the header, chain verified, the witness matches
+Ledger: logical entries after the header: 1; chain verified, the witness matches
 ```
 
 The diff shows the two narrowed terms. The overall verdict covers the
@@ -457,8 +457,8 @@ rm -r copy
 ```
 
 ```text
-Ledger: 2 line(s) after the header, chain verified, NO WITNESS yet (see the warning)
-Ledger: 2 line(s) after the header, chain verified, the witness matches
+Ledger: logical entries after the header: 2; chain verified, NO WITNESS yet (see the warning)
+Ledger: logical entries after the header: 2; chain verified, the witness matches
 ```
 
 The original still matches its witness, so it is still spendable. The copy
@@ -483,13 +483,13 @@ will not count from zero:
 
 ```sh
 if hallpass status engagement.pass.toml >refusal.txt 2>&1; then echo "still spendable"; else echo "refused, exit $?"; fi
-grep -o -e 'the ledger [^ ]* for pass `[^`]*` is missing' -e 'says hallpass recorded [0-9]* ledger line(s) for this pass id (spent: [^)]*)' -e 'hallpass will not count from zero\.' refusal.txt
+grep -o -e 'the ledger [^ ]* for pass `[^`]*` is missing' -e 'says its last logical ledger sequence was [0-9]* (spent: [^)]*)' -e 'hallpass will not count from zero\.' refusal.txt
 ```
 
 ```text
 refused, exit 1
 the ledger engagement.pass.toml.ledger for pass `web-2026-11` is missing
-says hallpass recorded 2 ledger line(s) for this pass id (spent: bytes 48, requests 2)
+says its last logical ledger sequence was 2 (spent: bytes 48, requests 2)
 hallpass will not count from zero.
 ```
 

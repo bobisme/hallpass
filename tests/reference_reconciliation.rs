@@ -534,7 +534,9 @@ fn the_reconciliation_shows_in_the_ledger_receipt_and_reconcile() {
         "{text}"
     );
     assert!(
-        text.contains("Ledger: 3 line(s) after the header, chain verified, the witness matches"),
+        text.contains(
+            "Ledger: logical entries after the header: 3; chain verified, the witness matches"
+        ),
         "{text}"
     );
     assert!(!text.contains("References:"), "{text}");
@@ -552,7 +554,10 @@ fn the_reconciliation_shows_in_the_ledger_receipt_and_reconcile() {
         "quote\"d"
     );
     let status = e.text("status", &[]);
-    assert!(status.contains("3 line(s) after the header"), "{status}");
+    assert!(
+        status.contains("logical entries after the header: 3"),
+        "{status}"
+    );
 
     // receipt: a listed reference with no debit is absent, and says where
     // it is listed.

@@ -433,7 +433,7 @@ struct WitnessFile {
 pub struct Witnessed {
     /// Where the ledger was (absolute path, informational).
     pub ledger: String,
-    /// The sequence number of its last line (0: only the header).
+    /// The sequence number of its last logical entry (0: only the header).
     pub seq: u64,
     /// The hash of its last line.
     pub tail: Digest,

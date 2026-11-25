@@ -256,6 +256,7 @@ impl Cursor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::debit::DebitBatchLine;
     use super::super::{AdoptLine, Line, ReconcileLine, WitnessLine};
     use super::*;
     use proptest::prelude::*;
@@ -268,6 +269,7 @@ mod tests {
     enum Untagged {
         Spend(Entry),
         Debit(DebitLine),
+        DebitBatch(DebitBatchLine),
         Adopt(AdoptLine),
         Reconcile(ReconcileLine),
     }
@@ -276,6 +278,7 @@ mod tests {
         match line {
             Line::Spend(entry) => serde_json::to_string(entry),
             Line::Debit(debit) => serde_json::to_string(debit),
+            Line::DebitBatch(batch) => serde_json::to_string(batch),
             Line::Adopt(adopt) => serde_json::to_string(adopt),
             Line::Reconcile(line) => serde_json::to_string(line),
         }
@@ -290,6 +293,7 @@ mod tests {
             .map(|u| match u {
                 Untagged::Spend(entry) => Line::Spend(entry),
                 Untagged::Debit(debit) => Line::Debit(debit),
+                Untagged::DebitBatch(batch) => Line::DebitBatch(batch),
                 Untagged::Adopt(adopt) => Line::Adopt(adopt),
                 Untagged::Reconcile(line) => Line::Reconcile(line),
             });
@@ -312,6 +316,9 @@ mod tests {
         if let Ok(debit) = serde_json::from_slice::<DebitLine>(line) {
             return serde_json::to_string(&debit).ok();
         }
+        if let Ok(batch) = serde_json::from_slice::<DebitBatchLine>(line) {
+            return serde_json::to_string(&batch).ok();
+        }
         if let Ok(adopt) = serde_json::from_slice::<AdoptLine>(line) {
             return serde_json::to_string(&adopt).ok();
         }
@@ -324,6 +331,7 @@ mod tests {
         match read(std::str::from_utf8(line).ok()?)? {
             Line::Spend(entry) => serde_json::to_string(&entry).ok(),
             Line::Debit(debit) => serde_json::to_string(&debit).ok(),
+            Line::DebitBatch(batch) => serde_json::to_string(&batch).ok(),
             Line::Adopt(adopt) => serde_json::to_string(&adopt).ok(),
             Line::Reconcile(line) => serde_json::to_string(&line).ok(),
         }

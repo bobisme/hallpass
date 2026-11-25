@@ -6,6 +6,13 @@ Changes since commit d70c09f.
 
 ### Compatibility
 
+- **Atomic debit batches add a ledger line shape.** A successful
+  `spend_charges_batch*` writes `event: "debit-batch"`. Older Hallpass
+  builds stop at that line with `ledger-corrupt`, so they fail closed. One
+  physical batch line owns a contiguous logical sequence range; status and
+  missing-ledger messages now describe logical entries rather than equating
+  the final sequence with a physical JSON-line count.
+
 - **Every spend reply has the same keys.** Scalar and `--charge` replies,
   allowed, `would-allow` and refused, now all have `charges`, `receipt`,
   `reference_evidence` and the scalar fields `counter`, `n`, `total`,
@@ -231,6 +238,14 @@ Changes since commit d70c09f.
   `review::LintReport.port_findings`.
 
 ### Added
+
+- Library: `spend_charges_batch`, `spend_charges_batch_in`,
+  `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`,
+  `SpendChargesBatchOutcome`, `SpendChargesBatchUnitOutcome` and
+  `MAX_DEBIT_BATCH_UNITS`. They decide 1 to 1024 distinct guarded
+  caller-reference debits of one unit each under one lock and commit them as
+  one all-or-none ledger line, with one optional retained target and a unique
+  logical sequence and receipt per unit.
 
 - A warning when a debit checks no destination: an allowed or previewed
   `spend` without `--to`, on a pass without `require_target_v1`.

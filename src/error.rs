@@ -335,7 +335,7 @@ impl std::fmt::Display for MissingLedger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the ledger {} for pass `{}` is missing, but the witness {} says hallpass recorded {} ledger line(s) for this pass id (spent: {}); the ledger was last seen at {} on {}. hallpass will not count from zero. Put the ledger back beside the pass (move it from there, or restore it from a backup); if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals. If the ledger was moved to another account on purpose, do not adopt or spend here: that account now holds the count. If this pass is a different approval that reused the id, give it its own id",
+            "the ledger {} for pass `{}` is missing, but the witness {} says its last logical ledger sequence was {} (spent: {}); the ledger was last seen at {} on {}. hallpass will not count from zero. Put the ledger back beside the pass (move it from there, or restore it from a backup); if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals. If the ledger was moved to another account on purpose, do not adopt or spend here: that account now holds the count. If this pass is a different approval that reused the id, give it its own id",
             self.path.display(),
             self.pass_id,
             self.witness.display(),
@@ -391,7 +391,7 @@ impl ElsewhereLedger {
             format!("This pass file: {pass}."),
             format!("Expected ledger: {expected} (does not exist)."),
             format!(
-                "Live ledger: {live}, intact, as last recorded on {} ({} ledger line(s), spent: {}).",
+                "Live ledger: {live}, intact, as last recorded on {} (last logical sequence {}, spent: {}).",
                 self.updated,
                 self.seq,
                 crate::witness::totals_text(&self.totals),
