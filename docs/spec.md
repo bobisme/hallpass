@@ -287,7 +287,10 @@ Hallpass takes the witness and ledger locks once, verifies every reference,
 applies every unit's digest, window and target policy, and advances a
 prospective tally in request order. The first refusal names its one-based
 unit and records none of them. Thus an aggregate ceiling shortage cannot
-leave a paid prefix.
+leave a paid prefix. Its refusal text keeps actual and prospective accounting
+separate: it reports the durable spend before the batch, the full-batch
+projection, the first unit that would exceed the ceiling, and that zero units
+committed.
 
 Success appends and syncs one `debit-batch` JSON line. Its units are ordinary
 logical debits with contiguous, distinct sequences and receipts; `ledger`,

@@ -647,6 +647,13 @@ visible there as all of its ordinary receipts. A partial append is one
 incomplete final line, never a valid subset of the batch, and the ledger
 fails closed until recovered.
 
+A `ceiling-reached` message for a batch reports four different values: the
+actual spend before the call, the number of units requested by the complete
+atomic batch, the total that accepting all of them would project, and the
+first one-based unit that would cross the ceiling. It explicitly says zero
+batch units committed. Do not treat the prospective units as already spent;
+the outcome's `spent` remains the actual durable balance.
+
 `Pass::permits` and `Pass::permits_named` are pure: they answer for a
 `Pass` already in memory and read nothing. Use them for further addresses of
 a unit that `spend` has counted, and load the pass again (`hallpass::load`)

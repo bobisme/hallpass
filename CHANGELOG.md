@@ -383,6 +383,9 @@ Changes since commit d70c09f.
 
 ### Changed
 
+- An atomic batch ceiling refusal distinguishes the durable balance from its
+  prospective units: it reports the actual pre-batch spend, full-batch
+  projection, first refused unit and that zero batch units committed.
 - Reconcile manifest errors name the row, `caller_ref`, field and escaped
   value, and the canonical form where one exists.
 - The `lock-timeout` message says what to do next and that a crashed
