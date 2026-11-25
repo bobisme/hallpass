@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference caller: one journaled unit of work, gated by hallpass.
 
-    caller.py pin     JOURNAL PASS ARCHIVE
+    caller.py pin     JOURNAL PASS ARCHIVE [--require-signature PRINCIPAL --allowed-signers FILE [--signature FILE]]
     caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                       [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
     caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
@@ -130,18 +130,64 @@ def charge(text):
     raise argparse.ArgumentTypeError(f"expected COUNTER=N with N > 0, not {text!r}")
 
 
+def signed_digest(a):
+    """Verify the signature itself and return the digest it covers. Stop on anything less.
+
+    The pin must rest on a verified signature, never on a record in the archive:
+    anyone who can write the archive can write a record. So this runs
+    `verify-approval` with the operator's own signers file and principal, which
+    publishes the verified bytes with their signature to the archive, and then
+    `archive` on whatever is on disk now. An unsigned edit made between the two
+    archives different bytes, so the digests differ and the pin is refused."""
+    if not a.allowed_signers:
+        fail("--require-signature needs --allowed-signers: the signers file the operator trusts")
+    signature = a.signature or a.pass_file + ".sig"
+    code, out = hallpass("verify-approval", "--signature", signature, "--allowed-signers", a.allowed_signers,
+                         "--principal", a.require_signature, "--archive", a.archive, "--", a.pass_file)
+    verified = decode(out)
+    if (code != 0 or verified.get("command") != "verify-approval" or verified.get("result") != "verified"
+            or verified.get("principal") != a.require_signature
+            or verified.get("provenance") != "signature-recorded"
+            or not isinstance(verified.get("digest"), str)):
+        reason = verified.get("next_step") or verified.get("reason") or message(verified)
+        fail(f"{a.pass_file} is not signed by {a.require_signature}: {reason}")
+    code, out = hallpass("archive", "--", a.pass_file, a.archive)
+    archived = decode(out)
+    approval = archived.get("approval")
+    if code != 0 or archived.get("result") != "ok":
+        fail(f"archive failed: {message(archived)}")
+    if archived.get("digest") != verified["digest"]:
+        fail("the pass changed after its signature was verified; sign it again and verify it again")
+    if (archived.get("provenance") != "signature-recorded" or not isinstance(approval, dict)
+            or approval.get("principal") != a.require_signature):
+        fail(f"the archive has no signature record of {a.require_signature} for {archived.get('digest')}")
+    return verified["digest"]
+
+
 def pin(a):
-    """Archive the reviewed bytes and pin their digest for the units that follow."""
+    """Archive the reviewed bytes and pin their digest for the units that follow.
+
+    Without --require-signature this pins whatever is on disk: the digest rests
+    on a review, not on a signature. With it, the digest must be one that
+    `verify-approval` verified for the named principal."""
+    if a.require_signature is None and (a.allowed_signers or a.signature):
+        fail("--allowed-signers and --signature are used only with --require-signature PRINCIPAL")
+    signed = signed_digest(a) if a.require_signature is not None else None
     code, out = hallpass("archive", "--", a.pass_file, a.archive)
     archived = decode(out)
     if code != 0 or archived.get("result") != "ok":
         fail(f"archive failed: {message(archived)}")
+    if signed is not None and (archived["digest"] != signed or archived.get("provenance") != "signature-recorded"):
+        fail("the pass changed after its signature was verified; sign it again and verify it again")
     code, out = hallpass("digest", "--", a.pass_file)
     current = decode(out)
     if code != 0 or current.get("digest") != archived["digest"]:
         fail("the pass changed while it was archived; review it again")
-    append(a.journal, event="pin", **{"pass": a.pass_file}, pass_id=current["pass_id"], digest=current["digest"])
-    print(f"pinned {current['pass_id']} {current['digest']}")
+    extra = {"signed_by": a.require_signature} if signed is not None else {}
+    append(a.journal, event="pin", **{"pass": a.pass_file}, pass_id=current["pass_id"], digest=current["digest"],
+           **extra)
+    how = f" signed by {a.require_signature}" if signed is not None else ""
+    print(f"pinned {current['pass_id']} {current['digest']}{how}")
     return 0
 
 
@@ -379,6 +425,12 @@ def main():
         command.add_argument("journal")
         command.add_argument("pass_file", metavar="pass")
     pin_command.add_argument("archive")
+    pin_command.add_argument("--require-signature", default=None, metavar="PRINCIPAL",
+                             help="pin only a revision that verify-approval verified for this principal")
+    pin_command.add_argument("--allowed-signers", default=None, metavar="FILE",
+                             help="the operator's trusted signers file (with --require-signature)")
+    pin_command.add_argument("--signature", default=None, metavar="FILE",
+                             help="the detached signature; default PASS.sig (with --require-signature)")
     handoff_command.add_argument("--ref-prefix", default=None, metavar="PREFIX",
                                  help="references this caller owns: a debit with it and no journal record needs attention")
     handoff_command.add_argument("--since", type=int, default=0, metavar="SEQ",

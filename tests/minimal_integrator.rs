@@ -43,6 +43,16 @@ requests = 1
 "#;
 
 fn caller(dir: &Path, to: &str, reference: &str) -> (Option<i32>, String, String) {
+    caller_reviewing(dir, to, reference, None)
+}
+
+/// As `caller`, with `HALLPASS_REVIEWED_DIGEST` set to `reviewed` when given.
+fn caller_reviewing(
+    dir: &Path,
+    to: &str,
+    reference: &str,
+    reviewed: Option<&str>,
+) -> (Option<i32>, String, String) {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/minimal-caller/minimal_caller.py");
     let bin_dir = Path::new(BIN).parent().expect("binary directory");
@@ -51,7 +61,8 @@ fn caller(dir: &Path, to: &str, reference: &str) -> (Option<i32>, String, String
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let home = dir.join("home");
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg("-I")
         .arg("-B")
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -64,8 +75,11 @@ fn caller(dir: &Path, to: &str, reference: &str) -> (Option<i32>, String, String
         .env("HALLPASS_UNSAFE_TEST_CLOCK", NOW)
         .env_remove("FORMAT")
         .env_remove("HALLPASS_FORMAT")
-        .output()
-        .expect("run the minimal caller");
+        .env_remove("HALLPASS_REVIEWED_DIGEST");
+    if let Some(digest) = reviewed {
+        command.env("HALLPASS_REVIEWED_DIGEST", digest);
+    }
+    let output = command.output().expect("run the minimal caller");
     let stdout = String::from_utf8(output.stdout).expect("utf8");
     let stderr = String::from_utf8(output.stderr).expect("utf8");
     eprintln!("{to} {reference}\n{stdout}{stderr}");
@@ -108,4 +122,47 @@ fn the_minimal_caller_sends_only_the_allowed_unit() {
     assert_eq!(lines[1]["event"], "debit");
     assert_eq!(lines[1]["seq"], 1);
     assert_eq!(lines[1]["receipt"]["caller_ref"], "unit-1");
+}
+
+#[test]
+fn a_reviewed_digest_replaces_the_one_the_preflight_saw() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("home")).expect("home");
+    fs::set_permissions(root.join("home"), fs::Permissions::from_mode(0o700)).expect("mode");
+    fs::write(root.join(PASSFILE), PASS).expect("pass");
+    fs::set_permissions(root.join(PASSFILE), fs::Permissions::from_mode(0o600)).expect("mode");
+
+    // The pass was reviewed at this digest, then edited.
+    let reviewed = {
+        let output = Command::new(BIN)
+            .args(["--format", "json", "digest", "--", PASSFILE])
+            .current_dir(root)
+            .env("HOME", root.join("home"))
+            .env("XDG_STATE_HOME", root.join("home/state"))
+            .output()
+            .expect("digest");
+        let reply: Value = serde_json::from_slice(&output.stdout).expect("json");
+        reply["digest"].as_str().expect("digest").to_owned()
+    };
+    let edited = format!("{PASS}# edited after review\n");
+    fs::remove_file(root.join(PASSFILE)).expect("replace");
+    fs::write(root.join(PASSFILE), edited).expect("edit");
+    fs::set_permissions(root.join(PASSFILE), fs::Permissions::from_mode(0o600)).expect("mode");
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    fs::File::options()
+        .write(true)
+        .open(root.join(PASSFILE))
+        .and_then(|file| file.set_modified(earlier))
+        .expect("date the file back");
+
+    let (code, stdout, stderr) = caller_reviewing(root, WEB, "unit-1", Some(&reviewed));
+    assert_eq!(code, Some(2), "{stderr}");
+    assert_eq!(stdout, "");
+    assert!(stderr.contains("the pass has changed"), "{stderr}");
+
+    // Without the reviewed digest the caller pins what is on disk and runs.
+    let (code, stdout, _) = caller(root, WEB, "unit-1");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "sent unit-1\n");
 }

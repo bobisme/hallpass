@@ -17,7 +17,7 @@ authority for what the caller did. Neither one can stand in for the other.
 ## Commands
 
 ```text
-caller.py pin     JOURNAL PASS ARCHIVE
+caller.py pin     JOURNAL PASS ARCHIVE [--require-signature PRINCIPAL --allowed-signers FILE [--signature FILE]]
 caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                   [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
 caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
@@ -26,13 +26,49 @@ caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [
 
 | Command | What it does | Exit |
 |---|---|---|
-| `pin` | Archives the reviewed pass with `hallpass archive` and journals its ID and digest. Later units pin this digest. | 0 pinned, 1 error |
+| `pin` | Archives the reviewed pass with `hallpass archive` and journals its ID and digest. Later units pin this digest. With `--require-signature`, pins only a signed revision: see below. | 0 pinned, 1 error |
 | `run` | Performs one unit: see below. | 0 sent, 2 refused, 1 unknown or usage error |
 | `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
 | `reconcile-references` | After an adoption that may have lost lines, records every reference in the journals with `hallpass reconcile-references`, so that guarded spends resume: see below. | 0 recorded, or nothing to reconcile; 1 error |
 
 Use the same `PASS` spelling for every command: the journal and the spend
 reply compare it as written.
+
+## Pinning a signed revision
+
+Plain `pin` pins whatever is on disk when it runs. If an approval is signed
+(see [Signing and verifying an
+approval](../INTEGRATING.md#signing-and-verifying-an-approval)), an unsigned
+edit made after `verify-approval` would be pinned and spent under without a
+word. It would show up only at audit time, as an `approval-unverified` gap.
+Ask `pin` to rest on the signature instead:
+
+```text
+caller.py pin JOURNAL PASS ARCHIVE --require-signature owner@example.org \
+  --allowed-signers /etc/hallpass/trusted_signers [--signature PASS.sig]
+```
+
+`--signature` defaults to `PASS.sig`. `--allowed-signers` is the operator's
+own trust file, kept apart from the pass and the signature. With
+`--require-signature` the caller:
+
+1. runs `hallpass verify-approval` itself with that signers file and the
+   principal, and publishes the verified bytes and their signature to
+   `ARCHIVE`. Anything but `result = "verified"` for that principal stops the
+   pin;
+2. runs `hallpass archive` on the file as it is now. The reply must have
+   `provenance = "signature-recorded"`, the same principal in its `approval`
+   record, and the digest that `verify-approval` verified. A pass edited
+   between the two calls archives as another digest, so the pin is refused;
+3. checks `hallpass digest` as before, and journals the pin with
+   `signed_by`.
+
+The pin rests on the signature that was verified, never on a record in the
+archive: anyone who can write the archive can write a record. Nothing is
+journaled on a refusal. Sign the new bytes and run `pin` again. A signature
+pin is about the bytes: the pass window and the ceilings are still decided at
+each `run`. `--allowed-signers` and `--signature` without
+`--require-signature` are refused, so a typo cannot drop the check.
 
 ## One unit
 

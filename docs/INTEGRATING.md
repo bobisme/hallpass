@@ -33,10 +33,15 @@ caller](minimal-caller/minimal_caller.py). It asks `permits` first, runs one
 `spend --to ... --caller-ref ... --require-new-ref` before the work, checks
 the reply with `inspect_reply` and runs the work only on `proceed`. A refusal
 (exit 2), an unknown outcome and a possible debit (`reconcile`) each stop the
-work. It journals nothing and does not reconcile, and it pins the digest
-its own `permits` call saw, not one a reviewer approved. Use the [reference
-caller](reference-caller/README.md) for journalling, reconciling and a
-reviewed pin.
+work. It journals nothing and does not reconcile. Its digest pin is the
+digest its own `permits` call saw. That protects against a change between
+the preflight and the spend. It does not protect against a change made
+before the preflight, or a torn in-place save that the preflight itself read
+(the pass settle time is 250 ms). To pin a digest reviewed or verified
+earlier, set `HALLPASS_REVIEWED_DIGEST` to it: the preflight then refuses a
+pass that differs, with `pass-changed`. Use the [reference
+caller](reference-caller/README.md) for journalling, reconciling and a pin
+that requires a verified signature.
 
 `spend --to` decides the destination, the window, revocation and the
 ceiling together, under one lock, against one reading of the pass file. If
@@ -747,6 +752,27 @@ show who approved the bytes, because anyone who can write the archive can
 write one, so an audit is `complete` only when it verifies the signatures
 again with a trusted signers file. A failed signature check publishes
 nothing.
+
+The [reference caller](reference-caller/README.md#pinning-a-signed-revision)
+does these steps for you and refuses to pin an unsigned edit. Its `pin
+--require-signature PRINCIPAL --allowed-signers FILE` runs `verify-approval`
+itself, then `archive`, and pins only a digest that both agree on, with the
+signature record for that principal. A pin made without the option rests on
+review alone. An end-to-end run, from the owner's signature to the spend:
+
+```text
+# 1. The owner signs the exact bytes.
+ssh-keygen -Y sign -n hallpass-approval-v1 -f ~/.ssh/approval_key engagement.pass.toml
+# 2. The operator verifies and archives, and pins what was verified. The
+#    caller runs verify-approval and archive; an edit after step 1 is refused.
+mkdir -m 700 approval-archive
+caller.py pin shift.jsonl engagement.pass.toml approval-archive \
+  --require-signature owner@example.org --allowed-signers /etc/hallpass/trusted_signers
+# pinned web-2026-11 sha256:... signed by owner@example.org
+# 3. Each unit spends under the pinned digest.
+caller.py run shift.jsonl engagement.pass.toml unit-1 \
+  --to 192.0.2.10:443/tcp@app.example.org --charge requests=1
+```
 
 ## Review and case suites
 
