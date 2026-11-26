@@ -237,6 +237,29 @@ Changes since commit d70c09f.
   `Error::LedgerCorrupt.complete`, `LockWait.shared`,
   `review::LintReport.port_findings`.
 
+- **Test-clock ledger lines are marked, and never mix with live lines.** A
+  line written under `HALLPASS_UNSAFE_TEST_CLOCK` carries `"test_clock":true`
+  in the hash chain; a hallpass from before this change refuses such a ledger
+  as `ledger-corrupt`. Writing a test-clock line to a ledger with real-clock
+  lines, or the reverse, is refused with the new code `ledger-clock-mix`
+  (previews included). Audits report each marked line as `test-clock-entry`
+  and a line dated more than 5 minutes after the audit's clock as
+  `entry-in-future`, so neither is ever `complete`. `ledger` and `receipt`
+  JSON gain `test_clock` fields, and `ledger` gains `test_clock_from`.
+  Library: `test_clock` on `LedgerEntry`, `LedgerDebit`, `Adoption` and
+  `ReferenceReconciliation`; `test_clock_from` on `LedgerView`.
+- `verify-approval --archive` exits 2 with `provenance`
+  `signature-not-stored` when the archive already held a record of a
+  different principal, so this signature was not stored. A second signature
+  by the same principal is still exit 0, `signature-recorded`.
+- The reference caller's `handoff` exits 2 when the pass on disk differs from
+  the last pinned digest.
+- Clap value errors (for example `--n 1.5`) print in the usual
+  `hallpass CMD: error:` format with "Nothing was permitted."; the exit status
+  stays 1. `verify-checkpoint` text says "later entries", not "later lines".
+  The batch ceiling refusal no longer repeats "Nothing was recorded".
+  Library: `LockWait.give_up_in`.
+
 ### Added
 
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
@@ -380,6 +403,9 @@ Changes since commit d70c09f.
   and `archive` agree on. The minimal caller reads `HALLPASS_REVIEWED_DIGEST`.
   INTEGRATING.md shows the signed workflow end to end.
 - `--json` is listed in `hallpass help` and every `<command> --help`.
+
+- Library: `with_test_clock`, which marks the ledger lines written inside it
+  as test-clock lines.
 
 ### Changed
 
@@ -527,3 +553,21 @@ Changes since commit d70c09f.
   `adopt --preview` says why there is nothing to adopt; a complete but invalid
   ledger line names the field and advises a restore from backup, never
   removal.
+- The lock-wait line says when it will give up when `--lock-timeout-ms` is
+  set, instead of suggesting the flag; spec.md shows both lines.
+- The clock-precedes warning shows sub-second times and the gap when the two
+  times differ by under a second, and points callers who sampled `now` before
+  the lock to `spend_charges_batch_with_clock_in`. INTEGRATING.md recommends
+  that function for concurrent batch callers.
+- A known top-level key written under a table says that top-level keys must
+  come before the first `[table]` header.
+- The `wrong-principal` audit advice and the reference caller's "no signature
+  record" refusal say how to recover: move the archive's `DIGEST.sig` and
+  `DIGEST.approval` aside, then run `verify-approval --archive` again.
+- A debug build under `HALLPASS_UNSAFE_TEST_CLOCK` no longer adds unmarked
+  debits to a live ledger, and audits no longer call such debits `complete`
+  (bn-2mm).
+- `verify-approval --archive` no longer says it retained a signature record
+  for a signature it did not store (bn-1re).
+- The reference caller's `handoff` no longer says "Nothing needs attention"
+  when the pass on disk is not the pinned revision (bn-37z).

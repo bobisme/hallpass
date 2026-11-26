@@ -587,3 +587,9 @@
 1795652207017137	hallpass-dev	itc:AQ		item.assign	bn-235	{"action":"assign","agent":"hallpass-dev"}	blake3:ZgYzkQJGyU-EeeP0D1m0BliXhU9IC2aVCDba6CMquP8
 1795652207031391	hallpass-dev	itc:AQ		item.move	bn-3cf	{"state":"doing"}	blake3:8YauEvoM-wzKeRaxxiQSzaE6C1BWF4Z3QvYYMsjK1k4
 1795652207037271	hallpass-dev	itc:AQ		item.assign	bn-3cf	{"action":"assign","agent":"hallpass-dev"}	blake3:AlsZW5CZtKPU-lUk7UqkssPgJSGG7G20JwgEtS86V8M
+1795653213963144	hallpass-dev	itc:AQ		item.move	bn-2mm	{"state":"done"}	blake3:eXEB10Y4NCIfVwlnu1p79CMbxLi7hLesd6wZ2czpGYQ
+1795653214305386	hallpass-dev	itc:AQ		item.move	bn-1re	{"state":"done"}	blake3:_Yx5IBv2PNED6w-yRA03fPi0I1Bt580fl1-IaZTX7xc
+1795653214333381	hallpass-dev	itc:AQ		item.move	bn-37z	{"state":"done"}	blake3:dcjS8CtJb6ur8Tl51682s2duSg2gSb2NYwHGbfMPy_k
+1795653214514988	hallpass-dev	itc:AQ		item.move	bn-3sq	{"state":"done"}	blake3:6WBpWZ3G9Eqx582qbVwesEFWhk0NTzvzE_UdfCrznfc
+1795653214553412	hallpass-dev	itc:AQ		item.move	bn-235	{"state":"done"}	blake3:UdlTVpTtAT3hLUkAis8PRSysTAZTsSDQ81Fsv1NNhdY
+1795653214580737	hallpass-dev	itc:AQ		item.move	bn-3cf	{"state":"done"}	blake3:lXGL4VLGg0B4Y1WA3C12yw7ojBZy-WqyMHR4M4HQcAY
