@@ -135,10 +135,15 @@ impl Walker {
     fn unknown_keys(&mut self, table: &Table, prefix: &str, allowed: &[&str]) {
         for key in table.keys() {
             if !allowed.contains(&key.as_str()) {
+                let hint = if !prefix.is_empty() && TOP_LEVEL_KEYS.contains(&key.as_str()) {
+                    format!(" `{key}` is a top-level key: {}.", top_level_move(key))
+                } else {
+                    String::new()
+                };
                 self.problem(
                     join(prefix, key),
                     format!(
-                        "unknown key `{key}`; a typo could drop a restriction, so unknown keys are refused. Allowed here: {}",
+                        "unknown key `{key}`; a typo could drop a restriction, so unknown keys are refused.{hint} Allowed here: {}",
                         allowed.join(", ")
                     ),
                 );
@@ -405,20 +410,7 @@ impl Pass {
         };
         problems.extend(crate::literal::problems(text));
         let mut w = Walker { problems };
-        w.unknown_keys(
-            &table,
-            "",
-            &[
-                "format",
-                "id",
-                "name",
-                "approval",
-                "destination",
-                "ceilings",
-                "required_counters_v1",
-                "require_target_v1",
-            ],
-        );
+        w.unknown_keys(&table, "", TOP_LEVEL_KEYS);
         match table.get("format") {
             None => w.problem("format", format!("missing; add `format = {FORMAT_VERSION}`")),
             Some(Value::Integer(FORMAT_VERSION)) => {}
@@ -1145,6 +1137,23 @@ fn parse_required_counters(
     names.into_iter().collect()
 }
 
+/// The keys a pass may have before its first `[table]` header.
+const TOP_LEVEL_KEYS: &[&str] = &[
+    "format",
+    "id",
+    "name",
+    "approval",
+    "destination",
+    "ceilings",
+    "required_counters_v1",
+    "require_target_v1",
+];
+
+/// What to do about a top-level key written under a `[table]` header.
+fn top_level_move(key: &str) -> String {
+    format!("top-level keys must come before the first `[table]` header; move `{key}` up above it")
+}
+
 fn parse_ceilings(w: &mut Walker, table: &Table) -> Option<BTreeMap<String, u64>> {
     let t = match table.get("ceilings") {
         None => return Some(BTreeMap::new()),
@@ -1168,6 +1177,17 @@ fn parse_ceilings(w: &mut Walker, table: &Table) -> Option<BTreeMap<String, u64>
     let mut ok = true;
     for (name, value) in t {
         let field = join("ceilings", name);
+        if TOP_LEVEL_KEYS.contains(&name.as_str()) && !matches!(value, Value::Integer(_)) {
+            w.problem(
+                field,
+                format!(
+                    "`{name}` is a top-level key, but it sits under `[ceilings]`; {}",
+                    top_level_move(name)
+                ),
+            );
+            ok = false;
+            continue;
+        }
         if !is_counter_name(name) {
             w.problem(
                 &field,

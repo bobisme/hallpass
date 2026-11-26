@@ -364,7 +364,7 @@ use super::{
     SpendRequest, append, check_clock, decide_ceiling, decide_spend_targets,
     lock_for_writing_notifying, prepare_witness,
     reference::{ReferenceEvidence, ReferenceMatches},
-    refused_spend, rfc3339, validate_spend_policy, visit_preview_snapshot, warn_clock_rollback,
+    rfc3339, validate_spend_policy, visit_preview_snapshot, warn_clock_rollback,
 };
 use crate::request::TargetRefusal;
 use crate::witness::PreparedWitness;
@@ -770,14 +770,16 @@ fn spend_batch_using(
         if let Some(mut refusal) = outcome.refusal {
             if refusal.code == crate::RefusalCode::CeilingReached {
                 let total = total.expect("a ceiling refusal has a declared ceiling");
-                refusal = refused_spend(
-                    crate::RefusalCode::CeilingReached,
-                    format!(
+                // No "Nothing was recorded" ending: "commits 0 of N units"
+                // already says it.
+                refusal = crate::Refusal {
+                    code: crate::RefusalCode::CeilingReached,
+                    message: format!(
                         "the atomic batch requests {batch_units} units from `{counter}`, but accepting it would project {projected_batch_total} against the ceiling {total}: {initial} actually spent before the batch, {} left, and the ceiling would first be exceeded at batch unit {}; this batch is all-or-none, so this refusal commits 0 of {batch_units} units; stop, submit a smaller atomic batch, or ask the owner to raise the ceiling in writing",
                         total.saturating_sub(initial),
                         index + 1
                     ),
-                );
+                };
             }
             return Ok(common(
                 Some(refusal),
@@ -1539,7 +1541,7 @@ mod tests {
         assert_eq!(refusal.code, RefusalCode::CeilingReached);
         assert_eq!(
             refusal.message,
-            "the atomic batch requests 3 units from `requests`, but accepting it would project 3 against the ceiling 2: 0 actually spent before the batch, 2 left, and the ceiling would first be exceeded at batch unit 3; this batch is all-or-none, so this refusal commits 0 of 3 units; stop, submit a smaller atomic batch, or ask the owner to raise the ceiling in writing. Nothing was recorded"
+            "the atomic batch requests 3 units from `requests`, but accepting it would project 3 against the ceiling 2: 0 actually spent before the batch, 2 left, and the ceiling would first be exceeded at batch unit 3; this batch is all-or-none, so this refusal commits 0 of 3 units; stop, submit a smaller atomic batch, or ask the owner to raise the ceiling in writing"
         );
         assert_eq!(ceiling.spent, 0);
         assert_eq!(ceiling.units.len(), 0);
@@ -1607,7 +1609,7 @@ mod tests {
         assert_eq!(refusal.code, RefusalCode::CeilingReached);
         assert_eq!(
             refusal.message,
-            "the atomic batch requests 3 units from `requests`, but accepting it would project 5 against the ceiling 3: 2 actually spent before the batch, 1 left, and the ceiling would first be exceeded at batch unit 2; this batch is all-or-none, so this refusal commits 0 of 3 units; stop, submit a smaller atomic batch, or ask the owner to raise the ceiling in writing. Nothing was recorded"
+            "the atomic batch requests 3 units from `requests`, but accepting it would project 5 against the ceiling 3: 2 actually spent before the batch, 1 left, and the ceiling would first be exceeded at batch unit 2; this batch is all-or-none, so this refusal commits 0 of 3 units; stop, submit a smaller atomic batch, or ask the owner to raise the ceiling in writing"
         );
         assert_eq!(fs::read(&ledger).expect("unchanged ledger"), before);
         let view = read_ledger(&load(&path).expect("pass"), &state).expect("ledger");

@@ -2244,11 +2244,53 @@ fn clock_rollback_warning(
     latest: Option<(OffsetDateTime, u64)>,
 ) -> Option<String> {
     let (time, seq) = latest.filter(|(time, _)| now < *time)?;
+    let gap = time - now;
+    if gap >= time::Duration::SECOND {
+        return Some(format!(
+            "the decision clock ({}) precedes {}, the latest time recorded in the ledger (sequence {seq}); check the system clock before continuing",
+            stamp(now),
+            stamp(time)
+        ));
+    }
+    // Under a second the two stamps would read the same, so show the digits
+    // that differ. A gap this small is usually a caller that sampled `now`
+    // before it took the lock while another writer committed first; it is
+    // not a clock that was set back.
     Some(format!(
-        "the decision clock ({}) precedes {}, the latest time recorded in the ledger (sequence {seq}); check the system clock before continuing",
-        stamp(now),
-        stamp(time)
+        "the decision clock ({}) precedes {}, the latest time recorded in the ledger (sequence {seq}), by {}; if the caller took `now` before taking the ledger lock (for example several batch writers at once), sample the clock after the lock instead: use `spend_charges_batch_with_clock_in` or `spend_with_clock_in`; otherwise check the system clock before continuing",
+        fine_stamp(now, gap),
+        fine_stamp(time, gap),
+        gap_text(gap)
     ))
+}
+
+/// `stamp` with fractional seconds, enough of them to show a gap under one
+/// second: milliseconds, or microseconds or nanoseconds for a smaller gap.
+fn fine_stamp(instant: OffsetDateTime, gap: time::Duration) -> String {
+    let whole = stamp(instant);
+    let digits = if gap >= time::Duration::MILLISECOND {
+        3
+    } else if gap >= time::Duration::MICROSECOND {
+        6
+    } else {
+        9
+    };
+    let fraction = format!("{:09}", instant.nanosecond());
+    whole.strip_suffix('Z').map_or_else(
+        || whole.clone(),
+        |base| format!("{base}.{}Z", &fraction[..digits]),
+    )
+}
+
+fn gap_text(gap: time::Duration) -> String {
+    let nanos = gap.whole_nanoseconds();
+    if nanos >= 1_000_000 {
+        format!("{} ms", nanos / 1_000_000)
+    } else if nanos >= 1_000 {
+        format!("{} us", nanos / 1_000)
+    } else {
+        format!("{nanos} ns")
+    }
 }
 
 fn warn_clock_rollback(
@@ -2822,6 +2864,28 @@ mod tests {
     use time::macros::datetime;
 
     const NOW: OffsetDateTime = datetime!(2026-11-20 09:00 UTC);
+
+    #[test]
+    fn a_sub_second_clock_skew_shows_both_times_and_the_better_advice() {
+        let latest = NOW + time::Duration::milliseconds(7);
+        let warning = clock_rollback_warning(NOW, Some((latest, 4))).expect("warning");
+        assert_eq!(
+            warning,
+            "the decision clock (2026-11-20T09:00:00.000Z) precedes 2026-11-20T09:00:00.007Z, the latest time recorded in the ledger (sequence 4), by 7 ms; if the caller took `now` before taking the ledger lock (for example several batch writers at once), sample the clock after the lock instead: use `spend_charges_batch_with_clock_in` or `spend_with_clock_in`; otherwise check the system clock before continuing"
+        );
+        let finer = NOW + time::Duration::microseconds(250);
+        let warning = clock_rollback_warning(NOW, Some((finer, 4))).expect("warning");
+        assert!(
+            warning.contains("(2026-11-20T09:00:00.000000Z) precedes 2026-11-20T09:00:00.000250Z")
+                && warning.contains("by 250 us"),
+            "{warning}"
+        );
+        // A gap of a second or more keeps the plain advice.
+        let hour = NOW + time::Duration::HOUR;
+        let warning = clock_rollback_warning(NOW, Some((hour, 4))).expect("warning");
+        assert!(warning.ends_with("(sequence 4); check the system clock before continuing"));
+        assert!(clock_rollback_warning(NOW, Some((NOW, 4))).is_none());
+    }
 
     /// A pass in a fresh directory, and a state directory of its own (never
     /// the real one).
@@ -4072,7 +4136,7 @@ mod tests {
         fs::write(&ledger, &older).expect("rewind");
         match spend_in(&path, &request("calls", 1), NOW, &state) {
             Err(e @ Error::LedgerChanged { .. }) => {
-                assert!(e.to_string().contains("has only 1"), "{e}");
+                assert!(e.to_string().contains("ends at sequence 1"), "{e}");
             }
             other => panic!("{other:?}"),
         }

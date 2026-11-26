@@ -1411,8 +1411,17 @@ fn announce_lock_wait(wait: &hallpass::LockWait) {
         |pid| format!("held by process {pid}"),
     );
     let lock = if wait.shared { "ledger" } else { "writer" };
+    let end = wait.give_up_in.map_or_else(
+        || "press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting".to_owned(),
+        |left| {
+            format!(
+                "giving up in {} ms (--lock-timeout-ms); press Ctrl-C to stop sooner",
+                left.as_millis()
+            )
+        },
+    );
     eprintln!(
-        "hallpass: waiting for the {lock} lock on {path}, {who}. Nothing is recorded yet; press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting."
+        "hallpass: waiting for the {lock} lock on {path}, {who}. Nothing is recorded yet; {end}."
     );
 }
 
@@ -2391,7 +2400,7 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
             Output {
                 code,
                 text: format!(
-                    "Checkpoint verification: {name}{detail} ({added} later lines). Trust input: supplied checkpoint.\n"
+                    "Checkpoint verification: {name}{detail} ({added} later entries). Trust input: supplied checkpoint.\n"
                 ),
                 json: json!({"command": "verify-checkpoint", "result": name, "relation": relation, "added": added, "trust_input": "supplied-checkpoint"}),
             }
@@ -2790,6 +2799,25 @@ fn main() -> ExitCode {
                 add_warning(&mut output, &warning);
             }
             emit(output, format)
+        }
+        Err(e) if e.kind() == ErrorKind::ValueValidation => {
+            // A bad value is a usage error like any other: the usual error
+            // format, without clap's own prefix and trailing hint.
+            let rendered = e.render().to_string();
+            let first = rendered.lines().next().unwrap_or_default();
+            let message = first.strip_prefix("error: ").unwrap_or(first);
+            let mut out = parse_error(topic.as_deref(), message);
+            if let Some(warning) = &input.env_warning {
+                add_warning(&mut out, warning);
+            }
+            emit(
+                out,
+                if input.json {
+                    Format::Json
+                } else {
+                    Format::Text
+                },
+            )
         }
         Err(e) => {
             if input.json {

@@ -480,7 +480,7 @@ hallpass --json verify-checkpoint engagement.toml.ledger checkpoint.json
 outside the administrative control of the ledger. `verify-checkpoint` reads
 only the ledger and the supplied checkpoint, and never reads or creates a
 witness. `exact` means the ledger ends at the checkpoint line and
-`extended` means `added` lines follow it; both exit 0. `mismatch` exits 2.
+`extended` means `added` entries follow it (a `debit-batch` line counts once per unit); both exit 0. `mismatch` exits 2.
 A malformed checkpoint or a missing or damaged ledger exits 1.
 
 The `witness` object tells how the local witness relates to the exported

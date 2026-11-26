@@ -435,14 +435,21 @@ step: retry, or find and stop that process (`fuser PATH`).
 After about two seconds of waiting for one lock, the CLI writes one line to
 **stderr** (in text and JSON mode alike; it is never put in `warnings`, so
 stdout stays one JSON object and the result is unchanged):
-`waiting for the writer lock on PATH, held by process PID` for a writer lock,
-or `waiting for the ledger lock on PATH, held by process PID` for the shared
-lock of a read, where the holder can be found (Linux, `/proc/locks`),
-otherwise `held by another process; find it with fuser PATH`. A command that
-gets the lock sooner prints nothing, and so does a command whose
-`--lock-timeout-ms` ends first. The library never prints: set
+
+```
+hallpass: waiting for the writer lock on PATH, held by process PID. Nothing is recorded yet; press Ctrl-C to give up, or use --lock-timeout-ms to stop waiting.
+hallpass: waiting for the writer lock on PATH, held by process PID. Nothing is recorded yet; giving up in 500 ms (--lock-timeout-ms); press Ctrl-C to stop sooner.
+```
+
+The first form is for a command without `--lock-timeout-ms`; the second is
+for one with it, and the number is the time left of the limit (the budget is
+shared by every lock the command takes). `writer` becomes `ledger` for the
+shared lock of a read. Where the holder cannot be found (it is found on Linux
+from `/proc/locks`), `held by process PID` reads `held by another process;
+find it with fuser PATH`. A command that gets the lock sooner prints nothing,
+and so does a command whose `--lock-timeout-ms` ends first. The library never prints: set
 `SpendRequest::on_lock_wait`, or pass a function to `with_lock_wait`, that
-receives a `LockWait` (`path`, `holder_pid`, `shared`) to report the wait
+receives a `LockWait` (`path`, `holder_pid`, `shared`, `give_up_in`) to report the wait
 yourself.
 
 The library's reads have no request to carry a limit, so
@@ -469,7 +476,7 @@ path and the time. Every command that reads the ledger (`status`,
 | missing | records lines, and the ledger where the witness last saw it is another file that is intact | **error `ledger-elsewhere`**, naming that ledger and the pass file beside it, and how to apply a revision |
 | present | none | accepted with a warning (`missing`); `spend` records a witness |
 | present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
-| present | the witnessed line is there, and `k` lines follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added lines; they count |
+| present | the witnessed line is there, and `k` entries follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added entries; they count |
 | present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
 | present | could not be read (no state directory, damaged, not private) | `spend` and `adopt`: **error `witness-unavailable`**. `status`, `permits`, `ledger`: answered, with a warning and `not-checked` |
 
@@ -1291,7 +1298,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `absent`; `witnessed_seq` is null for `absent`, `exported_seq` null for
   `empty`).
 - **verify-checkpoint**: `relation` (`exact`, `extended`, `shorter`,
-  `foreign` or `mismatch`), `added` (lines after the checkpoint) and
+  `foreign` or `mismatch`), `added` (entries after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
   unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
@@ -1394,7 +1401,7 @@ Crate `hallpass` (re-exports `time`):
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
 | `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any logical entry of the ledger and the sequence number of the first entry with it; the warning for a decision clock before it |
-| `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
+| `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared, give_up_in }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
 | `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |

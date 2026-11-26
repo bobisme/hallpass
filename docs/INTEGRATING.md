@@ -636,6 +636,14 @@ distinct requests only if all of them can be reserved. Build one
 `lock_timeout` and `on_lock_wait` govern the one lock acquisition; per-unit
 lock settings are refused.
 
+When several callers batch at the same time, call
+`spend_charges_batch_with_clock_in` and pass a clock function, not
+`spend_charges_batch_in` with a `now` you sampled earlier. The function
+runs after both locks are held, so each line is stamped no earlier than the
+one before it. A `now` sampled before the lock can fall a few milliseconds
+behind a line that another caller committed while you waited; the ledger
+then warns that the decision clock precedes its latest time.
+
 A refusal has `units.is_empty()`, leaves the actual `spent` unchanged and
 names `refused_unit`; do not send any member. Success has one
 `SpendChargesBatchUnitOutcome` per request, in order, with a distinct
@@ -697,8 +705,11 @@ the file again.
 - **A correct clock.** The window is checked against the caller's clock.
   `spend`, a preview, `capacity`, `permits` and `status` warn if the
   decision instant precedes the latest time recorded in the ledger, and name
-  that time and its sequence number. An incorrect clock can still make the
-  window appear open.
+  that time and its sequence number. When the two differ by less than a
+  second, the warning shows both times with fractions of a second and says
+  by how much; the usual cause is a caller that sampled `now` before it took
+  the lock while another writer committed first. An incorrect clock can still
+  make the window appear open.
 - **Protection from the operator's own account.** The ledger and the
   witness belong to the same user; someone who deletes both starts from
   zero. The witness catches accidents (a copied pass, a cleaned directory,

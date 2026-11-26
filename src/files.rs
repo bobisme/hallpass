@@ -32,6 +32,9 @@ pub struct LockWait {
     /// True for a shared lock, taken to read the ledger; false for an
     /// exclusive lock, taken to write the ledger or the witness.
     pub shared: bool,
+    /// How long the wait has left before it gives up with `lock-timeout`,
+    /// when a limit was set; none when it waits without end.
+    pub give_up_in: Option<std::time::Duration>,
 }
 
 /// The holder of the `flock` on `file`, from `/proc/locks`. None when it is
@@ -245,6 +248,9 @@ impl LockBudget {
             path: path.to_owned(),
             holder_pid: lock_holder(file),
             shared,
+            give_up_in: self
+                .limit
+                .map(|(start, limit)| limit.saturating_sub(start.elapsed())),
         };
         let Some((start, limit)) = self.limit else {
             // No budget: take the blocking lock, so the kernel queues and
