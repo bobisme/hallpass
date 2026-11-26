@@ -245,7 +245,9 @@ fn kept_record_warning_quotes_the_principal_once() {
     let first = env.verify(TRUSTED, true);
     assert_eq!(first.code, 0, "{}{}", first.out, first.err);
     let second = env.verify("other", true);
-    assert_eq!(second.code, 0, "{}{}", second.out, second.err);
+    // The signature was not stored, so the exit status is 2 (bn-1re).
+    assert_eq!(second.code, 2, "{}{}", second.out, second.err);
+    assert_quoted_once(&second.out, "keeps the record of ", TRUSTED);
     // The warning is printed once, on standard error.
     assert_eq!(
         second.err.matches("different signature record").count(),

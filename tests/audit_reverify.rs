@@ -430,6 +430,7 @@ fn moving_a_rejected_record_aside_lets_the_owner_record_a_real_signature() {
         ],
         0,
     );
+    assert_eq!(kept["provenance"], "signature-recorded", "{kept}");
     assert!(
         text_of(&kept["warnings"][0]).contains("it was kept"),
         "{kept}"

@@ -95,7 +95,10 @@ newline: it never acted on a record that was not on disk.
 ## After an interruption
 
 Run `handoff`. For each reference it shows what the journal says the caller
-did, what the ledger holds for that reference, and a verdict.
+did, what the ledger holds for that reference, and a verdict. It also compares
+the pass on disk with the last digest pinned in the journal. If they differ, it
+prints an `ATTENTION` line with both digests, says that the ceilings shown come
+from the file on disk, and exits 2.
 
 | Journal | Ledger | Verdict |
 |---|---|---|

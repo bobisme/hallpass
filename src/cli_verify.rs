@@ -289,7 +289,7 @@ impl Why {
                 "the key that made the recorded signature is not in the trusted signers file you supplied; check that it is the right file"
             }
             Self::WrongPrincipal => {
-                "the key is in the trusted signers file you supplied, but not for the principal checked (--principal, else the one the record names)"
+                "the key is in the trusted signers file you supplied, but not for the principal checked (--principal, else the one the record names); if the record names the wrong principal, move DIGEST.sig and DIGEST.approval aside (a record is never replaced) and run verify-approval --archive again"
             }
             Self::NotValidAtTime => {
                 "the key is in the trusted signers file you supplied for the principal checked, but its valid-after or valid-before window there does not include the time the signature was verified as of (verify_time); check the window, and keep a retired key's line with valid-before set, so that the revisions it signed before still verify"
@@ -604,19 +604,52 @@ pub fn verify_approval(
                 ));
             }
             let approval = record.as_ref().map(ArchivedSignature::approval);
+            // Only a kept record of ANOTHER principal fails: a re-signing by the
+            // same principal leaves the archive naming the right one.
+            let kept = match &record {
+                Some(ArchivedSignature::KeptEarlier(kept)) if kept.principal != principal => {
+                    Some(kept.principal.clone())
+                }
+                _ => None,
+            };
+            let earlier = matches!(&record, Some(ArchivedSignature::KeptEarlier(_)));
+            let retained = match (&kept, archive) {
+                (Some(other), Some(dir)) => {
+                    let base = format!("{}/{digest}", dir.display());
+                    format!(
+                        " NOT stored: the archive in {} keeps the record of {}. To record this signature, move {} and {} aside, then run verify-approval --archive again.",
+                        safe(&dir.display().to_string()),
+                        quoted(other),
+                        safe(&format!("{base}.sig")),
+                        safe(&format!("{base}.approval"))
+                    )
+                }
+                (None, Some(dir)) if earlier => format!(
+                    " Retained the exact bytes in {}; the archive keeps an earlier signature record of {} for them.",
+                    safe(&dir.display().to_string()),
+                    quoted(principal)
+                ),
+                (None, Some(dir)) => format!(
+                    " Retained the exact bytes and a signature record in {}.",
+                    safe(&dir.display().to_string())
+                ),
+                _ => String::new(),
+            };
+            let provenance = match (&kept, approval) {
+                (Some(_), _) => Some("signature-not-stored"),
+                (None, Some(_)) => Some("signature-recorded"),
+                (None, None) => None,
+            };
             Output {
-                code: OK,
+                // A signature the archive did not keep must fail a step that archives approvals.
+                code: if kept.is_some() { REFUSED } else { OK },
                 text: format!(
-                    "Verified signature from {}{as_of} over pass {} ({}).{} Supply this digest for the live policy check.\n",
+                    "Verified signature from {}{as_of} over pass {} ({}).{retained} Supply this digest for the live policy check.\n",
                     quoted(principal),
                     loaded.pass.id,
                     digest,
-                    archive.map_or(String::new(), |dir| format!(
-                        " Retained the exact bytes and a signature record in {}.",
-                        safe(&dir.display().to_string())
-                    ))
                 ),
-                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":approval.map(|_| "signature-recorded"),"approval":approval,"warnings":warnings}),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":provenance,"approval":approval,"warnings":warnings}),
             }
         }
         Ok(Err(why)) => Output {

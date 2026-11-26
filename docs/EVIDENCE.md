@@ -140,7 +140,7 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | `revision-unparsable` | A debit with targets (`audit-receipts`), or a spend or debit line (`audit-charges`), whose archived revision matches its digest but breaks a pass rule that this hallpass has and the one that recorded the work did not. The audit cannot replay it. | Nothing in the archive: never edit archived bytes. Run the audit with the hallpass version that recorded the work, or accept the gap. |
 | `approval-unverified` | A spend or debit line decided under a revision with no signature record in the archive (`unsigned` or `missing`). | Have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `signature-not-reverified` | A spend or debit line decided under a revision with a signature record that this audit did not verify, because it ran without `--allowed-signers`. | Run the audit with `--allowed-signers` and your own trusted signers file. |
-| `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file, for every `--principal` given. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
+| `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file, for every `--principal` given. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, or the record names another principal (`wrong-principal`), move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `signer-not-pinned` | A spend or debit line decided under a revision whose recorded signature verified, but for the principal its record names, because the audit ran without `--principal`. | Run the audit with `--principal` and the owner's principal. |
 | `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
 
@@ -297,7 +297,12 @@ keeps the record, and `archive` then reports `signature-recorded` with the
 record as `approval`. Only `verify-approval --archive` adds a record, so
 running it later over the bytes of an `unsigned` digest upgrades that digest.
 A record is never replaced: a second, different verified signature over the
-same bytes is not stored, and `verify-approval` says so in `warnings`.
+same bytes is not stored (for the same principal this is still exit 0, with
+`signature-recorded`). `verify-approval` then says so in `warnings`, reports
+`provenance` `signature-not-stored` and exits 2 when the kept record names a
+DIFFERENT principal, so a step that archives
+approvals fails. To record the new signature, move `DIGEST.sig` and
+`DIGEST.approval` aside and run `verify-approval --archive` again.
 Archives written by earlier versions hold no records, so every digest in them
 reads `unsigned` until `verify-approval --archive` records its signature. A
 record that does not parse, names another digest, or does not match its

@@ -1302,9 +1302,13 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
   unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
-  (`signature-recorded` when verified with `--archive`, else null) and
+  (`signature-recorded` when verified with `--archive`, `signature-not-stored`
+  when an earlier, different record was kept and this signature was not
+  stored, else null) and
   `approval` (the signature record now in the archive, as in `archive`, or
-  null; when an earlier, different record was kept, a warning says so).
+  null; when an earlier, different record was kept, a warning says so, the
+  provenance is `signature-not-stored`, and the exit status is 2, when the kept
+  record names another principal).
 - **diff**: `old`, `new`, `old_pass_id`, `new_pass_id`, `old_digest`,
   `new_digest`, `approval_id_changed`, `changes` (list of `{field, before,
   after, review_required}`; `before` and `after` are a JSON string, number

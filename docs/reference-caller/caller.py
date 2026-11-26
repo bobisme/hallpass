@@ -130,6 +130,12 @@ def charge(text):
     raise argparse.ArgumentTypeError(f"expected COUNTER=N with N > 0, not {text!r}")
 
 
+def move_aside(a, digest):
+    base = f"{a.archive}/{digest}"
+    return (f"If the archive keeps a record of another principal, move {base}.sig and {base}.approval "
+            "aside (a record is never replaced), then run pin again")
+
+
 def signed_digest(a):
     """Verify the signature itself and return the digest it covers. Stop on anything less.
 
@@ -145,6 +151,9 @@ def signed_digest(a):
     code, out = hallpass("verify-approval", "--signature", signature, "--allowed-signers", a.allowed_signers,
                          "--principal", a.require_signature, "--archive", a.archive, "--", a.pass_file)
     verified = decode(out)
+    if verified.get("provenance") == "signature-not-stored":
+        fail(f"the archive has no signature record of {a.require_signature}: it keeps the record of "
+             f"{(verified.get('approval') or {}).get('principal')}. {move_aside(a, verified.get('digest'))}")
     if (code != 0 or verified.get("command") != "verify-approval" or verified.get("result") != "verified"
             or verified.get("principal") != a.require_signature
             or verified.get("provenance") != "signature-recorded"
@@ -160,7 +169,8 @@ def signed_digest(a):
         fail("the pass changed after its signature was verified; sign it again and verify it again")
     if (archived.get("provenance") != "signature-recorded" or not isinstance(approval, dict)
             or approval.get("principal") != a.require_signature):
-        fail(f"the archive has no signature record of {a.require_signature} for {archived.get('digest')}")
+        fail(f"the archive has no signature record of {a.require_signature} for {archived.get('digest')}. "
+             + move_aside(a, archived.get("digest")))
     return verified["digest"]
 
 
@@ -360,6 +370,17 @@ def handoff(a):
     widths = [max(len(line[i]) for line in lines) for i in range(3)] if lines else []
     for line in lines:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths)) + "  " + line[3])
+    pins = [r for r in read_journal(a.journal) if r["event"] == "pin" and r["pass"] == a.pass_file]
+    if pins:
+        code, out = hallpass("digest", "--", a.pass_file)
+        current = decode(out)
+        if code != 0 or not isinstance(current.get("digest"), str):
+            fail(f"could not read the digest of {a.pass_file}: {message(current)}")
+        if current["digest"] != pins[-1]["digest"]:
+            attention += 1
+            print(f"ATTENTION: the pass on disk ({current['digest']}) is not the last pinned revision "
+                  f"({pins[-1]['digest']}). The ceilings below come from the file on disk, not from "
+                  f"the pinned revision; review and pin it again, or restore the pinned bytes.")
     spent = ", ".join(f"{t['name']} {t['spent']} of {t['total']}" for t in ledger["totals"])
     shown = ledger.get("shown")
     scope = f"{len(ledger['entries'])} debits" if not shown else (

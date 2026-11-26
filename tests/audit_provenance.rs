@@ -148,6 +148,10 @@ impl Env {
     }
 
     fn verify(&self, file: &str, trust: &str, principal: &str) -> Value {
+        self.verify_code(file, trust, principal, 0)
+    }
+
+    fn verify_code(&self, file: &str, trust: &str, principal: &str, code: i32) -> Value {
         let signature = format!("{file}.sig");
         self.json(
             &[
@@ -162,7 +166,7 @@ impl Env {
                 "--archive",
                 "arch",
             ],
-            0,
+            code,
         )
     }
 
@@ -392,7 +396,8 @@ fn a_signature_record_is_never_replaced_or_downgraded() {
     // A second, different verified signature over the same bytes is not stored.
     env.write("copy.toml", &pass());
     env.sign("deputy", "copy.toml");
-    let second = env.verify("copy.toml", "deputy-trust", "deputy@example.org");
+    let second = env.verify_code("copy.toml", "deputy-trust", "deputy@example.org", 2);
+    assert_eq!(second["provenance"], "signature-not-stored", "{second}");
     assert_eq!(second["digest"], digest.as_str());
     assert_eq!(second["approval"]["principal"], OWNER, "{second}");
     assert!(
