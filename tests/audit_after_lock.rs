@@ -220,6 +220,9 @@ fn the_signature_verified_is_the_one_read_even_if_swapped_out_and_back() {
 }
 
 #[cfg(feature = "cli")]
+mod live_spend;
+
+#[cfg(feature = "cli")]
 mod cli {
     //! The ssh-keygen verifier of the command line, through a shim that
     //! records what ssh-keygen is given and changes the files meanwhile.
@@ -311,7 +314,21 @@ mod cli {
             serde_json::from_str(text.trim()).expect("one JSON object")
         }
 
+        /// Debit one request to `WEB` at the pinned date, recording the
+        /// target, without the test clock, so that an audit can be
+        /// `complete` (bn-2mm).
         fn spend(&self) {
+            super::live_spend::spend(
+                &self.path("p.toml"),
+                &self.path("state"),
+                WEB,
+                1,
+                "2026-11-20T09:00:00Z",
+            );
+        }
+
+        /// The same debit through the command line, under the test clock.
+        fn rehearsal_spend(&self) {
             let reply = self.json(
                 &[
                     "spend",
@@ -328,9 +345,9 @@ mod cli {
             assert_eq!(reply["result"], "allowed", "{reply}");
         }
 
-        /// A signed, recorded revision and two spends under it. Returns the
-        /// digest.
-        fn signed(&self) -> Digest {
+        /// A signed, recorded revision and two spends under it: live ones
+        /// with `live`, test-clock ones otherwise. Returns the digest.
+        fn signed(&self, live: bool) -> Digest {
             self.keygen(&["-q", "-t", "ed25519", "-N", "", "-f", "owner"]);
             let public = fs::read_to_string(self.path("owner.pub")).expect("public key");
             self.write("trust", &format!("{OWNER} {public}"));
@@ -361,8 +378,13 @@ mod cli {
                 0,
                 false,
             );
-            self.spend();
-            self.spend();
+            for _ in 0..2 {
+                if live {
+                    self.spend();
+                } else {
+                    self.rehearsal_spend();
+                }
+            }
             reply["digest"]
                 .as_str()
                 .expect("digest")
@@ -425,7 +447,7 @@ cat "$signature" > "$SHIM_LOG/signature"
             return;
         }
         let env = Env::new();
-        let digest = env.signed();
+        let digest = env.signed(true);
         let trust = fs::read(env.path("trust")).expect("trust");
         let sig = env.path(&format!("arch/{digest}.sig"));
         let signature = fs::read(&sig).expect("signature");
@@ -507,7 +529,9 @@ exit $status
             return;
         }
         let env = Env::new();
-        env.signed();
+        // The shim spends through the command line, under the test clock, so
+        // the ledger is a rehearsal ledger from the start (bn-2mm).
+        env.signed(false);
         // The shim spends on the same pass while the audit waits for it.
         env.shim(&format!(
             "{FIND_INPUTS}\"$SHIM_HALLPASS\" --format json spend p.toml --charge requests=1 --to '{WEB}' --record-target --lock-timeout-ms 2000 > \"$SHIM_LOG/spend\" 2>&1
@@ -526,10 +550,19 @@ exec \"$SHIM_REAL\" \"$@\"
                     "--principal",
                     OWNER,
                 ],
-                0,
+                2,
                 true,
             );
-            assert_eq!(audit["result"], "complete", "{command}: {audit}");
+            // Everything verified; only the test-clock lines keep it from
+            // `complete`.
+            assert_eq!(audit["result"], "incomplete", "{command}: {audit}");
+            let gaps = audit["gaps"].as_object().expect("gaps");
+            assert_eq!(
+                gaps.keys().collect::<Vec<_>>(),
+                ["test-clock-entry"],
+                "{command}: {audit}"
+            );
+            assert_eq!(audit["revisions"]["unverified"], 0, "{command}: {audit}");
             let spend = String::from_utf8(env.log("spend")).expect("utf8");
             assert!(spend.contains("\"result\":\"allowed\""), "{spend}");
             // The audit counts the lines it read before the spend.

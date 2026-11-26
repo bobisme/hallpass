@@ -126,6 +126,20 @@ pub enum Error {
         /// The id in the pass.
         pass_id: String,
     },
+    /// A write would put a test-clock line in a ledger of real-clock lines,
+    /// or a real-clock line in a ledger of test-clock lines. Rehearsal and
+    /// live lines never mix in one ledger.
+    #[error("{}", clock_mix_message(path, *seq, *rehearsal))]
+    LedgerClockMix {
+        /// The ledger file.
+        path: PathBuf,
+        /// The first entry of the other kind.
+        seq: u64,
+        /// True when the ledger holds test-clock lines (a rehearsal ledger)
+        /// and the write uses the real clock; false when the ledger holds
+        /// real-clock lines and the write uses the test clock.
+        rehearsal: bool,
+    },
     /// The ledger is gone, but the witness says spends were recorded.
     #[error("{0}")]
     LedgerMissing(Box<MissingLedger>),
@@ -202,6 +216,21 @@ pub enum Error {
     /// The request itself is malformed (for example `--n 0`).
     #[error("{0}")]
     Usage(String),
+}
+
+/// The message for [`Error::LedgerClockMix`].
+fn clock_mix_message(path: &std::path::Path, seq: u64, rehearsal: bool) -> String {
+    if rehearsal {
+        format!(
+            "the ledger {} is a rehearsal ledger: entry {seq} was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), and this command uses the real clock. Rehearsal and live lines must not mix in one ledger, so nothing was recorded. To go on rehearsing, use a debug build with HALLPASS_UNSAFE_TEST_CLOCK set; for live work, use a pass with a new id, with no ledger yet.",
+            path.display()
+        )
+    } else {
+        format!(
+            "the ledger {} is a live ledger: entry {seq} was recorded at the real time, and this command runs under a test clock (HALLPASS_UNSAFE_TEST_CLOCK). Rehearsal and live lines must not mix in one ledger, so nothing was recorded. Unset HALLPASS_UNSAFE_TEST_CLOCK to record at the real time; to rehearse, use a copy of the pass with a new id and its own state directory (XDG_STATE_HOME).",
+            path.display()
+        )
+    }
 }
 
 /// The next step for an invalid pass. A read that caught a save in progress
@@ -282,6 +311,7 @@ impl Error {
             Self::UntrustedOwner { .. } => "untrusted-owner",
             Self::LedgerCorrupt { .. } => "ledger-corrupt",
             Self::LedgerForeign { .. } => "ledger-foreign",
+            Self::LedgerClockMix { .. } => "ledger-clock-mix",
             Self::LedgerMissing(_) => "ledger-missing",
             Self::LedgerElsewhere(_) => "ledger-elsewhere",
             Self::LedgerChanged { .. } => "ledger-changed",

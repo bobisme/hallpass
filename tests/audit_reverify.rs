@@ -10,6 +10,8 @@
 //! Tests that sign need OpenSSH `ssh-keygen` and return early without it.
 #![cfg(feature = "cli")]
 
+mod live_spend;
+
 use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -178,19 +180,11 @@ impl Env {
         text_of(&reply["digest"]).to_owned()
     }
 
-    fn spend(&self) -> Value {
-        self.json(
-            &[
-                "spend",
-                "p.toml",
-                "--charge",
-                "requests=1",
-                "--to",
-                WEB,
-                "--record-target",
-            ],
-            0,
-        )
+    /// Debit one request to `WEB` at `NOW`, recording the target, without
+    /// the test clock, so that an audit can be `complete` (bn-2mm). Returns
+    /// the ledger sequence.
+    fn spend(&self) -> u64 {
+        live_spend::spend(&self.path("p.toml"), &self.path("state"), WEB, 1, NOW)
     }
 
     fn archive_file(&self, digest: &str, suffix: &str) -> PathBuf {
@@ -229,12 +223,12 @@ fn forged(env: &Env) -> (String, String) {
     env.owner("owner", OWNER, "trust");
     env.write("p.toml", &pass());
     let signed = env.sign_and_record("owner", "p.toml");
-    assert_eq!(env.spend()["seq"], 1);
+    assert_eq!(env.spend(), 1);
     env.write("p.toml", &extra());
     let archived = env.json(&["archive", "p.toml", "arch"], 0);
     assert_eq!(archived["provenance"], "unsigned");
     let unsigned = text_of(&archived["digest"]).to_owned();
-    assert_eq!(env.spend()["seq"], 2);
+    assert_eq!(env.spend(), 2);
     let before = env.json(&["audit-charges", "p.toml", "arch"], 2);
     assert_eq!(
         before["gaps"]["approval-unverified"]["digests"][0]["digest"],

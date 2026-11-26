@@ -417,7 +417,22 @@ only by debug builds (`cargo build`, `cargo test`) and by builds with the
 and uses the real clock. When it is honoured,
 every command prints a warning on standard error and the JSON output says
 `"test_clock": true`. The name says what it is, so nobody sets it by
-accident. To run the integration tests against a release build use
+accident.
+
+A shell left with the variable set and `target/debug` first on `PATH` could
+still write rehearsal debits into a live ledger, and an audit then took their
+pinned times as real. So every line written under the test clock carries
+`"test_clock":true`, inside the hash chain, and a ledger holds one kind of
+line: a write that would mix them fails with `ledger-clock-mix`, in both
+directions, for spends, debit batches, adoptions and reference
+reconciliations alike, since each records a time. Refusing the reverse
+direction matters as much: a release build that went on spending in a
+rehearsal ledger would make its count, and its audit, a blend of rehearsal
+and live work. A release build still reads a marked ledger, so `ledger`,
+`receipt` and the audits can show what it is. Audits report each marked line
+as the gap `test-clock-entry`, and any line dated more than 5 minutes after the
+audit's own clock as `entry-in-future`. Rejected: marking only the header line, which would need a
+new header shape and would leave each line's own record silent. To run the integration tests against a release build use
 `cargo test --release --features test-clock` (all pass). A plain
 `cargo test --release` builds a binary that ignores the variable: the
 tests that never set the clock pass, the ones that rely on it fail because

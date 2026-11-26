@@ -10,6 +10,8 @@
 //! The test that signs needs OpenSSH `ssh-keygen` and returns early without it.
 #![cfg(feature = "cli")]
 
+mod live_spend;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -121,21 +123,10 @@ impl Env {
         format!("{out}{err}")
     }
 
+    /// Debit one request to `WEB` at `NOW`, recording the target, without
+    /// the test clock, so that an audit can be `complete` (bn-2mm).
     fn spend(&self) {
-        let (code, out, err) = self.run(
-            "state",
-            "json",
-            &[
-                "spend",
-                "p.toml",
-                "--charge",
-                "requests=1",
-                "--to",
-                WEB,
-                "--record-target",
-            ],
-        );
-        assert_eq!(code, 0, "{out}{err}");
+        live_spend::spend(&self.path("p.toml"), &self.path("state"), WEB, 1, NOW);
     }
 
     /// Spend twice under the revision now in use, then make the first spend

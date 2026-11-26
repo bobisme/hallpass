@@ -138,12 +138,15 @@ fn window_that_expires_while_queued_is_refused() {
         let worker = scope.spawn(|| {
             let mut req = SpendRequest::new("calls", 1);
             req.lock_timeout = Some(Duration::from_secs(10));
-            spend_with_clock_in(&f.pass, &req, &f.state, || {
-                if expired.load(Ordering::SeqCst) {
-                    datetime!(2026-11-20 17:00 UTC)
-                } else {
-                    datetime!(2026-11-20 09:00 UTC)
-                }
+            // A pinned clock, on the ledger the test clock started (bn-2mm).
+            hallpass::with_test_clock(|| {
+                spend_with_clock_in(&f.pass, &req, &f.state, || {
+                    if expired.load(Ordering::SeqCst) {
+                        datetime!(2026-11-20 17:00 UTC)
+                    } else {
+                        datetime!(2026-11-20 09:00 UTC)
+                    }
+                })
             })
             .expect("decision")
         });

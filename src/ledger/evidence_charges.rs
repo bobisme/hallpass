@@ -1,7 +1,7 @@
 //! Replay numerical and mandatory charge terms against archived revisions.
 use super::evidence::{
     DETAIL_LIMIT, EvidenceGap, LastRevision, Reverify, RevisionGroup, RevisionTracker,
-    SignatureCheck, record_gap,
+    SignatureCheck, record_clock_gaps, record_gap,
 };
 use super::{VerifiedEvent, add, check_required_charges, decide_ceiling, visit_view};
 use crate::{Error, LoadedPass, StateDir};
@@ -84,7 +84,9 @@ pub fn audit_charges_with(
     let mut revisions = RevisionTracker::new(directory, reverify);
     let mut checked = 0;
     let mut debits = 0;
+    let now = time::OffsetDateTime::now_utc();
     let view = visit_view(loaded, state, false, &mut |event| {
+        record_clock_gaps(&mut gaps, event, now);
         let (seq, time, digest, charges): (_, _, _, Vec<(&str, u64)>) = match event {
             VerifiedEvent::Adopt(a) => {
                 if !a.carried.is_empty() {

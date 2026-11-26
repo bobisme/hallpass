@@ -354,10 +354,11 @@ fn receipt_names_are_explicit_and_new_ledger_lines_are_unchanged() {
     // The ledger keeps its own encoding: no null name, no absent reference.
     let ledger = fs::read_to_string(hallpass::ledger_path(&p)).expect("ledger");
     let lines: Vec<&str> = ledger.lines().collect();
-    // `body` precedes the pass digest and `tail` follows it.
+    // `body` precedes the pass digest and `tail` follows it. Each line was
+    // written under the test clock, so it carries the marker (bn-2mm).
     let line = |seq: usize, body: &str, tail: &str| {
         format!(
-            r#"{{"seq":{seq},"time":"{NOW}",{body},"digest":"{digest}"{tail},"prev":"{prev}"}}"#,
+            r#"{{"seq":{seq},"time":"{NOW}",{body},"digest":"{digest}"{tail},"test_clock":true,"prev":"{prev}"}}"#,
             prev = Digest::of(lines[seq - 1].as_bytes()),
         )
     };

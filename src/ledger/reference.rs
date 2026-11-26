@@ -72,6 +72,9 @@ pub struct ReferenceReconciliation {
     /// The caller references that may be in the lost lines, in the order
     /// given. Escape each before showing it on a terminal.
     pub references: Vec<String>,
+    /// True when the line was written under a test clock
+    /// ([`crate::with_test_clock`]): its time is not the real time.
+    pub test_clock: bool,
 }
 
 /// A reference reconciliation line as written. Its field `references` is
@@ -86,6 +89,8 @@ pub(super) struct ReconcileLine {
     pub(super) reason: String,
     pub(super) digest: String,
     pub(super) references: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) test_clock: Option<bool>,
     pub(super) prev: String,
 }
 
@@ -178,6 +183,7 @@ pub(super) fn parse_reconcile(
         reason: line.reason,
         digest,
         references: line.references,
+        test_clock: line.test_clock == Some(true),
     })
 }
 
@@ -480,6 +486,7 @@ pub fn reconcile_references(
         reason: reason.to_owned(),
         digest: locked.loaded.digest.to_string(),
         references: references.to_vec(),
+        test_clock: super::clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
     let text = serde_json::to_string(&line).map_err(|e| Error::Usage(e.to_string()))?;
@@ -512,6 +519,7 @@ pub fn reconcile_references(
             reason: line.reason,
             digest: locked.loaded.digest,
             references: line.references,
+            test_clock: line.test_clock == Some(true),
         },
         ledger: locked.path.clone(),
         pass_id: id,

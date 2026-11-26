@@ -19,7 +19,7 @@ If the result is `found`, compare the receipt's digest, charge names and amounts
 | `ambiguous` | 2 | Multiple debits shared the reference. Preserve all candidate sequences for reconciliation. |
 | `error` | 1 | The reference, pass, ledger or witness could not be checked. |
 
-A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. `reconciled_at` lists the first 64 sequences of the reference reconciliations that name the reference: the operator recorded that its debit may be in lines an adoption lost, so `absent` does not show that it was never debited, and a warning says so. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
+A reference is case-sensitive. A spend recorded without `--caller-ref` supplies no match. The command counts all matches and returns the first 64 in sequence order, setting `truncated` when more exist. Review `witness`, `warnings` and `adoption_count`. Adoption can carry spent totals after the original receipts were lost. `reconciled_at` lists the first 64 sequences of the reference reconciliations that name the reference: the operator recorded that its debit may be in lines an adoption lost, so `absent` does not show that it was never debited, and a warning says so. A fresh pass returns `absent` with a `fresh` witness. A missing ledger with witnessed spending returns an error. Each match has `test_clock`, true for a debit written under the test clock; such a match is a rehearsal, text marks it `TEST CLOCK`, and a warning says so. A matching receipt alone cannot authorize another send, retry a debit or refund budget.
 
 The Rust `spend_charges_batch*` API gives every member of a committed atomic
 batch its own logical sequence and ordinary receipt, even though all members
@@ -92,7 +92,7 @@ For each debit that retained targets, the audit reads the archived bytes for its
 | Result | Exit | Meaning |
 | --- | --- | --- |
 | `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and this audit verified again, with `--allowed-signers`, a signature over every revision the ledger used, for a principal named with `--principal`. |
-| `incomplete` | 2 | No corroborated endpoints, or evidence gaps and no policy mismatch. A revision without a signature this audit verified is a gap. |
+| `incomplete` | 2 | No corroborated endpoints, or evidence gaps and no policy mismatch. A revision without a signature this audit verified is a gap, and so is a line written under the test clock. |
 | `mismatch` | 2 | At least one refusal or changed matched label. Other gaps are still listed. |
 | `error` | 1 | Unusable input, such as a corrupt ledger, a digest-invalid archive entry, a damaged signature record or an unreadable `--allowed-signers` file, or an `ssh-keygen` that cannot run when a recorded signature needs verifying. |
 
@@ -143,6 +143,8 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file, for every `--principal` given. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, or the record names another principal (`wrong-principal`), move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `signer-not-pinned` | A spend or debit line decided under a revision whose recorded signature verified, but for the principal its record names, because the audit ran without `--principal`. | Run the audit with `--principal` and the owner's principal. |
 | `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
+| `test-clock-entry` | Any line written under the test clock (`HALLPASS_UNSAFE_TEST_CLOCK` in a debug build): it carries `"test_clock":true`. It is a rehearsal, and its time is not the real time. | Record live work with a release build, in a ledger of its own. |
+| `entry-in-future` | Any line whose time is more than 5 minutes later than the audit's own clock (the real time where the audit runs); smaller skew between hosts is allowed. The clock that recorded it was set ahead, or the audit's clock is behind. | Check both clocks. Do not take the recorded time as when the work happened. |
 
 `targets-unrecorded` replaces the `legacy-spend` reason that earlier versions
 gave a scalar spend line. The six gaps about a revision, `archive-missing`,

@@ -5,7 +5,8 @@
 //! writes: keys in declaration order, no spaces, and strings whose only escapes
 //! are `\"` and `\\` (the text in a valid ledger has no control characters, so
 //! `serde_json` writes no other escape). This reader accepts only that spelling
-//! of a legacy spend or a debit (with or without a receipt). It declines
+//! of a legacy spend or a debit (with or without a receipt or the test-clock
+//! marker). It declines
 //! everything else, adoptions included, and `serde_json` then decodes the line
 //! as before.
 //!
@@ -48,6 +49,7 @@ fn spend(mut at: Cursor<'_>, seq: u64, time: String) -> Option<Entry> {
         at.tag(r#","note":""#)?;
         Some(at.text()?)
     };
+    let test_clock = marker(&mut at);
     at.tag(r#","prev":""#)?;
     let prev = at.text()?;
     at.end()?;
@@ -58,6 +60,7 @@ fn spend(mut at: Cursor<'_>, seq: u64, time: String) -> Option<Entry> {
         n,
         digest,
         note,
+        test_clock,
         prev,
     })
 }
@@ -91,6 +94,7 @@ fn debit(mut at: Cursor<'_>, seq: u64, time: String) -> Option<DebitLine> {
     } else {
         None
     };
+    let test_clock = marker(&mut at);
     at.tag(r#","prev":""#)?;
     let prev = at.text()?;
     at.end()?;
@@ -103,8 +107,16 @@ fn debit(mut at: Cursor<'_>, seq: u64, time: String) -> Option<DebitLine> {
         digest,
         note,
         receipt,
+        test_clock,
         prev,
     })
+}
+
+/// The test-clock marker as hallpass writes it (`,"test_clock":true`), or
+/// `None` when the line has none. Any other spelling, `false` included, is
+/// left to `serde_json`.
+fn marker(at: &mut Cursor<'_>) -> Option<bool> {
+    at.tag(r#","test_clock":true"#).map(|()| true)
 }
 
 /// The rest of a receipt whose opening brace was consumed.
@@ -383,6 +395,15 @@ mod tests {
         prop_oneof![0u64..1000, any::<u64>()]
     }
 
+    /// The test-clock marker; with `plain`, only as hallpass writes it
+    /// (absent or `true`).
+    fn test_clock(plain: bool) -> BoxedStrategy<Option<bool>> {
+        if plain {
+            return proptest::option::of(Just(true)).boxed();
+        }
+        proptest::option::of(any::<bool>()).boxed()
+    }
+
     /// A legacy spend line as hallpass writes it, from arbitrary values.
     fn spend_line(plain: bool) -> impl Strategy<Value = String> {
         (
@@ -392,9 +413,10 @@ mod tests {
             number(),
             text(plain),
             proptest::option::of(text(plain)),
+            test_clock(plain),
             text(plain),
         )
-            .prop_map(|(seq, time, counter, n, digest, note, prev)| {
+            .prop_map(|(seq, time, counter, n, digest, note, test_clock, prev)| {
                 let entry = Entry {
                     seq,
                     time,
@@ -402,6 +424,7 @@ mod tests {
                     n,
                     digest,
                     note,
+                    test_clock,
                     prev,
                 };
                 serde_json::to_string(&entry).expect("encode")
@@ -421,10 +444,16 @@ mod tests {
             proptest::collection::vec((text(plain), number()), usize::from(plain)..4),
             (text(plain), proptest::option::of(text(plain))),
             proptest::option::of(receipt(plain)),
-            text(plain),
+            (test_clock(plain), text(plain)),
         )
             .prop_map(
-                |((seq, time, event, version), charges, (digest, note), receipt, prev)| {
+                |(
+                    (seq, time, event, version),
+                    charges,
+                    (digest, note),
+                    receipt,
+                    (test_clock, prev),
+                )| {
                     let debit = DebitLine {
                         seq,
                         time,
@@ -437,6 +466,7 @@ mod tests {
                         digest,
                         note,
                         receipt,
+                        test_clock,
                         prev,
                     };
                     serde_json::to_string(&debit).expect("encode")
@@ -469,10 +499,10 @@ mod tests {
             (number(), text(false), text(false), text(false)),
             proptest::collection::btree_map(text(false), number(), 0..3),
             proptest::option::of((text(false), number(), text(false), text(false))),
-            (text(false), text(false)),
+            (text(false), test_clock(false), text(false)),
         )
             .prop_map(
-                |((seq, time, event, reason), carried, witness, (digest, prev))| {
+                |((seq, time, event, reason), carried, witness, (digest, test_clock, prev))| {
                     let adopt = AdoptLine {
                         seq,
                         time,
@@ -487,6 +517,7 @@ mod tests {
                             totals: BTreeMap::new(),
                             updated,
                         }),
+                        test_clock,
                         prev,
                     };
                     serde_json::to_string(&adopt).expect("encode")
@@ -566,7 +597,16 @@ mod tests {
             noted.replace("retry 2", r#"\"\\\""#),
             receipt.replace("run-81/unit-a", r#"run \"81\" – unit\\a"#),
         ];
-        for line in [&spend, &noted, &debit, &receipt].into_iter().chain(&texts) {
+        // Lines written under a test clock carry the marker before `prev`.
+        let marked = [
+            spend.replace(r#","prev""#, r#","test_clock":true,"prev""#),
+            receipt.replace(r#"},"prev""#, r#"},"test_clock":true,"prev""#),
+        ];
+        for line in [&spend, &noted, &debit, &receipt]
+            .into_iter()
+            .chain(&texts)
+            .chain(&marked)
+        {
             assert!(by_reader(line.as_bytes()).is_some(), "{line}");
             assert_eq!(by_reader(line.as_bytes()), by_serde(line.as_bytes()));
         }
@@ -586,6 +626,8 @@ mod tests {
             receipt.replace(r#""caller_ref":"run-81/unit-a","#, r#""caller_ref":null,"#),
             receipt.replace(r#","name":"sip.example.net""#, r#","name":null"#),
             debit.replace(r#""prev""#, r#""receipt":{"targets":[]},"prev""#),
+            spend.replace(r#","prev""#, r#","test_clock":false,"prev""#),
+            debit.replace(r#","prev""#, r#","test_clock":null,"prev""#),
             format!("{spend} "),
         ] {
             assert!(by_reader(other.as_bytes()).is_none(), "{other}");

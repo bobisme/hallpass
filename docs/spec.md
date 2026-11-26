@@ -708,6 +708,7 @@ is still reported in that candidate's row.
 | the pass does not validate (every problem listed), changed while it was read, or does not end with a newline | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
+| `spend`, `adopt`, `reconcile-references`: the command runs under the test clock and the ledger holds a line written at the real time, or it runs on the real clock and the ledger holds a line written under the test clock ([Test-clock lines](#test-clock-lines)) | `ledger-clock-mix` |
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
 | the ledger is missing, but the ledger the witness last saw at another path is intact (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
@@ -1247,20 +1248,23 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   last sequence number shown, null when none is, and `of`, the number of
   entries, adoptions and reference reconciliations included, in the whole
   ledger), `entries`
-  (list of `{seq, time, counter, n, digest, note}` for a scalar spend, or
-  `{seq, time, event, version, charges, digest, note, receipt}` with
-  `event` `debit` for a versioned debit; `digest` is the pass
-  digest the spend was decided against, `note` null when none),
+  (list of `{seq, time, counter, n, digest, note, test_clock}` for a scalar
+  spend, or `{seq, time, event, version, charges, digest, note, receipt,
+  test_clock}` with `event` `debit` for a versioned debit; `digest` is the
+  pass digest the spend was decided against, `note` null when none,
+  `test_clock` true for a line written under the test clock),
   `adoptions` (list of `{seq, time, reason, digest, carried, previous,
-  may_have_lost_references}`; `carried` is an object of counter name to
+  may_have_lost_references, test_clock}`; `carried` is an object of counter name to
   amount, `previous` is `{ledger, seq, totals, updated}` or null,
   `may_have_lost_references` is true for an adoption that records a
   previous witness of at least one line or carries an amount),
   `reference_reconciliations` (list of `{seq, time, adoption, reason,
-  digest, references}`; `adoption` is the sequence of the adoption it
+  digest, references, test_clock}`; `adoption` is the sequence of the adoption it
   reconciles, `references` the whole list), `unreconciled_adoption` (the
   latest adoption that may have lost lines when no reconciliation follows
-  it, so guarded spends are `reference-inconclusive`; else null), `witness`,
+  it, so guarded spends are `reference-inconclusive`; else null),
+  `test_clock_from` (the sequence of the first line written under the test
+  clock, or null: see [Test-clock lines](#test-clock-lines)), `witness`,
   `moved_from` (as in
   `status`), `totals`
   (list of `{name, spent, total, remaining, over_ceiling, over_by}` for every counter of the pass
@@ -1374,7 +1378,37 @@ included). The whole-second rule above is about window times only.
 `lint`, the commands that read the clock, only in debug builds and builds
 with the `test-clock` feature. When used, a warning goes to standard
 error and `test_clock` is `true`. Release builds ignore it and say so on
-standard error.
+standard error. Lines written under it are marked: see
+[Test-clock lines](#test-clock-lines).
+
+### Test-clock lines
+
+Every ledger line written under the test clock (a spend, a debit, a debit
+batch, an adoption or a reference reconciliation) carries
+`"test_clock":true` just before `prev`, so the marker is in the hash chain.
+A line without it was written at the real time. hallpass never writes
+`"test_clock":false`; a line that has it is `ledger-corrupt`.
+
+A ledger holds lines of one kind. Under the test clock, `spend` (also with
+`--dry-run`), `adopt` (also with `--preview`) and `reconcile-references`
+refuse a ledger that holds a real-clock line. On the real clock, they refuse
+a ledger that holds a test-clock line. Both fail with `ledger-clock-mix` and
+record nothing. A release binary has no test clock, so it never writes the
+marker and cannot add to a rehearsal ledger, but it still reads one. A
+library caller marks its own lines with `with_test_clock`.
+
+`ledger` shows `test_clock` on each entry, adoption and reconciliation, and
+`test_clock_from` for the ledger. `receipt` shows `test_clock` on each match.
+`audit-receipts` and `audit-charges` report every marked line as the gap
+`test-clock-entry`, so the audit of a rehearsal ledger is never `complete`.
+Both audits also report a line whose time is more than 5 minutes later than
+the audit's own clock as `entry-in-future`; smaller skew between hosts is
+allowed.
+
+Ledgers written before the marker existed have no marked lines and read as
+before. A test-clock line written by such a version cannot be told from a
+real one. A hallpass from before the marker fails closed on a marked line
+with `ledger-corrupt`.
 
 ## Library API
 
@@ -1405,6 +1439,7 @@ Crate `hallpass` (re-exports `time`):
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
 | `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any logical entry of the ledger and the sequence number of the first entry with it; the warning for a decision clock before it |
+| `with_test_clock(f)` | mark every ledger line the library calls in `f` write on this thread as written under a test clock; writes refuse to mix marked and unmarked lines in one ledger (`Error::LedgerClockMix`, [Test-clock lines](#test-clock-lines)) |
 | `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared, give_up_in }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
 | `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |

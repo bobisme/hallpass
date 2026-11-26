@@ -565,9 +565,10 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
     match error {
         Error::WitnessNotUpdated { .. } => Some("recorded"),
         Error::AppendUncertain { .. } => Some("uncertain"),
-        Error::LockTimeout { .. } | Error::Usage(_) | Error::SharedDirectory { .. } => {
-            Some("not-recorded")
-        }
+        Error::LockTimeout { .. }
+        | Error::Usage(_)
+        | Error::SharedDirectory { .. }
+        | Error::LedgerClockMix { .. } => Some("not-recorded"),
         Error::WitnessUnavailable { detail, .. }
             if !detail.contains("was recorded in the ledger") =>
         {
@@ -1829,6 +1830,7 @@ fn ledger_text(
     let ledger_shown = safe(&view.path.display().to_string()).into_owned();
     if view.exists {
         let _ = writeln!(text, "Ledger of pass {} ({ledger_shown})", pass.id);
+        text.push_str(&rehearsal_text(view));
         if let Some(c) = counter {
             let _ = writeln!(
                 text,
@@ -1920,6 +1922,15 @@ fn ledger_text(
     text
 }
 
+/// The line that says a ledger holds test-clock lines, or nothing.
+fn rehearsal_text(view: &hallpass::LedgerView) -> String {
+    view.test_clock_from.map_or_else(String::new, |seq| {
+        format!(
+            "REHEARSAL: from entry {seq}, this ledger was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK). Those times are not the real time, and an audit of this ledger is never complete.\n"
+        )
+    })
+}
+
 /// One line on the ledger and its witness, for `status` and `ledger`.
 fn ledger_state_text(view: &hallpass::LedgerView) -> String {
     use hallpass::WitnessStatus as W;
@@ -1981,6 +1992,7 @@ fn spend_events_json(
                     "n": e.amount,
                     "digest": e.digest.to_string(),
                     "note": e.note,
+                    "test_clock": e.test_clock,
                 }),
             )
         })
@@ -1996,6 +2008,7 @@ fn spend_events_json(
                     "digest": e.digest.to_string(),
                     "note": e.note,
                     "receipt": e.receipt,
+                    "test_clock": e.test_clock,
                 }),
             )
         }))
@@ -2072,6 +2085,7 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
                 "carried": a.carried,
                 "previous": a.previous.as_ref().map(witnessed_json),
                 "may_have_lost_references": a.makes_references_inconclusive(),
+                "test_clock": a.test_clock,
             })).collect::<Vec<_>>(),
             "reference_reconciliations": selected.reconciliations.iter().map(|r| json!({
                 "seq": r.seq,
@@ -2080,8 +2094,10 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
                 "reason": r.reason,
                 "digest": r.digest.to_string(),
                 "references": r.references,
+                "test_clock": r.test_clock,
             })).collect::<Vec<_>>(),
             "unreconciled_adoption": view.unreconciled_adoption,
+            "test_clock_from": view.test_clock_from,
             "totals": totals.iter().map(|(name, spent, total)| json!({
                 "name": name,
                 "spent": spent,
@@ -2452,7 +2468,8 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
         Ok(clock) => clock,
         Err(e) => return error_output(name, None, &e),
     };
-    match &cli.command {
+    // Under the test clock, every ledger line the command writes is marked.
+    let run = || match &cli.command {
         Command::Help { topic } => cli_help::help(topic.as_deref(), format),
         Command::Version => cli_help::version(),
         Command::Init { file } => init(file),
@@ -2584,6 +2601,11 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             strength,
         } => review_cases(file, cases, *strength),
         Command::ApprovalId { owner, reference } => approval_id(owner, reference),
+    };
+    if clock.test {
+        hallpass::with_test_clock(run)
+    } else {
+        run()
     }
 }
 

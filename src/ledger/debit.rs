@@ -82,6 +82,9 @@ pub struct LedgerDebit {
     pub note: Option<String>,
     /// The optional provenance chosen by the caller.
     pub receipt: Option<DebitReceipt>,
+    /// True when the line was written under a test clock
+    /// ([`crate::with_test_clock`]): its time is not the real time.
+    pub test_clock: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -97,6 +100,8 @@ pub(super) struct DebitLine {
     pub(super) note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) receipt: Option<DebitReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) test_clock: Option<bool>,
     pub(super) prev: String,
 }
 
@@ -118,6 +123,8 @@ pub(super) struct DebitBatchLine {
     pub(super) counter: String,
     pub(super) units: Vec<DebitBatchUnit>,
     pub(super) digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) test_clock: Option<bool>,
     pub(super) prev: String,
 }
 
@@ -297,6 +304,7 @@ pub(super) fn parse_debit(
         digest,
         note: line.note,
         receipt: line.receipt,
+        test_clock: line.test_clock == Some(true),
     })
 }
 
@@ -340,6 +348,7 @@ pub(super) fn parse_debit_batch(
         .checked_add(count)
         .ok_or("the recorded entry count is too large")?;
     parsed.last_time = Some(time);
+    let test_clock = line.test_clock == Some(true);
     Ok(line
         .units
         .into_iter()
@@ -354,6 +363,7 @@ pub(super) fn parse_debit_batch(
             digest,
             note: unit.note,
             receipt: Some(unit.receipt),
+            test_clock,
         })
         .collect())
 }
@@ -821,6 +831,7 @@ fn spend_batch_using(
             })
             .collect(),
         digest: locked.loaded.digest.to_string(),
+        test_clock: super::clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
     let text = serde_json::to_string(&line).map_err(|e| Error::Usage(e.to_string()))?;
@@ -964,6 +975,7 @@ fn spend_using(
         digest: result.digest.to_string(),
         note: request.policy.note.map(str::to_owned),
         receipt: make_receipt(request, &result.labels),
+        test_clock: super::clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
     let mut totals = locked.parsed.tally.spent.clone();
@@ -1128,6 +1140,7 @@ fn preview(
             })
         },
     )?;
+    super::clock::check_view(&view)?;
     let now = clock();
     check_clock(now)?;
     let reference = matches.refusal(

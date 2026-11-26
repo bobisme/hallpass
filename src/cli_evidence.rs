@@ -48,12 +48,13 @@ pub fn receipt(file: &Path, reference: &str) -> Output {
     for row in &report.matches {
         let _ = writeln!(
             text,
-            "  #{} {} {}  charges={} targets={}",
+            "  #{} {} {}  charges={} targets={}{}",
             row.seq,
             text_time(&row.time),
             row.digest,
             json!(row.charges),
-            json!(row.targets)
+            json!(row.targets),
+            if row.test_clock { "  TEST CLOCK" } else { "" }
         );
     }
     if report.truncated {
@@ -154,6 +155,12 @@ fn gap_meaning(reason: &str) -> &'static str {
         }
         "targets-unrecorded" => {
             "the line keeps no target; spend with --to and --record-target to keep endpoint evidence"
+        }
+        "test-clock-entry" => {
+            "the line was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), so it is a rehearsal and its time is not the real time; record live work with a release build, in a ledger of its own"
+        }
+        "entry-in-future" => {
+            "the line records a time later than this audit's clock, so the clock that recorded it was set ahead (or this one is behind); check both clocks, and do not take the time as when the work happened"
         }
         _ => "",
     }

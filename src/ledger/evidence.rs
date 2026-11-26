@@ -34,6 +34,38 @@ pub const MAX_PROBLEMS_SHOWN: usize = 4;
 /// their digest but break a pass rule of this version.
 const UNPARSABLE: &str = "revision-unparsable";
 
+/// The gap of a line written under a test clock.
+pub const TEST_CLOCK_ENTRY: &str = "test-clock-entry";
+/// The gap of a line whose time is later than the audit's own clock.
+pub const ENTRY_IN_FUTURE: &str = "entry-in-future";
+/// How far a line's time may be ahead of the audit's clock before it is
+/// `entry-in-future`: ordinary skew between the recording host and the
+/// auditing host is not a sign of a clock set ahead.
+pub const FUTURE_SKEW_ALLOWANCE: time::Duration = time::Duration::minutes(5);
+
+/// Record the gaps about when line `event` says it was written: under a
+/// test clock (`test-clock-entry`), or later than `now`, the audit's own
+/// clock by more than [`FUTURE_SKEW_ALLOWANCE`] (`entry-in-future`). Either way its time is not evidence of when
+/// the work happened.
+pub(super) fn record_clock_gaps(
+    gaps: &mut BTreeMap<&'static str, EvidenceGap>,
+    event: &VerifiedEvent,
+    now: OffsetDateTime,
+) {
+    let (seq, time, test_clock) = match event {
+        VerifiedEvent::Spend(e) => (e.seq, e.time, e.test_clock),
+        VerifiedEvent::Debit(d) => (d.seq, d.time, d.test_clock),
+        VerifiedEvent::Adopt(a) => (a.seq, a.time, a.test_clock),
+        VerifiedEvent::Reconcile(r) => (r.seq, r.time, r.test_clock),
+    };
+    if test_clock {
+        record_gap(gaps, TEST_CLOCK_ENTRY, seq);
+    }
+    if time > now + FUTURE_SKEW_ALLOWANCE {
+        record_gap(gaps, ENTRY_IN_FUTURE, seq);
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct FoundReceipt {
     pub seq: u64,
@@ -41,6 +73,9 @@ pub struct FoundReceipt {
     pub digest: String,
     pub charges: Vec<DebitCharge>,
     pub targets: Vec<RecordedTarget>,
+    /// True when the debit was written under a test clock: its time is not
+    /// the real time.
+    pub test_clock: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +159,7 @@ pub fn lookup_receipt(
                     digest: d.digest.to_string(),
                     charges: d.charges.clone(),
                     targets: r.targets.clone(),
+                    test_clock: d.test_clock,
                 });
             }
         }
@@ -144,6 +180,12 @@ pub fn lookup_receipt(
         warnings.push("The available history includes adoption. Carried totals can survive even when individual receipts are missing.".into());
     }
     warnings.extend(reconciled_warning(&reconciled));
+    if let Some(found) = matches.iter().find(|m| m.test_clock) {
+        warnings.push(format!(
+            "The debit at ledger sequence {} was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), so its time is not the real time: it is a rehearsal, not evidence of live work.",
+            found.seq
+        ));
+    }
     Ok(ReceiptLookup {
         pass_id: loaded.pass.id.clone(),
         caller_ref: reference.into(),
@@ -959,7 +1001,9 @@ pub fn audit_receipts_with(
     let mut gaps = BTreeMap::new();
     let mut revisions = RevisionTracker::new(directory, reverify);
     let mut last = LastRevision::default();
+    let now = OffsetDateTime::now_utc();
     let view = visit_view(loaded, state, false, &mut |event| {
+        record_clock_gaps(&mut gaps, event, now);
         match event {
             // A scalar spend line has no field for a target.
             VerifiedEvent::Spend(s) => {

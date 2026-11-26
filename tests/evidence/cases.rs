@@ -68,14 +68,15 @@ fn approve(archive: &Path, archived: &Value) {
 }
 
 /// An audit whose replay found nothing wrong, over revisions that each have a
-/// signature record it did not verify again (bn-2ld).
+/// signature record it did not verify again (bn-2ld), of a ledger recorded
+/// under the test clock (bn-2mm).
 fn clean(audit: &Value) {
     assert_eq!(audit["result"], "incomplete", "{audit}");
     assert_eq!(audit["mismatches"]["count"], 0, "{audit}");
     let gaps = audit["gaps"].as_object().expect("gaps");
     assert_eq!(
         gaps.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["signature-not-reverified"],
+        ["signature-not-reverified", "test-clock-entry"],
         "{audit}"
     );
 }

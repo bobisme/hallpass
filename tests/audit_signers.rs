@@ -15,6 +15,8 @@
 //! Tests that sign need OpenSSH `ssh-keygen` and return early without it.
 #![cfg(feature = "cli")]
 
+mod live_spend;
+
 use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -187,21 +189,10 @@ impl Env {
         text_of(&reply["digest"]).to_owned()
     }
 
+    /// Debit one request to `to` at `clock`, recording the target, without
+    /// the test clock, so that an audit can be `complete` (bn-2mm).
     fn spend(&self, to: &str, clock: &str) {
-        let (code, out) = self.run(
-            &[
-                "spend",
-                "p.toml",
-                "--charge",
-                "requests=1",
-                "--to",
-                to,
-                "--record-target",
-            ],
-            "json",
-            clock,
-        );
-        assert_eq!(code, 0, "{out}");
+        live_spend::spend(&self.path("p.toml"), &self.path("state"), to, 1, clock);
     }
 
     /// A replacement `ssh-keygen` in a directory of its own, used as `PATH`.

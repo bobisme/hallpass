@@ -94,6 +94,7 @@ pub use ledger::{
     reconcile_references, rfc3339, spend, spend_charges, spend_charges_batch,
     spend_charges_batch_in, spend_charges_batch_with_clock_in, spend_charges_in,
     spend_charges_with_clock_in, spend_in, spend_with_clock_in, tally, verify_checkpoint,
+    with_test_clock,
 };
 pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};

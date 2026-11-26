@@ -463,6 +463,15 @@ edit it. It is JSON Lines:
   in those lines. It counts nothing. A hallpass from before it does not
   know this line and fails closed (`ledger-corrupt`) on a ledger that has
   one. See "`reconcile-references`" in [the specification](spec.md).
+- A line written under the test clock (`HALLPASS_UNSAFE_TEST_CLOCK`, which
+  only debug builds honour) carries `"test_clock":true` just before `prev`,
+  in the hash chain. A line without it was written at the real time. A
+  ledger holds one kind of line: hallpass refuses to add a test-clock line
+  to a ledger with real-clock lines, and the reverse (`ledger-clock-mix`).
+  Audits report each test-clock line as `test-clock-entry`, so they never
+  call such a ledger `complete`. A hallpass from before the marker fails
+  closed (`ledger-corrupt`) on a marked line. See "Test-clock lines" in
+  [the specification](spec.md#test-clock-lines).
 - **The witness.** Each spend also writes
   `$XDG_STATE_HOME/hallpass/<pass id>.witness` (default
   `~/.local/state/hallpass/`), one JSON object with the last sequence

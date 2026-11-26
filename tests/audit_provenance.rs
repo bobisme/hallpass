@@ -5,6 +5,8 @@
 //! Tests that sign need OpenSSH `ssh-keygen` and return early without it.
 #![cfg(feature = "cli")]
 
+mod live_spend;
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -170,7 +172,15 @@ impl Env {
         )
     }
 
-    fn spend(&self, n: &str, to: &str) -> Value {
+    /// Debit `n` requests to `to` at `NOW`, recording the target, without
+    /// the test clock, so that an audit can be `complete` (bn-2mm). Returns
+    /// the ledger sequence.
+    fn spend(&self, n: u64, to: &str) -> u64 {
+        live_spend::spend(&self.path("p.toml"), &self.path("state"), to, n, NOW)
+    }
+
+    /// The same debit through the command line, under the test clock.
+    fn cli_spend(&self, n: &str, to: &str) -> Value {
         self.json(
             &[
                 "spend",
@@ -204,14 +214,14 @@ fn evaluator_scenario(env: &Env) -> (String, String) {
     assert_eq!(verified["provenance"], "signature-recorded", "{verified}");
     assert_eq!(verified["approval"]["principal"], OWNER);
     let signed = text_of(&verified["digest"]).to_owned();
-    assert_eq!(env.spend("1", WEB)["seq"], 1);
+    assert_eq!(env.spend(1, WEB), 1);
 
     env.write("p.toml", &widened());
     let archived = env.json(&["archive", "p.toml", "arch"], 0);
     assert_eq!(archived["provenance"], "unsigned", "{archived}");
     assert!(archived["approval"].is_null());
     let unsigned = text_of(&archived["digest"]).to_owned();
-    assert_eq!(env.spend("5", EXTRA)["seq"], 2);
+    assert_eq!(env.spend(5, EXTRA), 2);
 
     env.write("p.toml", &pass());
     // Archiving signed bytes again keeps their signature record.
@@ -488,7 +498,7 @@ fn an_archive_without_records_reads_as_unsigned() {
         text.contains("without a signature record (verify-approval --archive records one)"),
         "{text}"
     );
-    env.spend("1", WEB);
+    env.spend(1, WEB);
     let audit = env.json(&["audit-receipts", "p.toml", "arch"], 2);
     assert_eq!(audit["result"], "incomplete");
     assert_eq!(audit["corroborated"]["count"], 1);
@@ -557,7 +567,7 @@ fn signature_records_are_kept_once_and_checked_like_the_bytes() {
         env.json(&["audit-charges", "p.toml", "arch"], code)
     };
     env.write("p.toml", &bytes);
-    env.spend("1", WEB);
+    env.spend(1, WEB);
     let intact = audit(2);
     assert_eq!(intact["result"], "incomplete");
     assert_eq!(
@@ -631,7 +641,7 @@ fn a_plain_spend_keeps_no_target_and_the_gap_says_how_to_keep_one() {
         "{text}"
     );
     // With --record-target the same spend is evidence the audit replays.
-    let kept = env.spend("1", WEB);
+    let kept = env.cli_spend("1", WEB);
     assert_eq!(kept["receipt"]["targets"][0]["label"], "web");
     let audit = env.json(&["audit-receipts", "p.toml", "arch"], 2);
     assert_eq!(audit["corroborated"]["count"], 1);
@@ -644,12 +654,12 @@ fn archive_missing_gaps_name_each_digest_with_its_sequences() {
     let first = pass();
     let second = format!("{first}# reviewed again\n");
     env.write("p.toml", &first);
-    env.spend("1", WEB);
-    env.spend("1", WEB);
+    env.spend(1, WEB);
+    env.spend(1, WEB);
     env.write("p.toml", &second);
-    env.spend("1", WEB);
+    env.spend(1, WEB);
     env.write("p.toml", &first);
-    env.spend("1", WEB);
+    env.spend(1, WEB);
     let a = Digest::of(first.as_bytes()).to_string();
     let b = Digest::of(second.as_bytes()).to_string();
     let expected = json!([

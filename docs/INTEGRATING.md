@@ -276,7 +276,11 @@ what a real disk gives. All the numbers, with the setup, are in
 - **Refuse `"test_clock": true`** outside your own tests. Debug builds of
   hallpass honour `HALLPASS_UNSAFE_TEST_CLOCK`; a release build does not
   and always reports `false`. Remove that variable from the environment you
-  start hallpass with.
+  start hallpass with. hallpass marks each ledger line it writes under the
+  test clock, refuses to mix such lines with live ones in one ledger
+  (`ledger-clock-mix`), and audits never call a marked ledger `complete`.
+  A Rust caller that passes its own clock marks its lines with
+  `hallpass::with_test_clock`.
 - **Show `warnings`** to the operator. They are not refusals, but they say
   things such as "the ledger was moved", "the witness could not be
   checked" or "no destination was checked".

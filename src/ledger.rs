@@ -42,6 +42,7 @@ use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_to
 use crate::{MAX_TARGETS, NamedTarget};
 
 pub mod capacity;
+mod clock;
 mod debit;
 pub mod evidence;
 mod evidence_charges;
@@ -49,6 +50,7 @@ mod evidence_manifest;
 mod reference;
 pub mod scenario;
 mod written;
+pub use clock::with_test_clock;
 pub use debit::*;
 use debit::{DEBIT_BATCH_EVENT, DebitBatchLine, DebitLine, parse_debit, parse_debit_batch};
 pub use reference::{
@@ -80,6 +82,8 @@ struct Entry {
     n: u64,
     digest: String,
     note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_clock: Option<bool>,
     prev: String,
 }
 
@@ -489,6 +493,9 @@ pub struct LedgerEntry {
     /// The note, if one was given. Operator-supplied text: escape it before
     /// showing it on a terminal.
     pub note: Option<String>,
+    /// True when the line was written under a test clock
+    /// ([`crate::with_test_clock`]): its time is not the real time.
+    pub test_clock: bool,
 }
 
 /// An adoption recorded in the ledger: the operator acknowledged a ledger
@@ -511,6 +518,9 @@ pub struct Adoption {
     pub carried: BTreeMap<String, u64>,
     /// What the witness recorded before the adoption, if there was one.
     pub previous: Option<Witnessed>,
+    /// True when the line was written under a test clock
+    /// ([`crate::with_test_clock`]): its time is not the real time.
+    pub test_clock: bool,
 }
 
 /// Which situation an adoption resolved.
@@ -615,6 +625,13 @@ pub struct LedgerView {
     pub latest_time: Option<(OffsetDateTime, u64)>,
     /// Number of adoption records.
     pub adoption_count: u64,
+    /// The sequence number of the first entry written under a test clock
+    /// ([`crate::with_test_clock`]), or None when the ledger has none. A
+    /// writer refuses to mix such lines with real-clock ones.
+    pub test_clock_from: Option<u64>,
+    /// The first entry written at the real time, for a preview to refuse
+    /// what the write would ([`clock::check_view`]).
+    real_clock_from: Option<u64>,
     /// How the ledger compares with its witness.
     pub witness: WitnessStatus,
     /// Where the witness last saw this ledger, when that was another path
@@ -644,6 +661,10 @@ struct Parsed {
     /// The latest time on any line, and the first line that records it.
     latest: Option<(OffsetDateTime, u64)>,
     adoption_count: u64,
+    /// The first entry written under a test clock, if any.
+    test_clock_seq: Option<u64>,
+    /// The first entry written without a test clock, if any.
+    real_clock_seq: Option<u64>,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
     /// Recorded targets this scan already found valid, so that a target
@@ -788,6 +809,8 @@ struct AdoptLine {
     digest: String,
     carried: BTreeMap<String, u64>,
     witness: Option<WitnessLine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_clock: Option<bool>,
     prev: String,
 }
 
@@ -901,6 +924,8 @@ fn scan_ledger(
         last_time: None,
         latest: None,
         adoption_count: 0,
+        test_clock_seq: None,
+        real_clock_seq: None,
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -935,9 +960,9 @@ fn scan_ledger(
             }
             corrupt(number, "the line is not a complete ledger entry")
         })?;
-        let (seq, last_seq, prev) = match &record {
-            Line::Spend(e) => (e.seq, e.seq, &e.prev),
-            Line::Debit(e) => (e.seq, e.seq, &e.prev),
+        let (seq, last_seq, prev, marker) = match &record {
+            Line::Spend(e) => (e.seq, e.seq, &e.prev, e.test_clock),
+            Line::Debit(e) => (e.seq, e.seq, &e.prev, e.test_clock),
             Line::DebitBatch(e) => {
                 let Some(last) = e
                     .units
@@ -948,10 +973,10 @@ fn scan_ledger(
                 else {
                     return Err(corrupt(number, "the debit batch sequence range is invalid"));
                 };
-                (e.seq, last, &e.prev)
+                (e.seq, last, &e.prev, e.test_clock)
             }
-            Line::Adopt(a) => (a.seq, a.seq, &a.prev),
-            Line::Reconcile(r) => (r.seq, r.seq, &r.prev),
+            Line::Adopt(a) => (a.seq, a.seq, &a.prev, a.test_clock),
+            Line::Reconcile(r) => (r.seq, r.seq, &r.prev, r.test_clock),
         };
         if seq != parsed.seq + 1 {
             return Err(corrupt(
@@ -968,6 +993,12 @@ fn scan_ledger(
                 ),
             ));
         }
+        let kind = if clock::read_marker(marker).map_err(|detail| corrupt(number, detail))? {
+            &mut parsed.test_clock_seq
+        } else {
+            &mut parsed.real_clock_seq
+        };
+        kind.get_or_insert(seq);
         let events = match record {
             Line::Spend(entry) => parse_spend(&mut parsed, entry)
                 .map(VerifiedEvent::Spend)
@@ -1139,6 +1170,7 @@ fn parse_spend(parsed: &mut Parsed, entry: Entry) -> Result<LedgerEntry, &'stati
         amount: entry.n,
         digest,
         note: entry.note,
+        test_clock: entry.test_clock == Some(true),
     })
 }
 
@@ -1189,6 +1221,7 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         digest,
         carried: line.carried,
         previous,
+        test_clock: line.test_clock == Some(true),
     })
 }
 
@@ -1517,6 +1550,8 @@ fn visit_view(
         last_time: None,
         latest: None,
         adoption_count: 0,
+        test_clock_seq: None,
+        real_clock_seq: None,
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -1540,6 +1575,8 @@ fn visit_view(
         last_time: parsed.last_time,
         latest_time: parsed.latest,
         adoption_count: parsed.adoption_count,
+        test_clock_from: parsed.test_clock_seq,
+        real_clock_from: parsed.real_clock_seq,
         witness,
         moved_from: moved,
         warnings,
@@ -1964,7 +2001,7 @@ fn lock_for_writing_notifying(
     if let Some(expected) = guard {
         let current = preview_adopt(pass_path, state).map_err(|e| match e {
             // The preview's own refusal, so that both say the same.
-            Error::LedgerElsewhere(_) => e,
+            Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
             _ => stale_token(pass_path),
         })?;
         if current.token != expected {
@@ -2029,6 +2066,7 @@ fn lock_for_writing_notifying(
         visit,
     )?
     .for_pass(&path, &id)?;
+    clock::check_kind(&path, &parsed)?;
     if !created
         && guard.is_some_and(|expected| {
             expected != adoption_token(&loaded, &path, Some(&parsed), witness.as_ref())
@@ -2209,6 +2247,7 @@ pub fn spend_with_clock_in(
         n: request.amount,
         digest: loaded.digest.to_string(),
         note: request.note.map(str::to_owned),
+        test_clock: clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
     let line = serde_json::to_string(&entry).map_err(|e| Error::Usage(e.to_string()))?;
@@ -2376,6 +2415,7 @@ pub fn preview_spend_with_clock_in(
         with_requested_wait(request.lock_timeout, request.on_lock_wait, || {
             preview_snapshot(path, state)
         })?;
+    clock::check_view(&view)?;
     let now = clock();
     check_clock(now)?;
     let outcome = evaluate_spend(
@@ -2672,6 +2712,9 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
             )
         })
         .transpose()?;
+    if let Some(parsed) = &parsed {
+        clock::check_kind(&path, parsed)?;
+    }
     let case = match compare(
         pass_path,
         &path,
@@ -2812,6 +2855,7 @@ pub fn adopt_guarded(
             totals: w.totals.clone(),
             updated: w.updated.clone(),
         }),
+        test_clock: clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
     let text = serde_json::to_string(&line).map_err(|e| Error::Usage(e.to_string()))?;
@@ -2848,6 +2892,7 @@ pub fn adopt_guarded(
             digest: locked.loaded.digest,
             carried,
             previous: locked.witness.clone(),
+            test_clock: line.test_clock == Some(true),
         },
         ledger: locked.path.clone(),
         created: locked.created,
@@ -3112,6 +3157,7 @@ mod tests {
             digest: loaded.digest.to_string(),
             carried: witness.totals.clone(),
             witness: None,
+            test_clock: None,
             prev: Digest::of(header.trim_end().as_bytes()).to_string(),
         };
         let baseline = serde_json::to_string(&record).expect("ledger line");

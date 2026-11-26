@@ -244,7 +244,7 @@ fn guarded_spends_resume_after_the_lost_references_are_reconciled() {
     assert_eq!(
         last_line(&e),
         format!(
-            r#"{{"seq":2,"time":"{NOW}","event":"reconcile-references","adoption":1,"reason":"every reference in the run journals","digest":"{}","references":["unit-1","unit-2"],"prev":"{}"}}"#,
+            r#"{{"seq":2,"time":"{NOW}","event":"reconcile-references","adoption":1,"reason":"every reference in the run journals","digest":"{}","references":["unit-1","unit-2"],"test_clock":true,"prev":"{}"}}"#,
             hallpass::load(&e.pass()).expect("pass").digest,
             hallpass::Digest::of(
                 String::from_utf8(e.bytes())
@@ -291,6 +291,7 @@ fn guarded_spends_resume_after_the_lost_references_are_reconciled() {
             "reason": "every reference in the run journals",
             "digest": reconciled["digest"],
             "references": ["unit-1", "unit-2"],
+            "test_clock": true,
         }])
     );
 }
@@ -825,15 +826,18 @@ fn an_older_hallpass_decodes_no_shape_from_a_reconciliation_line() {
         assert!(serde_json::from_str::<OldAdopt>(&line).is_err(), "{line}");
     }
     // The old shapes still decode the lines around it, so the test would
-    // notice a shape that no longer matches what hallpass writes.
+    // notice a shape that no longer matches what hallpass writes. These
+    // lines were written under the test clock: without its marker (bn-2mm),
+    // they are the lines a live hallpass writes.
+    let unmarked = |line: &str| line.replacen(r#","test_clock":true"#, "", 1);
     let text = String::from_utf8(e.bytes()).expect("UTF-8");
-    let adoption = text.lines().nth(1).expect("adoption");
+    let adoption = unmarked(text.lines().nth(1).expect("adoption"));
     assert!(
-        serde_json::from_str::<OldAdopt>(adoption).is_ok(),
+        serde_json::from_str::<OldAdopt>(&adoption).is_ok(),
         "{adoption}"
     );
     e.recorded("unit-2", 4);
-    let debit = last_line(&e);
+    let debit = unmarked(&last_line(&e));
     assert!(serde_json::from_str::<OldDebit>(&debit).is_ok(), "{debit}");
 }
 

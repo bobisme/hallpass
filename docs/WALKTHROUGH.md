@@ -48,6 +48,11 @@ The rehearsal happens at 09:00 UTC on 2026-11-20. A debug build of hallpass
 honours `HALLPASS_UNSAFE_TEST_CLOCK` and marks every reply with
 `test_clock: true`. The reference caller accepts those replies only with
 `--rehearsal`. `XDG_STATE_HOME` keeps the witness inside the work directory.
+Every ledger line written under the test clock is marked as a rehearsal line.
+A ledger holds rehearsal lines or live lines, never both: hallpass refuses to
+add a rehearsal line to a live ledger, or a live line to a rehearsal ledger
+(`ledger-clock-mix`). So rehearse with a pass id and a state directory of
+your own, never on the live pass.
 
 For a live shift, use a release build, enter the real window, unset
 `HALLPASS_UNSAFE_TEST_CLOCK` and leave out `--rehearsal`. Keep
@@ -363,7 +368,7 @@ hallpass audit-receipts engagement.pass.toml approval-archive || echo "exit $?"
 
 ```text
 Receipt found for "shift-1/unit-3". 1 matches. Witness matches. Adoptions 0.
-  #2 2026-11-20T09:00:00Z sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb  charges=[{"counter":"requests","n":1},{"counter":"bytes","n":24}] targets=[{"label":"web","name":"app.example.org","target":"192.0.2.10:443/tcp"}]
+  #2 2026-11-20T09:00:00Z sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb  charges=[{"counter":"requests","n":1},{"counter":"bytes","n":24}] targets=[{"label":"web","name":"app.example.org","target":"192.0.2.10:443/tcp"}]  TEST CLOCK
 Receipt audit incomplete. Witness matches.
 corroborated 2
   #1 target 1 at 2026-11-20T09:00:00Z 192.0.2.10:443/tcp name app.example.org: recorded label web matches the archived revision, which no verified signature approved
@@ -372,6 +377,7 @@ mismatches 0
 Gap approval-unverified 2: decided under a revision that no verified signature approved in this archive; if the owner signed it, record the signature with verify-approval --archive. Sequences [1, 2]
   sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07cd33fc80a63ce3f6faf0 1 line(s). Sequences [1]
   sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb 1 line(s). Sequences [2]
+Gap test-clock-entry 2: the line was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), so it is a rehearsal and its time is not the real time; record live work with a release build, in a ledger of its own. Sequences [1, 2]
 Revisions used 2, 2 without a verified signature
   sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07cd33fc80a63ce3f6faf0 sequences 1 to 1, 1 line(s): archived with no signature record
   sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb sequences 2 to 2, 1 line(s): archived with no signature record
@@ -379,7 +385,11 @@ exit 2
 ```
 
 Both recorded targets match the revisions they were spent under, but the
-audit is `incomplete`, not `complete`. This rehearsal archived each revision
+audit is `incomplete`, not `complete`, for two reasons. First, the debug
+build wrote every line under the test clock, so each line carries
+`"test_clock":true` in the hash chain, `receipt` marks it `TEST CLOCK`, and
+the audit reports it as `test-clock-entry`. A rehearsal ledger is never
+`complete`. Second, this rehearsal archived each revision
 with `pin`, which runs `hallpass archive`, and the owner's emails carry no
 signature. So nothing in the archive shows that the owner approved those exact
 bytes, and the audit names both digests. On a live engagement, have the owner
@@ -387,8 +397,8 @@ sign each revision and archive it with `verify-approval --archive`
 ([Signing and verifying an approval](INTEGRATING.md#signing-and-verifying-an-approval)),
 and run the audit with `--allowed-signers`, your own trusted signers file,
 and `--principal` with the owner's principal, so that it verifies each
-signature again and requires the owner's. The audit then says `confirmed` for
-each endpoint and `complete`. What each word proves is in
+signature again and requires the owner's. On a live ledger the audit then
+says `confirmed` for each endpoint and `complete`. What each word proves is in
 [What an audit proves](EVIDENCE.md#what-an-audit-proves).
 
 The journal holds four records for a completed unit. Times are the caller's

@@ -281,11 +281,12 @@ fn an_adoption_line_that_carries_amounts_without_a_witness_keeps_new_references_
 
     // hallpass never writes this line (an adoption without a witness carries
     // nothing), but its carried amount stands for lines this ledger lacks.
+    // It is marked as the test-clock line before it is (bn-2mm).
     let text = fs::read_to_string(e.ledger()).expect("ledger");
     let last = text.lines().last().expect("last line");
     let digest = hallpass::load(&e.pass()).expect("pass").digest;
     let line = format!(
-        r#"{{"seq":2,"time":"{NOW}","event":"adopt","reason":"written by another tool","digest":"{digest}","carried":{{"calls":3}},"witness":null,"prev":"{}"}}"#,
+        r#"{{"seq":2,"time":"{NOW}","event":"adopt","reason":"written by another tool","digest":"{digest}","carried":{{"calls":3}},"witness":null,"test_clock":true,"prev":"{}"}}"#,
         hallpass::Digest::of(last.as_bytes())
     );
     let mut ledger = fs::OpenOptions::new()
