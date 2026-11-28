@@ -791,3 +791,7 @@
 1795853823399332	hallpass-dev	itc:AQ		item.assign	bn-2m96	{"action":"assign","agent":"hallpass-dev"}	blake3:i2bUj09nLVOqKzemFgg3JuQrrJzdDeUbKEhVYpDKyY0
 1795853823418028	hallpass-dev	itc:AQ		item.move	bn-3cie	{"state":"doing"}	blake3:S8OW_6LWHSzm4FXzB4iCx-o5Ndhz4qlAIXQ-4MznnaA
 1795853823421699	hallpass-dev	itc:AQ		item.assign	bn-3cie	{"action":"assign","agent":"hallpass-dev"}	blake3:YkpnoGD2PP7eT3iXuHBEh4R9134Zvg22K1f9nAfx1aw
+1795855310718465	hallpass-dev	itc:AQ		item.move	bn-3vei	{"state":"done"}	blake3:2V17bnY62f0LlfigHw_kP3RtND44gCK09v8HXZJLf8k
+1795855310755333	hallpass-dev	itc:AQ		item.move	bn-15w3	{"state":"done"}	blake3:q8jr7pJGsu2lQO3Zyl-TnhgaxGvjwOFw9sDxGIvHgSc
+1795855310774273	hallpass-dev	itc:AQ		item.move	bn-2m96	{"state":"done"}	blake3:C2VVXrcVTYUnkTMB3iCGD99ee4pOWgm2jdwCUxMEO44
+1795855310793933	hallpass-dev	itc:AQ		item.move	bn-3cie	{"state":"done"}	blake3:FQG5fHZYrgnHi6UzEMW7tT9YHubV1BgTf4AqLFPYvCA

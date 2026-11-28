@@ -385,8 +385,27 @@ Changes since commit d70c09f.
   unreadable candidate; its exit comes from the other candidates.
 - The `repair` usage line names `--drop-blank-tail`.
 
+- `checkpoint` exports `latest` and `anchors` (line hashes); an older
+  hallpass refuses such a file. `adopt --checkpoint` counts every ledger line
+  the checkpoint does not prove its own as new, so it may over-count; with an
+  old checkpoint (no anchors) it carries the full totals. A shorter ledger
+  that counts more is now `checkpoint-behind` with a carry. Library:
+  `Checkpoint` gains `latest` and `anchors`, `AdoptPreview` gains
+  `checkpoint_gap`.
+- hallpass writes `<id>.recorded`, a copy of each witness. A missing witness
+  with a valid copy is `witness-unavailable` (adopt), not an arrival; tooling
+  that deletes `<id>.witness` to start fresh must delete the copy too.
+- `doctor` is BLOCKED when a counter in `required_counters_v1` is at its
+  ceiling.
+- `compare-backups --ancestry` text changes when a shorter copy is given.
+- `repair` JSON and `TornTail` gain `nul_only`.
+
 ### Added
 
+- `repair --drop-torn-tail` removes a last line of only NUL bytes after a
+  crash, under the same witness rules.
+- `compare-backups --ancestry` groups shorter and exact copies, showing the
+  newest copy on each branch.
 - `doctor FILE --checkpoint CP` and `adopt FILE --checkpoint CP`: after a
   whole-machine restore, carry what a retained checkpoint's totals record
   beyond the ledger; counts only rise, a fork is refused.
@@ -852,3 +871,10 @@ Changes since commit d70c09f.
   outcomes; concurrent runs of one reference wrote several intents (bn-3vgl).
 - `--duration -5` leaked clap's raw error; the future-mtime warning appeared
   twice (bn-akq0).
+- `adopt --checkpoint` undercounted when a spend happened after a restore:
+  6 units on a ceiling of 5 (bn-3vei).
+- Deleting the witness and restoring an older ledger reset the count
+  (bn-15w3).
+- `doctor` said HEALTHY while a required counter blocked every spend; a NUL
+  tail had no repair (bn-2m96).
+- `caller.py handoff` failed past 1,024 units (bn-3cie).
