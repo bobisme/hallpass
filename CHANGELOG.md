@@ -305,7 +305,27 @@ Changes since commit d70c09f.
 - Archive damage (an archived entry that no longer matches its digest, or a
   damaged signature record) reports `archive-corrupt` instead of `usage`.
 
+- A copy of a pass whose witness lags an intact ledger (after a spend killed
+  between its append and its witness update, or spends from a second state
+  directory) is `ledger-elsewhere`, with the live ledger's totals; it used to
+  be `ledger-missing`. `adopt` and `adopt --preview` refuse it, and also refuse
+  a `ledger-changed` copy while the ledger the witness last saw is intact.
+  They refuse while that ledger is a link, not private or unreadable, until it
+  is fixed. `ElsewhereLedger.seq` and `.totals` are the live ledger's; new
+  fields `witness_seq`, `expected_exists`, `AdoptPreview.last_seen_unchecked`.
+- A pass with `-0` or a quoted single port (`ports = "443"`) no longer loads.
+  Write `0` or `443`; quoted strings are for ranges such as `"8000-8100"`.
+
 ### Added
+
+- `hallpass doctor FILE [--archive DIR]`: a read-only diagnosis of a pass,
+  its ledger, witness and state. It gives `healthy` / `needs-action` /
+  `blocked`, the `problem` code a spend would fail with, exactly one `next`
+  command with real paths, and `findings`. It never names `adopt` while the
+  ledger may be intact. Library: `StateDir::read_only()`,
+  `LedgerView::check_clock_kind()`.
+- A pass whose modification time is in the future gives a warning in `spend`,
+  `permits` and `status`.
 
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
   `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`,
@@ -678,3 +698,10 @@ Changes since commit d70c09f.
   refusal, the `ledger-corrupt` advice and EVIDENCE name the last resort (move
   the ledger aside and adopt) (bn-2bg).
 - Archive damage has its own error code (bn-3jb).
+- A lagging witness no longer lets a copy of the pass adopt and spend the
+  ceiling a second time (bn-37e).
+- A future-dated pass is settled once, before the locks, instead of a second
+  time under the writer lock: 8 concurrent spenders went from 10.8 s to 1.4 s
+  (bn-134).
+- `-0` was accepted although `+0` was refused; a quoted single port was
+  accepted though not documented (bn-2ew).
