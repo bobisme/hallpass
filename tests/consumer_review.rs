@@ -354,11 +354,22 @@ fn containment_cli_requires_open_windows_and_replays_expanded_edges() {
         command(dir, &args, 2)["containment"]["reason"],
         "different-pass-id"
     );
-    // NEW opens after the instant, so it admits nothing there; the later end
-    // is still a loosening, which the overall verdict reports.
+    // NEW opens after the instant. OLD here is the IPv6 revision, so NEW's
+    // IPv4 address is new scope on the day NEW opens; the instant does not
+    // hide it (bn-3js: this was contained, new-admits-nothing).
     write_pass(dir, "new", &BASE.replace("2026-11-20", "2026-11-21"));
     let moved = command(dir, &args, 2);
-    assert_eq!(moved["containment"]["reason"], "new-admits-nothing");
+    assert_eq!(moved["containment"]["endpoint_result"], "expanded");
+    assert_eq!(moved["containment"]["result"], "expanded");
+    assert_eq!(moved["containment"]["example"]["after"]["label"], "web");
+    // With the same rules, the endpoints are contained at every instant;
+    // the later end is a loosening, which the overall verdict reports.
+    write_pass(dir, "old", BASE);
+    let moved = command(dir, &args, 2);
+    assert_eq!(
+        moved["containment"]["reason"],
+        "rules-and-ipv4-edges-covered"
+    );
     assert_eq!(moved["containment"]["endpoint_result"], "contained");
     assert_eq!(moved["containment"]["result"], "widened");
     assert!(!dir.join("state").exists());

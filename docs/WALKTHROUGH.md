@@ -286,7 +286,7 @@ OLD pass web-2026-11 digest: sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07
 NEW pass web-2026-11 digest: sha256:27c3a869c61aab46b652d0b378fb969c1834c23e6d4798947ec1941ef64a3bdb
 approval.valid_until: 2026-11-20T17:00:00Z -> 2026-11-20T12:00:00Z [review required]
 ceilings.bytes: 100 -> 60 [review required]
-Endpoint scope at 2026-11-20T09:00:00Z: contained (rules-and-ipv4-edges-covered). Compared 1 rule pairs.
+Endpoint scope at every instant: contained (rules-and-ipv4-edges-covered). Compared 1 rule pairs.
 Overall verdict: contained. Contained means the endpoints and every other term only narrow.
 Pass web-2026-11 "Web edge" (engagement.pass.toml)
 Approved by: Pat Owner (reference: email of 2026-11-19)

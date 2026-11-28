@@ -143,8 +143,7 @@ fn a_dropped_require_target_is_widened() {
 
 #[test]
 fn an_un_revoke_is_widened() {
-    // A revoked pass has no open window, so the endpoint proof is inconclusive;
-    // the known loosening still gives the definite verdict.
+    // The un-revoke is the loosening that gives the verdict.
     let old = BASE.replace(
         "revoked = false",
         "revoked = true\nrevoked_reason = \"stood down\"",
@@ -162,7 +161,9 @@ fn an_un_revoke_is_widened() {
     assert_eq!(out.status.code(), Some(2));
     let json: Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(json["result"], "widened");
-    assert_eq!(json["containment"]["endpoint_result"], "inconclusive");
+    // The rules are the same, so the endpoints are contained at every
+    // instant; the un-revoke is the loosening.
+    assert_eq!(json["containment"]["endpoint_result"], "contained");
 }
 
 #[test]

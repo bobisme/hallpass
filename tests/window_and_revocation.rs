@@ -81,14 +81,15 @@ fn a_pure_revocation_is_contained() {
 #[test]
 fn a_window_moved_to_be_closed_at_the_instant_is_contained() {
     let dir = tempfile::tempdir().expect("dir");
-    // NEW ends before the instant: closed, and only narrower.
+    // NEW ends before the instant: closed there, and only narrower. NEW still
+    // admits requests earlier, so the rules are compared.
     let new = BASE.replace(
         "valid_until = 2026-11-20T17:00:00Z",
         "valid_until = 2026-11-20T08:30:00Z",
     );
     let r = contain(dir.path(), BASE, &new, 0);
     assert_eq!(r["result"], "contained");
-    assert_eq!(r["containment"]["reason"], "new-admits-nothing");
+    assert_eq!(r["containment"]["reason"], "rules-and-ipv4-edges-covered");
 }
 
 #[test]
@@ -103,18 +104,19 @@ fn a_revocation_with_a_raised_ceiling_is_widened() {
 }
 
 #[test]
-fn old_closed_and_new_open_stays_inconclusive() {
+fn old_closed_and_new_open_is_widened_by_the_un_revoke() {
     let dir = tempfile::tempdir().expect("dir");
     let r = contain(dir.path(), &revoked(BASE), BASE, 2);
-    // The un-revoke is itself a loosening, so the overall verdict is widened;
-    // the endpoint proof stays inconclusive. Either way a gate exits 2.
+    // The un-revoke is a loosening, so the overall verdict is widened. The
+    // revocation is judged as its own term: the rules are the same, so the
+    // endpoint proof is contained. Either way a gate exits 2.
     assert_eq!(r["result"], "widened");
     assert_eq!(
         r["containment"]["loosenings"][0]["field"],
         "approval.revoked"
     );
-    assert_eq!(r["containment"]["endpoint_result"], "inconclusive");
-    assert_eq!(r["containment"]["reason"], "old-closed-new-open");
+    assert_eq!(r["containment"]["endpoint_result"], "contained");
+    assert_eq!(r["containment"]["reason"], "rules-and-ipv4-edges-covered");
 }
 
 #[test]

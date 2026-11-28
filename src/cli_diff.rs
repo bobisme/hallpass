@@ -110,9 +110,20 @@ fn render_containment(
         .with_loosenings(hallpass::review::non_endpoint_loosenings(old, new));
     let _ = writeln!(
         out.text,
-        "Endpoint scope at {}: {} ({}). Compared {} rule pairs.",
-        report.at, report.endpoint_result, report.reason, report.compared_pairs
+        "Endpoint scope at every instant: {} ({}). Compared {} rule pairs.",
+        report.endpoint_result, report.reason, report.compared_pairs
     );
+    if let Some(replayed) = report
+        .replayed_at
+        .as_ref()
+        .filter(|r| !report.counterexamples.is_empty() && **r != report.at)
+    {
+        let _ = writeln!(
+            out.text,
+            "NEW's window does not hold {}, so these requests were tried at {replayed}, the start of NEW's window:",
+            report.at
+        );
+    }
     for row in &report.counterexamples {
         let _ = writeln!(out.text, "{}", row_line(row));
     }
@@ -129,11 +140,12 @@ fn render_containment(
             plain(&l.after)
         );
     }
-    let _ = writeln!(
-        out.text,
-        "Overall verdict: {}. Contained means the endpoints and every other term only narrow.",
-        report.result
-    );
+    let why = if report.result == "contained" && report.reason == "new-admits-nothing" {
+        "NEW is revoked, so it admits nothing at any instant, and no other term loosens"
+    } else {
+        "Contained means the endpoints and every other term only narrow"
+    };
+    let _ = writeln!(out.text, "Overall verdict: {}. {why}.", report.result);
     if report.result != "contained" {
         out.code = REFUSED;
     }

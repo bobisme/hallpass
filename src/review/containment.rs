@@ -1,4 +1,9 @@
-//! Sufficient proof of zero-duration endpoint containment at an instant.
+//! Sufficient proof of zero-duration endpoint containment at every instant.
+//!
+//! A request is admitted when the window is open and not revoked, and a
+//! destination rule matches it. The rule match does not depend on the
+//! instant, so the proof compares the destination rules alone; the window
+//! and revocation are their own terms, judged as loosenings.
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -13,7 +18,7 @@ const MAX_PAIRS: usize = 16_384;
 /// The most counterexamples reported, each in a widened class no earlier one is in.
 const MAX_COUNTEREXAMPLES: usize = 8;
 
-/// Evidence about the endpoint admission relation at a single instant.
+/// Evidence about the endpoint admission relation, independent of the instant.
 #[derive(Debug, Serialize)]
 pub struct Containment {
     /// The overall verdict: `contained` only when the endpoints are contained
@@ -23,7 +28,12 @@ pub struct Containment {
     pub endpoint_result: &'static str,
     /// Non-endpoint loosenings: window, ceilings, requirements, revocation, approver.
     pub loosenings: Vec<super::Loosening>,
+    /// The `--at` instant as given.
     pub at: String,
+    /// The instant the counterexample search replayed requests at: `at` when
+    /// NEW's window holds it, otherwise the start of NEW's window. Null when
+    /// no search ran.
+    pub replayed_at: Option<String>,
     pub reason: &'static str,
     pub compared_pairs: usize,
     /// The first counterexample, kept for older readers.
@@ -222,8 +232,27 @@ fn classes_of(new: &Pass, row: &DecisionExample, freed: &BTreeSet<u32>) -> Vec<C
     out
 }
 
+/// OLD's rules under NEW's window and revocation state, and an instant inside
+/// NEW's window (`at` when the window holds it, else its start), so a replayed
+/// request's decisions differ only by the destination rules.
+fn replay_setting(old: &Pass, new: &Pass, at: OffsetDateTime) -> (Pass, OffsetDateTime) {
+    let replay_at = if new.window_at(at).is_valid() {
+        at
+    } else {
+        new.approval.valid_from
+    };
+    let mut old_rules = old.clone();
+    old_rules.approval = new.approval.clone();
+    (old_rules, replay_at)
+}
+
 /// Prove coverage of every proposed rule, or supply the reason a proof is unavailable.
 /// An expansion requires a witness from the normal decision procedure.
+///
+/// The verdict holds for every instant: the rules are compared without a
+/// window. Only a revoked NEW admits nothing at any instant (the window is
+/// never empty), so only then is the result `new-admits-nothing`. `at` only
+/// chooses the instant the counterexample search replays requests at.
 #[must_use]
 pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Containment {
     let mut report = Containment {
@@ -231,6 +260,7 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
         endpoint_result: "inconclusive",
         loosenings: Vec::new(),
         at: exact_stamp(at),
+        replayed_at: None,
         reason: "different-pass-id",
         compared_pairs: 0,
         example: None,
@@ -240,16 +270,12 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
     if old.id != new.id {
         return report;
     }
-    if !new.window_at(at).is_valid() {
-        // NEW admits nothing at this instant, so every endpoint it admits (none)
-        // is admitted by OLD, whether or not OLD is open.
+    if new.approval.revoked {
+        // NEW admits nothing at any instant, so every endpoint it admits
+        // (none) is admitted by OLD.
         report.result = "contained";
         report.endpoint_result = "contained";
         report.reason = "new-admits-nothing";
-        return report;
-    }
-    if !old.window_at(at).is_valid() {
-        report.reason = "old-closed-new-open";
         return report;
     }
     let original: BTreeMap<_, _> = old
@@ -285,7 +311,9 @@ pub fn endpoint_containment(old: &Pass, new: &Pass, at: OffsetDateTime) -> Conta
     }
     if let Some(reason) = reason {
         report.reason = reason;
-        let sample = decision_examples(old, new, at);
+        let (old_rules, replay_at) = replay_setting(old, new, at);
+        report.replayed_at = Some(exact_stamp(replay_at));
+        let sample = decision_examples(&old_rules, new, replay_at);
         let widened = widened_classes(old, new);
         let freed = freed_edges(old, new);
         let mut shown = BTreeSet::new();
