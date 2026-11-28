@@ -19,13 +19,39 @@
 //!   output and standard error are terminals, at 100 columns (or `COLUMNS`
 //!   when it is smaller). A command in backticks is never wrapped. Piped
 //!   output and tests see one line per step.
+//! - Without `--verbose` ([`verbose`]), an error, a refusal and doctor's
+//!   report are short: a headline, `Next:`, at most [`BULLETS`] bullets and
+//!   a pointer to the full text ([`more`]). With it, they are printed in
+//!   full. JSON always has the full text.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The widest a wrapped line gets on a terminal.
 const WIDTH: usize = 100;
+
+/// The most bullets a short message has under its headline and `Next:`.
+pub const BULLETS: usize = 3;
+
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Print messages in full (the global `--verbose` flag).
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+/// Whether messages are printed in full.
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// The last line of a short message: where the full text is. `how` is a
+/// command in backticks or words, such as "add --verbose".
+pub fn more(how: &str) -> String {
+    format!("More: {how}.\n")
+}
 
 /// The current directory as prefixes to strip (`/dir/`), longest first:
 /// the physical directory, and `PWD` when it names the same directory by

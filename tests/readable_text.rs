@@ -158,7 +158,14 @@ fn block<'a>(shown: &'a str, after: &str) -> Vec<&'a str> {
 fn an_error_shows_short_paths_and_one_step_per_line() {
     let case = Case::changed();
     let here = case.dir.path();
-    let args = ["spend", &case.arg("p.toml"), "calls", "--to", TO];
+    let args = [
+        "--verbose",
+        "spend",
+        &case.arg("p.toml"),
+        "calls",
+        "--to",
+        TO,
+    ];
     let (code, shown) = case.text(here, &args);
     assert_eq!(code, Some(1), "{shown}");
     assert!(!shown.contains(&case.prefix()), "{shown}");
@@ -194,7 +201,7 @@ fn an_error_shows_short_paths_and_one_step_per_line() {
 fn doctor_details_are_bullets_and_its_next_command_pastes() {
     let case = Case::changed();
     let here = case.dir.path();
-    let (code, shown) = case.text(here, &["doctor", &case.arg("p.toml")]);
+    let (code, shown) = case.text(here, &["--verbose", "doctor", &case.arg("p.toml")]);
     assert_eq!(code, Some(2), "{shown}");
     assert!(!shown.contains(&case.prefix()), "{shown}");
     let next = shown
@@ -214,8 +221,16 @@ fn doctor_details_are_bullets_and_its_next_command_pastes() {
         details[1..].iter().all(|l| l.starts_with("    - ")),
         "{shown}"
     );
+    // The adoption preview is named once, under `Next:`, with short paths;
+    // the details do not repeat it.
     assert!(
-        details
+        block(&shown, "Next: ")
+            .iter()
+            .any(|l| l.contains("`hallpass adopt p.toml --preview`")),
+        "{shown}"
+    );
+    assert!(
+        !details
             .iter()
             .any(|l| l.contains("`hallpass adopt p.toml --preview`")),
         "{shown}"

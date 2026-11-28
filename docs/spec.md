@@ -1386,7 +1386,7 @@ the ledger lock, over copies of the bytes they read under it.
 ## Command line
 
 ```text
-hallpass [--format text|pretty|json] <command>
+hallpass [--format text|pretty|json] [--verbose] <command>
 hallpass help [COMMAND]
 hallpass version
 ```
@@ -1422,18 +1422,33 @@ it was recognized (null otherwise). Help and version requests return their own c
 
 A text error starts with a short headline:
 `hallpass COMMAND: error: CODE: WHAT IS WRONG`. When there is one next
-step, the second line is `Next: STEP`. The full message follows, indented
-by two spaces; it says the same as `error.message` in JSON. A long message
+step, the second line is `Next: STEP`. At most three `- ` bullets follow:
+the fact the headline leaves out and up to two alternatives, each naming
+its command. A last line `More: ...` names the command that prints the
+rest (for a command that can write, `hallpass --verbose doctor PASS`, so
+that nothing is run again); when the next step is doctor, `Next:` says to
+add `--verbose` instead. A message that is short already is shown whole.
+A spend refusal is cut the same way, with `Next:` for the command its
+long sentences name.
+
+With the global `--verbose` flag, the full message follows the `Next:`
+line instead, indented by two spaces; it says the same as
+`error.message` in JSON, which is never shortened. A long message
 is one step per line: its first sentence, then each later sentence or
 alternative on its own `- ` line, indented two spaces more. An error with
 no headline of its own (`io`, `usage`, `untrusted-owner`,
 `archive-corrupt`) puts the first line of its message after the code.
 `doctor` prints its verdict the same way: `BLOCKED: CODE: HEADLINE` (or
-`NEEDS ACTION:`), then `Next:` and the step, then `Details:` with the
-rest of the explanation, then `Also:` with the other findings. Details
-and findings are broken into steps the same way, and so are a refusal and
-the long lines of `adopt`, `reconcile-references` and `repair`. Only white
-space changes: the words are those of the JSON message. Text output shows a
+`NEEDS ACTION:`), then `Next:` and at most three sentences of the step
+(the last resort, when there is one, in one sentence with what it does to
+the receipts), then `More: hallpass --verbose doctor PASS` with the codes
+of the other findings. With `--verbose` it prints the whole step, then
+`Details:` with the rest of the explanation (without the sentences that
+repeat the advice under `Next:`), then `Also:` with the other findings.
+Details and findings are broken into steps the same way, and so are a
+refusal and the long lines of `adopt`, `reconcile-references` and
+`repair`. In the full text only white space changes: the words are those
+of the JSON message. Text output shows a
 path under the current directory relative to it, so a command it names runs
 as written in that directory; other paths stay absolute (never `../`). On a
 terminal (standard output and standard error both), long lines wrap at 100

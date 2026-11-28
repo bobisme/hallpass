@@ -305,7 +305,7 @@ impl<'a> ReferenceMatches<'a> {
             (
                 RefusalCode::ReferenceInconclusive,
                 format!(
-                    "cannot establish that the caller reference is new because the adoption at ledger sequence {seq} accepted a ledger that lacks lines hallpass had recorded, so earlier references may be missing from it, and no reference reconciliation follows that adoption. Check the reference against your run record. To let guarded spends resume, list every caller reference that may be in the lost lines (every reference your run records used on this pass) and record the list with `hallpass reconcile-references {} --adoption {seq} --references LIST --reason \"...\"`: guarded spends then refuse the listed references as duplicates and check others against the ledger. Spend without --require-new-ref only if your run record shows this unit was never submitted",
+                    "cannot establish that the caller reference is new: the adoption at ledger sequence {seq} may have lost lines that held earlier references, and no reference reconciliation follows that adoption. Check the reference against your run record. To let guarded spends resume, list every caller reference that may be in the lost lines (every reference your run records used on this pass) and record the list with `hallpass reconcile-references {} --adoption {seq} --references LIST --reason \"...\"`: guarded spends then refuse the listed references as duplicates and check others against the ledger. Spend without --require-new-ref only if your run record shows this unit was never submitted",
                     loaded.path.display()
                 ),
             )

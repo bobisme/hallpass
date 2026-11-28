@@ -9,6 +9,7 @@ mod cli_doctor;
 mod cli_evidence;
 mod cli_help;
 mod cli_repair;
+mod cli_short;
 mod readable;
 
 use std::ffi::{OsStr, OsString};
@@ -53,6 +54,9 @@ struct Cli {
         reason = "Invocation::read turns --json into --format=json before clap sees it"
     )]
     json: bool,
+    /// Print errors, refusals and doctor's report in full (JSON always has the full text).
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -688,6 +692,25 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
     }
 }
 
+/// Where the full text of a short error is. A command that can write is
+/// never run again for it: doctor, which only reads, explains the error.
+fn more_text(command: &str, file: Option<&Path>) -> String {
+    match file {
+        Some(file)
+            if matches!(
+                command,
+                "spend" | "adopt" | "reconcile-references" | "repair"
+            ) =>
+        {
+            readable::more(&format!(
+                "`hallpass --verbose doctor {}`",
+                cli_short::shell_word(&file.display().to_string())
+            ))
+        }
+        _ => readable::more("add --verbose for the full text"),
+    }
+}
+
 fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
     let problems: &[Problem] = match error {
         Error::Invalid { problems, .. } => problems,
@@ -712,11 +735,36 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         error.code(),
         safe_message(&summary.headline)
     );
+    // A short reply whose next step is doctor says there to add --verbose.
+    let to_doctor = !readable::verbose()
+        && summary
+            .next
+            .as_deref()
+            .is_some_and(|n| n.starts_with("run `hallpass doctor "));
     if let Some(next) = &summary.next {
-        let _ = writeln!(text, "Next: {}", safe_message(next));
+        let _ = writeln!(
+            text,
+            "Next: {}{}",
+            safe_message(next),
+            if to_doctor {
+                " (add --verbose for the full text)"
+            } else {
+                ""
+            }
+        );
     }
-    for line in &summary.detail {
-        text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
+    // Without --verbose: at most three bullets (a pass's problems are the
+    // reply's data and are all listed), then where the full text is.
+    let short = (!readable::verbose())
+        .then(|| cli_short::error(error, read_only, summary.next.as_deref(), &summary.detail));
+    if let Some(short) = &short {
+        for line in &short.bullets {
+            text.push_str(&readable::prose(&safe_message(line), "  - ", "    "));
+        }
+    } else {
+        for line in &summary.detail {
+            text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
+        }
     }
     for p in problems {
         let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
@@ -738,6 +786,9 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         }
         _ => "",
     });
+    if short.is_some_and(|s| s.dropped) && !to_doctor {
+        text.push_str(&more_text(command, file));
+    }
     Output {
         code: ERROR,
         json: json!({
@@ -1612,7 +1663,10 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "WOULD ALLOW: {} {}; no debit recorded.\n",
             outcome.amount, outcome.counter
         ),
-        (Some(r), _, _) => readable::prose(&format!("REFUSED: {}", sentence(&r.message)), "", "  "),
+        (Some(r), _, _) => {
+            let (text, more) = refusal_text(&r.message, file);
+            text + &more
+        }
         _ => "REFUSED: no decision.\n".to_owned(),
     };
     let reply = cli_debit::SpendReply {
@@ -1674,12 +1728,13 @@ fn debit_spend(
             Ok(o) => o,
             Err(e) => return error_output("spend", Some(file), &e),
         };
+    let mut more = String::new();
     let (result, code, mut text) = match (&outcome.refusal, outcome.seq) {
-        (Some(r), _) => (
-            "refused",
-            REFUSED,
-            readable::prose(&format!("REFUSED: {}", sentence(&r.message)), "", "  "),
-        ),
+        (Some(r), _) => {
+            let (text, rest) = refusal_text(&r.message, file);
+            more = rest;
+            ("refused", REFUSED, text)
+        }
         (None, Some(seq)) => ("allowed", OK, format!("RECORDED: ledger entry {seq}\n")),
         (None, None) => (
             "would-allow",
@@ -1700,6 +1755,7 @@ fn debit_spend(
     if let Some(receipt) = &outcome.receipt {
         let _ = writeln!(text, "  receipt {}", debit_receipt_text(receipt));
     }
+    text.push_str(&more);
     let json = cli_debit::SpendReply {
         result,
         file,
@@ -2675,6 +2731,33 @@ fn quoted(text: &str) -> String {
 /// show every one doubled. Every other unsafe character is still escaped.
 /// A refusal message as one sentence: it gets a full stop unless it already
 /// ends with one, so the text never shows a doubled stop.
+/// A spend refusal as text: in full with --verbose, else its first
+/// sentence, a `Next:` command and at most three bullets; and, apart, the
+/// line that says where the rest is, for the end of the reply.
+fn refusal_text(message: &str, file: &Path) -> (String, String) {
+    let message = sentence(message);
+    if readable::verbose() {
+        return (
+            readable::prose(&format!("REFUSED: {message}"), "", "  "),
+            String::new(),
+        );
+    }
+    let (first, next, short) = cli_short::refusal(&message);
+    let mut text = readable::prose(&format!("REFUSED: {first}"), "", "  ");
+    if let Some(next) = next {
+        let _ = writeln!(text, "Next: {next}");
+    }
+    for line in &short.bullets {
+        text.push_str(&readable::prose(line, "  - ", "    "));
+    }
+    let more = if short.dropped {
+        more_text("spend", Some(file))
+    } else {
+        String::new()
+    };
+    (text, more)
+}
+
 fn sentence(message: &str) -> String {
     let shown = safe_message(message);
     if shown.ends_with('.') {
@@ -3550,6 +3633,7 @@ fn main() -> ExitCode {
         .and_then(|matches| Cli::from_arg_matches(&matches));
     match cli {
         Ok(cli) => {
+            readable::set_verbose(cli.verbose);
             let format = cli.format.unwrap_or_else(|| {
                 if std::io::stdout().is_terminal() {
                     Format::Pretty

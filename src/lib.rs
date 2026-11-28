@@ -80,6 +80,7 @@ pub use decision::{
 };
 pub use error::LastResort;
 pub use error::Summary;
+pub use error::{BLANK_LINE, CUT_SHORT, NUL_LINE};
 pub use error::{ElsewhereLedger, Error, MissingLedger};
 pub use files::open_trusted_checkpoint;
 pub use files::{

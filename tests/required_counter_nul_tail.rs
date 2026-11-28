@@ -132,7 +132,7 @@ fn a_required_counter_at_its_ceiling_blocks_doctor() {
         "p.toml",
     ]);
     assert_eq!(rc, 0, "{text}");
-    let (rc, text) = case.run(&["doctor", "p.toml"]);
+    let (rc, text) = case.run(&["--verbose", "doctor", "p.toml"]);
     assert_eq!(rc, 2, "{text}");
     assert!(
         text.starts_with("BLOCKED: ceiling-reached: required counter bytes"),

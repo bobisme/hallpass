@@ -130,7 +130,10 @@ fn joined(lines: &[&str]) -> String {
 fn an_error_starts_with_its_code_a_headline_and_the_next_step() {
     let case = Case::new();
     fs::set_permissions(case.path("p.toml"), fs::Permissions::from_mode(0o664)).expect("chmod");
-    let (shown, reply) = case.both(&["spend", "p.toml", "calls", "--to", TO], Some(NOW));
+    let (shown, reply) = case.both(
+        &["--verbose", "spend", "p.toml", "calls", "--to", TO],
+        Some(NOW),
+    );
     let lines = error_lines(&shown, "hallpass spend: error:");
     let prefix = "hallpass spend: error: insecure-permissions: ";
     let headline = lines[0]
@@ -170,7 +173,7 @@ fn a_rehearsal_ledger_under_the_real_clock_gets_a_short_headline() {
     let case = Case::new();
     let out = case.run(&["spend", "p.toml", "calls", "--to", TO], Some(NOW));
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let (shown, reply) = case.both(&["spend", "p.toml", "calls", "--to", TO], None);
+    let (shown, reply) = case.both(&["--verbose", "spend", "p.toml", "calls", "--to", TO], None);
     let lines = error_lines(&shown, "hallpass spend: error:");
     assert_eq!(
         lines[0],
@@ -230,7 +233,7 @@ fn doctor_puts_the_headline_then_next_then_the_details() {
     let ledger = case.path("p.toml.ledger");
     let text = fs::read_to_string(&ledger).expect("ledger");
     fs::write(&ledger, text.replacen("\"n\":1", "\"n\":0", 1)).expect("damage");
-    let (shown, reply) = case.both(&["doctor", "p.toml"], Some(NOW));
+    let (shown, reply) = case.both(&["--verbose", "doctor", "p.toml"], Some(NOW));
     let lines: Vec<&str> = shown.lines().collect();
     assert!(
         lines[0].starts_with("BLOCKED: ledger-corrupt: the ledger is damaged at line "),
@@ -253,7 +256,17 @@ fn doctor_puts_the_headline_then_next_then_the_details() {
         .copied()
         .take_while(|l| l.starts_with("  "))
         .collect();
-    assert_eq!(joined(&rest), message, "{shown}");
+    // The details are the message's own sentences, without those that
+    // repeat the advice under `Next:`.
+    assert!(!rest.is_empty(), "{shown}");
+    for line in &rest {
+        let step = line.trim_start().trim_start_matches("- ");
+        assert!(message.contains(step), "{step}: {message}");
+    }
+    assert!(
+        !rest.iter().any(|l| l.contains("compare-backups")),
+        "{shown}"
+    );
     assert_eq!(
         reply["headline"].as_str(),
         lines[0].strip_prefix("BLOCKED: ledger-corrupt: ")

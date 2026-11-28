@@ -110,7 +110,7 @@ fn ledger_elsewhere_prints_a_short_first_line_and_the_rest_indented() {
     let case = Case::new();
     assert_eq!(case.spend(&[]).0, 0);
     case.pass("q.toml", &PASS.replace("calls = 5", "calls = 9"));
-    let shown = case.run(&["spend", "q.toml", "calls", "--to", TO]);
+    let shown = case.run(&["--verbose", "spend", "q.toml", "calls", "--to", TO]);
     assert_eq!(shown.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&shown.stderr).into_owned();
     let start = stderr.find("hallpass spend: error:").expect("error line");

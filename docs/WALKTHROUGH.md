@@ -502,7 +502,7 @@ is refused: its witness remembers two ledger lines, and hallpass
 will not count from zero:
 
 ```sh
-if hallpass status engagement.pass.toml >refusal.txt 2>&1; then echo "still spendable"; else echo "refused, exit $?"; fi
+if hallpass --verbose status engagement.pass.toml >refusal.txt 2>&1; then echo "still spendable"; else echo "refused, exit $?"; fi
 grep -o -e 'the ledger [^ ]* for pass `[^`]*` is missing' -e 'says its last logical ledger sequence was [0-9]* (spent: [^)]*)' -e 'hallpass will not count from zero\.' refusal.txt
 ```
 
@@ -513,7 +513,7 @@ says its last logical ledger sequence was 2 (spent: bytes 48, requests 2)
 hallpass will not count from zero.
 ```
 
-Leave it like that. The full message also offers `hallpass adopt` for a
+Leave it like that. The full message (`--verbose` prints it) also offers `hallpass adopt` for a
 ledger that is "really lost", and says that a ledger moved to another
 account on purpose must not be adopted there. This ledger is not lost, it
 moved. An

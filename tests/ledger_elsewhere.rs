@@ -182,7 +182,7 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
     // status says the same, with the same advice; text goes to stderr.
     let (rc, status) = case.json(&["status", "q.toml"]);
     assert_eq!((rc, error(&status)), (1, ("ledger-elsewhere", message)));
-    let shown = case.run(&["status", "q.toml"]);
+    let shown = case.run(&["--verbose", "status", "q.toml"]);
     assert_eq!(shown.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&shown.stderr).contains("`mv` the copy over that file"),

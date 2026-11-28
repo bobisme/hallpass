@@ -253,7 +253,7 @@ fn a_missing_ledger_says_not_to_adopt_one_that_moved() {
     let spent = case.run(&["spend", s(&pass), "req", "--to", "192.0.2.10:443/tcp"]);
     assert_eq!(spent.status.code(), Some(0), "{}", text(&spent));
     fs::rename(case.path("pass.toml.ledger"), case.path("moved.ledger")).expect("move");
-    let refused = case.run(&["status", s(&pass)]);
+    let refused = case.run(&["--verbose", "status", s(&pass)]);
     assert_eq!(refused.status.code(), Some(1));
     let message = text(&refused);
     assert!(

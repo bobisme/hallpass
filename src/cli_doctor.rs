@@ -20,7 +20,7 @@ use hallpass::time::Duration;
 use hallpass::{Error, LedgerView, LoadedPass, RehearsalTotals::Drop, StateDir, WitnessStatus};
 use serde_json::{Value, json};
 
-use super::{Clock, OK, Output, REFUSED, error_output, readable, safe_message};
+use super::{Clock, OK, Output, REFUSED, cli_short, error_output, readable, safe_message};
 
 mod checkpoint;
 
@@ -407,7 +407,7 @@ fn ledger_findings(
                 "REASON".to_owned(),
             ]),
             step: format!(
-                "Write REFERENCES.json from your run records first: {{\"version\": 1, \"pass_id\": \"{id}\", \"references\": [...]}}, listing every caller reference your runs used on this pass that may be in the lost lines (a reference left off is accepted as new; the reference caller's `caller.py reconcile-references` builds this list from its journals). Then run the command with REASON saying where the list came from. Only you can supply the list, so doctor cannot fill it in.",
+                "Write REFERENCES.json from your run records first: {{\"version\": 1, \"pass_id\": \"{id}\", \"references\": [...]}}, listing every caller reference your runs used on this pass that may be in the lost lines. A reference left off is accepted as new. Then run the command with REASON saying where the list came from. Only you can supply the list, so doctor cannot fill it in. The reference caller's `caller.py reconcile-references` builds this list from its journals.",
                 id = loaded.pass.id
             ),
         });
@@ -1227,8 +1227,12 @@ fn command_line(words: &[String]) -> String {
 }
 
 /// The `Next:` lines of a problem: the command and the step under it, or
-/// the step alone.
-fn next_lines(text: &mut String, next: Option<&[String]>, step: &str) {
+/// the step alone. Without --verbose, the step is cut to its first
+/// sentences; true when that left something out.
+fn next_lines(text: &mut String, next: Option<&[String]>, step: &str) -> bool {
+    let short = cli_short::step(step, readable::BULLETS + usize::from(next.is_none()));
+    let cut = !readable::verbose() && short.len() < step.len();
+    let step = if cut { short.as_str() } else { step };
     if let Some(words) = next {
         let _ = writeln!(text, "Next: {}", safe_message(&command_line(words)));
         text.push_str(&readable::prose(&safe_message(step), "  ", "    "));
@@ -1239,6 +1243,47 @@ fn next_lines(text: &mut String, next: Option<&[String]>, step: &str) {
             "  ",
         ));
     }
+    cut
+}
+
+/// The last line of a short report: the command that shows it in full,
+/// and the codes of the other findings it leaves out.
+fn more_line(file: &Path, findings: &[Finding]) -> String {
+    let how = format!("`hallpass --verbose doctor {}`", shell_word(&shown(file)));
+    let what = match findings {
+        [] => String::new(),
+        [one] => format!(" (also 1 finding: {})", one.code),
+        more => format!(
+            " (also {} findings: {})",
+            more.len(),
+            more.iter()
+                .map(|f| f.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!("More: {how}{what}.\n")
+}
+
+/// The `Details:` lines of a problem, only with --verbose, without the
+/// sentences that repeat the advice of `Next:`. True when there are any.
+fn details(text: &mut String, issue: &Issue, lines: &[String]) -> bool {
+    let given = format!(
+        "{} {}",
+        issue
+            .next
+            .as_deref()
+            .map_or_else(String::new, |n| format!("`{}`", command_line(n))),
+        issue.step
+    );
+    let rest = cli_short::without_repeats(lines, &given);
+    if !rest.is_empty() && readable::verbose() {
+        text.push_str("Details:\n");
+        for line in &rest {
+            text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
+        }
+    }
+    !rest.is_empty()
 }
 
 fn render(file: &Path, d: Diagnosis) -> Output {
@@ -1267,6 +1312,7 @@ fn render(file: &Path, d: Diagnosis) -> Output {
         (None, None) => ("healthy", None, None),
     };
     let mut text = String::new();
+    let mut cut = false;
     let (headline, message, next, step) = if let Some(issue) = &issue {
         let label = if result == "blocked" {
             "BLOCKED"
@@ -1281,14 +1327,8 @@ fn render(file: &Path, d: Diagnosis) -> Output {
             .or_else(|| lines.next().map(String::as_str))
             .unwrap_or_default();
         let _ = writeln!(text, "{label}: {}: {}", issue.code, safe_message(headline));
-        next_lines(&mut text, issue.next.as_deref(), &issue.step);
-        let rest: Vec<&String> = lines.collect();
-        if !rest.is_empty() {
-            text.push_str("Details:\n");
-            for line in rest {
-                text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
-            }
-        }
+        cut = next_lines(&mut text, issue.next.as_deref(), &issue.step);
+        cut |= details(&mut text, issue, &lines.cloned().collect::<Vec<_>>());
         (
             headline.to_owned(),
             issue.lines.join(" "),
@@ -1312,7 +1352,11 @@ fn render(file: &Path, d: Diagnosis) -> Output {
         text.push_str("Next: nothing to do.\n");
         (head, message, None, "Nothing to do.".to_owned())
     };
-    if !findings.is_empty() {
+    if !readable::verbose() {
+        if cut || !findings.is_empty() {
+            text.push_str(&more_line(file, &findings));
+        }
+    } else if !findings.is_empty() {
         text.push_str("Also:\n");
         for f in &findings {
             let line = format!("{}: {}", f.code, safe_message(&f.message));

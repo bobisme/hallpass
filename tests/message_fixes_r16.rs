@@ -75,7 +75,7 @@ fn a_witness_error_in_diff_budget_impact_is_said_once() {
     let mut c = command(
         d,
         env!("CARGO_BIN_EXE_hallpass"),
-        &["diff", "p.toml", "new.toml", "--budget-impact"],
+        &["--verbose", "diff", "p.toml", "new.toml", "--budget-impact"],
     );
     c.env_remove("XDG_STATE_HOME").env("HOME", "rel");
     let (code, text) = finish(c);
