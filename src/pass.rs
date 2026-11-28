@@ -396,29 +396,35 @@ impl Pass {
     ///
     /// # Errors
     ///
-    /// Every problem found, each with its field path. A TOML syntax error is
-    /// reported alone, since nothing else can be read, but for the
+    /// Every problem found, each with its field path. A TOML syntax error
+    /// stops the other checks, since nothing else can be read, but for the
     /// characters that can make the file display as something else: those
     /// are reported anywhere in the file, comments included, with their
-    /// line and column.
+    /// line and column. An integer too large for 64 bits is one problem on
+    /// its own line and does not stop the other checks.
     pub fn parse(text: &str) -> Result<Self, Vec<Problem>> {
         // A character that can disguise the file is reported wherever it is,
         // comments included, and before a syntax error it may explain.
         let mut problems = crate::literal::hidden_characters(text);
-        let table: Table = match text.parse() {
+        // An integer too large for the TOML reader is recorded here and
+        // replaced by a placeholder, so the rest of the file is still checked.
+        let (scanned, overflow) = oversized::scan(text);
+        let overflow_fields: Vec<String> = overflow.iter().map(|p| p.field.clone()).collect();
+        problems.extend(overflow);
+        let table: Table = match scanned.parse() {
             Ok(table) => table,
             Err(e) => {
                 let e: toml::de::Error = e;
                 if let Some(problem) = e
                     .span()
-                    .and_then(|span| oversized::problem(text, span.start, e.message()))
+                    .and_then(|span| oversized::problem(&scanned, span.start, e.message()))
                 {
                     problems.push(problem);
                     return Err(problems);
                 }
                 let at = e
                     .span()
-                    .and_then(|span| text.get(..span.start))
+                    .and_then(|span| scanned.get(..span.start))
                     .map_or_else(String::new, |before| {
                         let line = before.matches('\n').count() + 1;
                         let column =
@@ -435,8 +441,9 @@ impl Pass {
                 return Err(problems);
             }
         };
-        problems.extend(crate::literal::problems(text));
-        let mut w = Walker { problems };
+        let mut w = Walker {
+            problems: crate::literal::problems(&scanned),
+        };
         w.unknown_keys(&table, "", TOP_LEVEL_KEYS);
         match table.get("format") {
             None => w.problem("format", format!("missing; add `format = {FORMAT_VERSION}`")),
@@ -473,8 +480,11 @@ impl Pass {
                 false
             }
         };
-        if !w.problems.is_empty() {
-            return Err(w.problems);
+        // A field with an out-of-range integer already has its problem.
+        w.problems.retain(|p| !overflow_fields.contains(&p.field));
+        problems.append(&mut w.problems);
+        if !problems.is_empty() {
+            return Err(problems);
         }
         match (id, name, approval, destinations, ceilings) {
             (Some(id), Some(name), Some(approval), Some(destinations), Some(ceilings)) => {
