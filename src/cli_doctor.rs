@@ -321,7 +321,11 @@ fn ledger_findings(
 /// one, since every spend is then refused, else findings.
 fn ceiling_findings(d: &mut Diagnosis, file: &Path, loaded: &LoadedPass, view: &LedgerView) {
     let mut reached = Vec::new();
+    let mut required_reached = Vec::new();
     for (name, total) in &loaded.pass.ceilings {
+        if view.tally.spent(name) >= *total && loaded.pass.required_counters.contains(name) {
+            required_reached.push(name.clone());
+        }
         let spent = view.tally.spent(name);
         if spent > *total {
             reached.push((
@@ -366,6 +370,31 @@ fn ceiling_findings(d: &mut Diagnosis, file: &Path, loaded: &LoadedPass, view: &
             next: None,
             step: format!(
                 "Stop. To spend more, ask the owner for a new written approval with higher ceilings, then review it against this pass with `hallpass diff {} NEW` before it replaces this file.",
+                shown(file)
+            ),
+        });
+    } else if let Some(first) = required_reached.first() {
+        d.block(Issue {
+            code: hallpass::RefusalCode::CeilingReached.as_str().to_owned(),
+            headline: Some(format!(
+                "required counter {first} is at its ceiling, so every spend is refused"
+            )),
+            lines: std::iter::once(format!(
+                "required_counters_v1 makes every spend charge {}, and {} at its ceiling, so every spend is refused even though other counters have budget left:",
+                required_reached.join(", "),
+                if required_reached.len() == 1 { "that counter is" } else { "those counters are" }
+            ))
+            .chain(
+                reached
+                    .into_iter()
+                    .filter(|(_, line)| required_reached.iter().any(|n| line.starts_with(&format!("{n}: "))))
+                    .map(|(_, line)| format!("{line}.")),
+            )
+            .collect(),
+            next: None,
+            step: format!(
+                "Stop. To spend more, ask the owner for a new written approval with a higher ceiling for {} (or without it in required_counters_v1), then review it against this pass with `hallpass diff {} NEW` before it replaces this file.",
+                required_reached.join(", "),
                 shown(file)
             ),
         });
@@ -770,10 +799,15 @@ fn corrupt_step(
     }
     if cut_short {
         match hallpass::preview_drop_torn_tail(file, state) {
-            Ok(_) => {
+            Ok(torn) => {
+                let what = if torn.nul_only {
+                    "The ledger ends with NUL bytes after its last whole line (a file that grew but lost its data). The preview checks that the witness proves that tail was never counted, and prints the token for the repair, which keeps the removed bytes in a copy."
+                } else {
+                    "The preview checks that the witness proves the cut-short line was never counted, and prints the token for the repair."
+                };
                 return (
                     argv(["hallpass", "repair", &pass, "--drop-torn-tail", "--preview"]),
-                    "The preview checks that the witness proves the cut-short line was never counted, and prints the token for the repair.".to_owned(),
+                    what.to_owned(),
                 );
             }
             Err(e) => lines.push(format!(

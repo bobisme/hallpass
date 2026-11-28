@@ -12,6 +12,10 @@
 //!   the next sequence number (`{"seq":N,` for N one past the last complete
 //!   line), or are a shorter start of that.
 //!
+//! A tail made only of NUL bytes (a file system that grew the file but lost
+//! the data), optionally followed by line ends or white space, is also
+//! removed, when it follows a complete line; the witness rules are the same.
+//!
 //! Anything else is refused and nothing is changed. The removed bytes are
 //! kept in a new private file beside the ledger before the ledger is cut,
 //! and a token from the preview guards the cut: the pass, the ledger and
@@ -51,6 +55,8 @@ pub struct TornTail {
     pub kept_bytes: u64,
     /// How many bytes of the cut-short line are removed.
     pub removed_bytes: u64,
+    /// Whether the removed bytes are only NUL bytes and white space.
+    pub nul_only: bool,
     /// The guard for the repair, as `--preview` prints it.
     pub token: String,
     /// Where the removed bytes were kept (only after the repair).
@@ -143,6 +149,7 @@ pub(super) fn open_ledger(pass_path: &Path, path: &Path, write: bool) -> Result<
 }
 
 /// Check everything the module documentation lists, and make the token.
+#[allow(clippy::too_many_lines)]
 fn inspect(
     pass_path: &Path,
     path: &Path,
@@ -161,7 +168,12 @@ fn inspect(
         pass_path.display()
     );
     let len = file.metadata().map_err(|e| Error::io(path, &e))?.len();
-    let Some(kept) = last_line_end(file, len).map_err(|e| Error::io(path, &e))? else {
+    let nul_start = nul_tail_start(file, len).map_err(|e| Error::io(path, &e))?;
+    let found = match nul_start {
+        Some(start) => Some(start),
+        None => last_line_end(file, len).map_err(|e| Error::io(path, &e))?,
+    };
+    let Some(kept) = found else {
         return Err(refuse(
             format!(
                 "the ledger {} has no complete line, not even its header",
@@ -225,7 +237,11 @@ fn inspect(
     let mut torn = vec![0; usize::try_from(len - kept).unwrap_or(usize::MAX)];
     file.read_exact_at(&mut torn, kept)
         .map_err(|e| Error::io(path, &e))?;
-    check_torn_start(&torn, parsed.seq, witness.seq).map_err(|problem| refuse(problem, BACKUP))?;
+    let nul_only = nul_start.is_some();
+    if !nul_only {
+        check_torn_start(&torn, parsed.seq, witness.seq)
+            .map_err(|problem| refuse(problem, BACKUP))?;
+    }
     let input = serde_json::json!({
         "version": 1,
         "purpose": "drop-torn-tail",
@@ -246,6 +262,7 @@ fn inspect(
         witness_seq: witness.seq,
         kept_bytes: kept,
         removed_bytes: len - kept,
+        nul_only,
         token: format!("{TOKEN_PREFIX}{}", Digest::of(input.to_string().as_bytes())),
         copy: None,
     })
@@ -311,6 +328,38 @@ fn check_torn_start(torn: &[u8], seq: u64, witness_seq: u64) -> Result<(), Strin
             )
         },
     ))
+}
+
+/// Where a tail of only NUL bytes starts: the length up to and with the line
+/// end of the last complete line. The tail is the longest run at the end of
+/// the file of NUL bytes and white space, it holds a NUL byte, and it begins
+/// with the line end that closes the line before it. `None` otherwise.
+fn nul_tail_start(file: &File, len: u64) -> std::io::Result<Option<u64>> {
+    const CHUNK: u64 = 64 * 1024;
+    let mut end = len;
+    let mut buffer = vec![0; usize::try_from(CHUNK).unwrap_or(usize::MAX)];
+    let mut has_nul = false;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let part = &mut buffer[..usize::try_from(end - start).unwrap_or(usize::MAX)];
+        file.read_exact_at(part, start)?;
+        for (at, byte) in part.iter().enumerate().rev() {
+            if *byte == 0 {
+                has_nul = true;
+            } else if !byte.is_ascii_whitespace() {
+                // The run starts after this byte; the line end must be next.
+                let run = start + at as u64 + 1;
+                if run >= len {
+                    return Ok(None);
+                }
+                let mut next = [0; 1];
+                file.read_exact_at(&mut next, run)?;
+                return Ok((has_nul && next[0] == b'\n').then_some(run + 1));
+            }
+        }
+        end = start;
+    }
+    Ok(None)
 }
 
 /// The length of the file up to and with its last line end, or `None` when

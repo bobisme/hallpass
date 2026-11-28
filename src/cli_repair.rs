@@ -28,8 +28,9 @@ pub fn repair(file: &Path, kinds: (bool, bool), preview: bool, token: Option<&st
     let text = torn.copy.as_ref().map_or_else(
         || {
             format!(
-                "TORN LINE PREVIEW: the ledger {ledger} ends with {} bytes of a line cut short after sequence {}. The witness recorded sequence {}, so that line was never counted. To remove those bytes and keep a copy of them beside the ledger, run `hallpass repair {} --drop-torn-tail --token TOKEN` with this token. Token: {}\n",
+                "TORN LINE PREVIEW: the ledger {ledger} ends with {} bytes of {} after sequence {}. The witness recorded sequence {}, so that line was never counted. To remove those bytes and keep a copy of them beside the ledger, run `hallpass repair {} --drop-torn-tail --token TOKEN` with this token. Token: {}\n",
                 torn.removed_bytes,
+                if torn.nul_only { "NUL bytes" } else { "a line cut short" },
                 torn.seq,
                 torn.witness_seq,
                 safe(&file.display().to_string()),
@@ -38,8 +39,9 @@ pub fn repair(file: &Path, kinds: (bool, bool), preview: bool, token: Option<&st
         },
         |copy| {
             format!(
-                "REPAIRED: removed {} bytes of a line cut short after sequence {} from {ledger}. A copy of them is in {}. The ledger now ends at sequence {}; nothing was recorded or permitted.\n",
+                "REPAIRED: removed {} bytes of {} after sequence {} from {ledger}. A copy of them is in {}. The ledger now ends at sequence {}; nothing was recorded or permitted.\n",
                 torn.removed_bytes,
+                if torn.nul_only { "NUL bytes" } else { "a line cut short" },
                 torn.seq,
                 safe(&copy.display().to_string()),
                 torn.seq
@@ -64,6 +66,7 @@ fn reply(file: &Path, torn: &TornTail) -> Value {
         "witness_seq": torn.witness_seq,
         "kept_bytes": torn.kept_bytes,
         "removed_bytes": torn.removed_bytes,
+        "nul_only": torn.nul_only,
         "token": torn.token,
         "copy": torn.copy.as_ref().map(|c| c.display().to_string()),
     })
