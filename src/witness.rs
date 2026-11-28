@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -382,7 +382,7 @@ impl StateDir {
                 .create_new(true)
                 .mode(0o600)
                 .open(&temp)?;
-            file.write_all(witness.0.as_bytes())?;
+            crate::files::write_within_size_limit(&mut file, witness.0.as_bytes())?;
             file.sync_all()?;
             fs::rename(&temp, &path)?;
             File::open(dir)?.sync_all()
@@ -586,7 +586,7 @@ impl StateDir {
             .create_new(true)
             .mode(0o600)
             .open(&temp)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .and_then(|mut file| crate::files::write_within_size_limit(&mut file, text.as_bytes()))
             .and_then(|()| fs::rename(&temp, dir.join(format!("{pass_id}.{kind}"))));
         if written.is_err() {
             let _ = fs::remove_file(&temp);
@@ -826,7 +826,7 @@ mod tests {
             fs::metadata(&file).expect("file").permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(state.read("p1").expect("read"), Some(w));
+        assert_eq!(state.read("p1").expect("read"), Some(w.clone()));
         // Another pass id's witness is not this one's.
         fs::copy(&file, dir.join("p2.witness")).expect("copy");
         assert!(matches!(
@@ -838,6 +838,25 @@ mod tests {
             state.read("p1"),
             Err(Error::WitnessUnavailable { .. })
         ));
+        // A witness that would pass the file size limit is refused before
+        // anything is written, and the old witness stays.
+        let lock = state
+            .lock("p1", crate::files::LockBudget::default())
+            .expect("lock");
+        state.write("p1", &w).expect("rewrite");
+        crate::files::size_limit_fault::LIMIT.set(Some(10));
+        let refused = state.write("p1", &w);
+        crate::files::size_limit_fault::LIMIT.set(None);
+        drop(lock);
+        let refused = refused.expect_err("limit").to_string();
+        assert!(refused.contains("file size limit of 10 bytes"), "{refused}");
+        assert_eq!(state.read("p1").expect("read"), Some(w));
+        let names: Vec<_> = fs::read_dir(dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|n| Path::new(n).extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(names.is_empty(), "no temporary file is left: {names:?}");
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod");
         assert!(matches!(
             state.lock("p1", crate::files::LockBudget::default()),

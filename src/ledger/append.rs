@@ -6,6 +6,12 @@
 //! other hallpass process has read or written the ledger since, and the
 //! witness still describes the ledger as it was before.
 //!
+//! An append that would take the ledger past the file size limit
+//! (`RLIMIT_FSIZE`) is refused before anything is written, since the kernel
+//! would otherwise end the process with `SIGXFSZ` partway through the line
+//! ([`crate::files::write_within_size_limit`]). It then takes the first case
+//! below, with nothing to cut back.
+//!
 //! What a failure leaves:
 //!
 //! - The write fails (a short write from a full disk or a file size limit,
@@ -25,7 +31,7 @@
 //!   stays counts against the ceiling, which is the safe side.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use crate::error::Error;
@@ -85,10 +91,10 @@ fn roll_back(file: &File, path: &Path, before: u64, what: &str, write_error: &io
 fn write(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     if let Some(kept) = fault::WRITE.take() {
-        file.write_all(&bytes[..kept.min(bytes.len())])?;
+        io::Write::write_all(file, &bytes[..kept.min(bytes.len())])?;
         return Err(io::Error::from(io::ErrorKind::StorageFull));
     }
-    file.write_all(bytes)
+    crate::files::write_within_size_limit(file, bytes)
 }
 
 fn sync(file: &File) -> io::Result<()> {
@@ -132,10 +138,11 @@ mod tests {
     use time::macros::datetime;
 
     use super::fault;
+    use crate::files::size_limit_fault::LIMIT;
     use crate::{
         Charge, Error, SpendChargesBatchRequest, SpendChargesRequest, SpendRequest, StateDir,
-        WitnessStatus, drop_torn_tail, ledger_path, load, preview_drop_torn_tail, read_ledger,
-        spend_charges_batch_in, spend_in,
+        WitnessStatus, adopt, drop_torn_tail, ledger_path, load, preview_drop_torn_tail,
+        read_ledger, reconcile_references, spend_charges_batch_in, spend_in,
     };
 
     const NOW: OffsetDateTime = datetime!(2026-11-20 09:00 UTC);
@@ -200,6 +207,155 @@ mod tests {
         let outcome = spend_charges_batch_in(&path, &batch, NOW, &state).expect("batch");
         assert!(outcome.refusal.is_none());
         assert_eq!(view(&path, &state).tally.spent("calls"), 4);
+    }
+
+    /// Run `f` with a file size limit of `limit` bytes on this thread.
+    fn with_limit<T>(limit: u64, f: impl FnOnce() -> T) -> T {
+        LIMIT.set(Some(limit));
+        let result = f();
+        LIMIT.set(None);
+        result
+    }
+
+    fn assert_refused_at_the_limit(failed: &Error) {
+        assert!(matches!(failed, Error::AppendRolledBack { .. }), "{failed}");
+        assert_eq!(failed.code(), "ledger-append-failed");
+        assert!(
+            failed.to_string().contains("file size limit of"),
+            "{failed}"
+        );
+    }
+
+    #[test]
+    fn an_append_past_the_file_size_limit_is_refused_before_writing() {
+        let (_dir, path, state) = setup();
+        let ledger = ledger_path(&path);
+        let before = fs::read(&ledger).expect("ledger");
+        let len = u64::try_from(before.len()).expect("len");
+        let failed = with_limit(len + 10, || spend(&path, &state)).expect_err("limit");
+        assert_refused_at_the_limit(&failed);
+        assert_eq!(fs::read(&ledger).expect("ledger"), before);
+        assert_eq!(view(&path, &state).witness, WitnessStatus::Matches);
+        // A limit the whole line fits under is no obstacle.
+        let next = with_limit(len + 4096, || spend(&path, &state)).expect("next spend");
+        assert_eq!(next.seq, Some(2));
+    }
+
+    #[test]
+    fn a_batch_past_the_file_size_limit_is_refused_whole() {
+        let (_dir, path, state) = setup();
+        let ledger = ledger_path(&path);
+        let before = fs::read(&ledger).expect("ledger");
+        let charges = [Charge {
+            counter: "calls",
+            amount: 1,
+        }];
+        let units: Vec<SpendChargesRequest<'_>> = ["unit/1", "unit/2"]
+            .iter()
+            .map(|reference| {
+                let mut unit = SpendChargesRequest::new(&charges);
+                unit.caller_ref = Some(reference);
+                unit.require_new_ref = true;
+                unit
+            })
+            .collect();
+        let batch = SpendChargesBatchRequest::new(&units);
+        // Measure the batch on a twin ledger, then leave room for all of it
+        // but one byte: its first line would fit, the whole batch does not.
+        let (_twin_dir, twin, twin_state) = setup();
+        let twin_before = fs::metadata(ledger_path(&twin)).expect("twin").len();
+        spend_charges_batch_in(&twin, &batch, NOW, &twin_state).expect("twin batch");
+        let grown = fs::metadata(ledger_path(&twin)).expect("twin").len() - twin_before;
+        let limit = u64::try_from(before.len()).expect("len") + grown - 1;
+        let failed = with_limit(limit, || spend_charges_batch_in(&path, &batch, NOW, &state))
+            .expect_err("limit");
+        assert_refused_at_the_limit(&failed);
+        assert_eq!(fs::read(&ledger).expect("ledger"), before);
+        assert_eq!(view(&path, &state).tally.spent("calls"), 1);
+    }
+
+    #[test]
+    fn an_adoption_and_a_reconciliation_past_the_file_size_limit_are_refused() {
+        let (_dir, path, state) = setup();
+        let ledger = ledger_path(&path);
+        let older = fs::read(&ledger).expect("ledger");
+        spend(&path, &state).expect("second spend");
+        fs::write(&ledger, &older).expect("restore");
+        let failed = with_limit(u64::try_from(older.len()).expect("len"), || {
+            adopt(&path, "restored an older ledger", NOW, &state)
+        })
+        .expect_err("limit");
+        assert_refused_at_the_limit(&failed);
+        assert_eq!(fs::read(&ledger).expect("ledger"), older);
+
+        let adopted = adopt(&path, "restored an older ledger", NOW, &state).expect("adopt");
+        let adopted_bytes = fs::read(&ledger).expect("ledger");
+        let failed = with_limit(u64::try_from(adopted_bytes.len()).expect("len"), || {
+            reconcile_references(
+                &path,
+                adopted.adoption.seq,
+                &["unit/1".to_owned()],
+                "from the run log",
+                NOW,
+                &state,
+            )
+        })
+        .expect_err("limit");
+        assert_refused_at_the_limit(&failed);
+        assert_eq!(fs::read(&ledger).expect("ledger"), adopted_bytes);
+    }
+
+    #[test]
+    fn a_new_ledger_past_the_file_size_limit_is_not_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.toml");
+        fs::write(&path, crate::pass::tests::GOOD).expect("pass");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        let state = StateDir::new(dir.path().join("home/state"));
+        fs::create_dir(dir.path().join("home")).expect("home");
+        let failed = with_limit(10, || spend(&path, &state)).expect_err("limit");
+        assert!(
+            failed.to_string().contains("file size limit of 10 bytes"),
+            "{failed}"
+        );
+        let mut left: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["home", "p.toml"], "no ledger and no temporary file");
+        assert_eq!(spend(&path, &state).expect("spend").seq, Some(1));
+    }
+
+    #[test]
+    fn a_repair_copy_past_the_file_size_limit_changes_nothing() {
+        let (dir, path, state) = setup();
+        let ledger = ledger_path(&path);
+        fault::WRITE.set(Some(20));
+        fault::TRUNCATE.set(true);
+        spend(&path, &state).expect_err("short write");
+        let torn = fs::read(&ledger).expect("ledger");
+        let preview = preview_drop_torn_tail(&path, &state).expect("preview");
+        // The copy of the 20 removed bytes does not fit under 10 bytes.
+        let failed =
+            with_limit(10, || drop_torn_tail(&path, &state, &preview.token)).expect_err("limit");
+        assert!(
+            failed.to_string().contains("file size limit of 10 bytes"),
+            "{failed}"
+        );
+        assert_eq!(fs::read(&ledger).expect("ledger"), torn);
+        let copies = fs::read_dir(dir.path())
+            .expect("dir")
+            .filter(|e| {
+                e.as_ref()
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".torn-")
+            })
+            .count();
+        assert_eq!(copies, 0, "no copy is left behind");
+        drop_torn_tail(&path, &state, &preview.token).expect("repair");
     }
 
     #[test]

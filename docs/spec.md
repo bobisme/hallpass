@@ -802,8 +802,12 @@ includes the ledger path and `recording = "uncertain"`. Both exit 1. Inspect
 the ledger and reconcile before retrying.
 
 Every append happens under both writer locks, before the witness is
-updated. When the write fails (for example a short write on a full disk or
-at a file size limit), hallpass cuts the ledger back to its length before
+updated. An append that would take the ledger past the process's file size
+limit (`RLIMIT_FSIZE`, `ulimit -f`) is refused before anything is written,
+because the kernel ends a process that writes past it with `SIGXFSZ`;
+hallpass checks the same limit before it writes a new ledger, a witness or
+a repair copy. When the write fails (for example a short write on a full
+disk, or that refusal), hallpass cuts the ledger back to its length before
 the write and syncs it. When that works and the length reads back as before,
 the ledger holds exactly its previous bytes, since an append only adds bytes
 at the end: the error is `ledger-append-failed` with the ledger path and

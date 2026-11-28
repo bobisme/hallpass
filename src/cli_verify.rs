@@ -146,13 +146,32 @@ impl Scratch {
             .create_new(true)
             .mode(0o600)
             .open(&path)
-            .and_then(|mut file| file.write_all(bytes))
+            .and_then(|mut file| hallpass_write(&mut file, bytes))
             .map_err(|e| Error::Io {
                 path: path.clone(),
                 message: format!("writing the signature verifier's input: {e}"),
             })?;
         Ok(path)
     }
+}
+
+/// Write `bytes` to a new empty scratch file, refusing first when they would
+/// pass the file size limit (`ulimit -f`), whose `SIGXFSZ` would otherwise
+/// end hallpass with no reply.
+fn hallpass_write(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Fsize).current;
+    if let Some(limit) = limit
+        && u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!(
+                "{} bytes are past this process's file size limit of {limit} bytes (RLIMIT_FSIZE, `ulimit -f`)",
+                bytes.len()
+            ),
+        ));
+    }
+    file.write_all(bytes)
 }
 
 impl Drop for Scratch {

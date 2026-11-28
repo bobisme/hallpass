@@ -138,7 +138,8 @@ fn a_spend_that_hits_the_file_size_limit_leaves_the_ledger_as_it_was() {
     let case = Case::new();
     assert_eq!(case.spend().0, 0);
     // Grow the ledger until a line with a long note crosses the next 1 KiB
-    // block, which `ulimit -f` (in 1024-byte blocks) refuses.
+    // block, which `ulimit -f` (in 1024-byte blocks) refuses. SIGXFSZ is
+    // ignored here; tests/file_size_limit.rs runs with its default action.
     let blocks = size(&case.ledger()).div_ceil(1024).max(1);
     while size(&case.ledger()) + 200 < blocks * 1024 {
         assert_eq!(case.spend().0, 0);

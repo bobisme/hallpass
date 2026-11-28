@@ -11,7 +11,7 @@
 //! Every file is created once and never replaced, so a later `archive` of the
 //! same bytes cannot remove or downgrade a signature record.
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -197,7 +197,8 @@ fn publish(
         .open(&temp)
         .map_err(|e| Error::io(&temp, &e))?;
     let result = (|| {
-        file.write_all(bytes).map_err(|e| Error::io(&temp, &e))?;
+        crate::files::write_within_size_limit(&mut file, bytes)
+            .map_err(|e| Error::io(&temp, &e))?;
         file.sync_all().map_err(|e| Error::io(&temp, &e))?;
         match fs::hard_link(&temp, target) {
             Ok(()) => Ok(true),

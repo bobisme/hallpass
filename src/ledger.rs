@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1913,8 +1913,7 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
             .create_new(true)
             .mode(0o600)
             .open(&temp)?;
-        file.write_all(header.as_bytes())?;
-        file.write_all(b"\n")?;
+        crate::files::write_within_size_limit(&mut file, format!("{header}\n").as_bytes())?;
         file.sync_all()?;
         match fs::hard_link(&temp, path) {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),

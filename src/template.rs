@@ -1,7 +1,6 @@
 //! The commented template `hallpass init` writes.
 
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -123,7 +122,7 @@ pub fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             }
         })?;
     // The mode given to open is cut by the umask, which can only clear bits.
-    file.write_all(bytes)
+    crate::files::write_within_size_limit(&mut file, bytes)
         .and_then(|()| file.sync_all())
         .map_err(|e| {
             let _ = std::fs::remove_file(path);

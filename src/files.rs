@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -491,6 +491,58 @@ pub fn open_no_follow(path: &Path, options: &OpenOptions) -> Result<File, Error>
     Ok(file)
 }
 
+/// Write `bytes` at the end of `file` (a file opened to append, or a new
+/// empty one), but refuse first, writing nothing, when that would take the
+/// file past the soft file size limit (`RLIMIT_FSIZE`, `ulimit -f`).
+///
+/// The kernel answers a write past that limit with `SIGXFSZ`, whose default
+/// action ends the process at once: no reply, no rollback, and a line cut
+/// short. Safe Rust cannot ignore the signal, so hallpass checks the limit
+/// before each write instead. The refusal is an `EFBIG`-style error
+/// ([`io::ErrorKind::FileTooLarge`]), the error the write itself gives when
+/// the signal is ignored, so each caller handles it as it handles a full
+/// disk.
+pub fn write_within_size_limit(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    check_size_limit(len, bytes.len())?;
+    file.write_all(bytes)
+}
+
+/// Refuse writing `adding` bytes to a file of `len` bytes when the file
+/// would end past the soft file size limit; see [`write_within_size_limit`].
+fn check_size_limit(len: u64, adding: usize) -> io::Result<()> {
+    let end = len.saturating_add(u64::try_from(adding).unwrap_or(u64::MAX));
+    match size_limit() {
+        Some(limit) if end > limit => Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!(
+                "writing {adding} bytes would make the file {end} bytes long, past this process's file size limit of {limit} bytes (RLIMIT_FSIZE, `ulimit -f`)"
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The soft file size limit, or `None` when there is none.
+fn size_limit() -> Option<u64> {
+    #[cfg(test)]
+    if let Some(limit) = size_limit_fault::LIMIT.get() {
+        return Some(limit);
+    }
+    rustix::process::getrlimit(rustix::process::Resource::Fsize).current
+}
+
+/// A file size limit the unit tests set for this thread only, since a real
+/// `setrlimit` would apply to every test thread at once.
+#[cfg(test)]
+pub mod size_limit_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub static LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+}
+
 /// Open an input file for reading as hallpass opens a pass.
 ///
 /// It is never opened through a symbolic link, only a regular file is
@@ -892,7 +944,6 @@ mod ownership {
 #[cfg(test)]
 mod settle {
     use super::*;
-    use std::io::Write as _;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// The pass the evaluator rewrote: its last line restricts the shared
