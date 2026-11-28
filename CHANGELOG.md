@@ -362,8 +362,22 @@ Changes since commit d70c09f.
 - The minimal caller's refusal line is `refused: CODE: MESSAGE`.
 - `reconcile --json` rows have a `reason` key.
 
+- `diff --containment` is `widened` (exit 2) for a counter substitution (an
+  OLD ceiling dropped while NEW adds one under a new name) and for a new
+  ceiling only NEW requires, unless NEW also requires a counter OLD had. Both
+  were `contained`. `review::Loosening` gains `code` and `replaced_by`.
+- `compare-backups` JSON `advice` can hold a `last-resort` entry with an
+  `argv`; its text leads with `Partial error: ...` when a candidate could not
+  be read.
+- A witness whose sequence alone was edited is `witness-unavailable` (move it
+  aside), not a ledger that "was edited".
+- Doctor's step for an unreconciled adoption is the `reconcile-references`
+  command with the adoption filled in, not `help reconcile-references`.
+
 ### Added
 
+- `containment.loosenings[].code` (`counter-substitution`), `replaced_by`,
+  and `budget_impact.counter_substitution` with a text warning.
 - `adopt --drop-rehearsal REHEARSAL_LEDGER`: after an accidental rehearsal on
   the live pass, move the rehearsal ledger aside and adopt carrying nothing;
   hallpass first proves the moved file is the witnessed ledger and holds only
@@ -804,3 +818,11 @@ Changes since commit d70c09f.
 - An incomplete reconcile row gave no reason (bn-9hcp).
 - Long error and doctor messages open with a short headline and one next step
   (bn-jyl7).
+- A renamed counter started a fresh count while the containment gate said
+  `contained`: 6 units against an approval of 3 (bn-398h).
+- Following doctor's named commands now ends for a changed or damaged ledger
+  with no backup; an edited witness sequence blames the witness (bn-u4fy).
+- `diff --budget-impact` repeated its witness error; compare-backups' text
+  hid a partial error; an empty ledger got a machine-move warning (bn-3bk7).
+- `check` reports an integer too large for 64 bits as one problem and still
+  reports every other problem (bn-2tyx).
