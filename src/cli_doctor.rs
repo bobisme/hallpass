@@ -280,10 +280,20 @@ fn ledger_findings(
             lines: vec![format!(
                 "adoption {seq} may have lost lines, and so caller references: a spend with --require-new-ref is refused as reference-inconclusive until the references that may be in those lines are reconciled."
             )],
-            next: argv(["hallpass", "help", "reconcile-references"]),
+            next: argv([
+                "hallpass".to_owned(),
+                "reconcile-references".to_owned(),
+                file.display().to_string(),
+                "--adoption".to_owned(),
+                seq.to_string(),
+                "--references".to_owned(),
+                "REFERENCES.json".to_owned(),
+                "--reason".to_owned(),
+                "REASON".to_owned(),
+            ]),
             step: format!(
-                "List every caller reference your run records used on this pass that may be in the lost lines, then record them with `hallpass reconcile-references {} --adoption {seq} --references LIST --reason \"...\"`. The help page shows the list format.",
-                shown(file)
+                "Write REFERENCES.json from your run records first: {{\"version\": 1, \"pass_id\": \"{id}\", \"references\": [...]}}, listing every caller reference your runs used on this pass that may be in the lost lines (a reference left off is accepted as new; the reference caller's `caller.py reconcile-references` builds this list from its journals). Then run the command with REASON saying where the list came from. Only you can supply the list, so doctor cannot fill it in.",
+                id = loaded.pass.id
             ),
         });
     }

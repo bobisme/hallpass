@@ -162,23 +162,21 @@ fn run(case: &Case, argv: &[String], log: &mut Vec<String>) {
         assert!(status.success(), "{argv:?} failed; steps: {log:#?}");
         return;
     }
-    if strs == ["help", "reconcile-references"] {
-        // The caller's part: its run record's references, and the adoption
-        // to reconcile from the ledger reply.
+    if strs.first() == Some(&"reconcile-references") {
+        // The caller's part: doctor names the command with the adoption
+        // filled in; the caller writes REFERENCES.json from its run record
+        // and gives the reason.
         let (_, ledger) = case.json(&["ledger", "c/p.toml"]);
         let adoption = ledger["unreconciled_adoption"].to_string();
+        let at = |flag: &str| strs[strs.iter().position(|a| *a == flag).expect(flag) + 1];
+        assert_eq!(at("--adoption"), adoption, "doctor names the adoption");
+        assert_eq!(at("--references"), "REFERENCES.json");
         let list = serde_json::json!({"version": 1, "pass_id": ID, "references": REFS});
-        fs::write(case.path("refs.json"), list.to_string()).expect("references");
-        let (rc, out) = case.json(&[
-            "reconcile-references",
-            "c/p.toml",
-            "--adoption",
-            &adoption,
-            "--references",
-            "refs.json",
-            "--reason",
-            "every reference of the run record",
-        ]);
+        fs::write(case.path("REFERENCES.json"), list.to_string()).expect("references");
+        let mut call: Vec<&str> = strs.clone();
+        let reason = call.iter().position(|a| *a == "--reason").expect("reason") + 1;
+        call[reason] = "every reference of the run record";
+        let (rc, out) = case.json(&call);
         assert_eq!(rc, 0, "{out}; steps: {log:#?}");
         log.push("reconcile-references (caller's list)".to_owned());
         return;

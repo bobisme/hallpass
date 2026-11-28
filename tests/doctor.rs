@@ -900,7 +900,7 @@ fn a_damaged_ledger_with_no_backup_finishes_through_the_last_resort() {
         (
             rc,
             &reply["result"],
-            next(&reply).last().map(String::as_str)
+            next(&reply).get(1).map(String::as_str)
         ),
         (
             2,
