@@ -279,7 +279,7 @@ fn a_copy_with_an_older_ledger_is_not_adopted_beside_the_live_one() {
         let (rc, out) = case.spend("d/p.toml");
         assert_eq!(
             (rc, error(&out).0),
-            (1, "ledger-changed"),
+            (1, "ledger-elsewhere"),
             "lag {lag}: {out}"
         );
         let (_, preview) = case.json(&["adopt", "d/p.toml", "--preview"]);

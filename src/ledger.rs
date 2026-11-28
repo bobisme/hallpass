@@ -1406,6 +1406,13 @@ fn compare(
                     let _ = write!(detail, "; the witness last saw the ledger at {other}");
                 }
             }
+            // A copy of the pass and ledger spent from elsewhere: the ledger
+            // the witness last saw is intact, so adopting this one would fork.
+            if moved.is_some()
+                && let LastSeen::Intact(live) = last_seen_ledger(ledger, w, pass_id)?
+            {
+                return Err(elsewhere(pass_path, ledger, w, witness_file, pass_id, live));
+            }
             Err(Error::LedgerChanged {
                 path: ledger.to_path_buf(),
                 pass: pass_path.to_path_buf(),
@@ -2077,12 +2084,13 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
         pass_id: pass_id.to_owned(),
     })
     .map_err(|e| Error::Usage(e.to_string()))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| Error::ledger_create(path, &e))?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)?;
         crate::files::write_within_size_limit(&mut file, format!("{header}\n").as_bytes())?;
         file.sync_all()?;
         match fs::hard_link(&temp, path) {
@@ -2327,7 +2335,8 @@ fn lock_for_writing_inner(
         }
         create_ledger(&path, &id)?;
     }
-    let file = open_no_follow(&path, OpenOptions::new().read(true).append(true))?;
+    let file = open_no_follow(&path, OpenOptions::new().read(true).append(true))
+        .map_err(|e| Error::ledger_append(&path, e))?;
     check_private(&path, &file)?;
     wait.exclusive(&file, &path, |e| Error::io(&path, e))?;
 
@@ -4741,8 +4750,12 @@ mod tests {
         );
         // The copy left behind is now stale and refused.
         match spend_in(&path, &request("calls", 1), NOW, &state) {
-            Err(e @ Error::LedgerChanged { .. }) => {
-                assert!(e.to_string().contains("another ledger for pass"), "{e}");
+            Err(e @ Error::LedgerElsewhere(_)) => {
+                assert!(
+                    e.to_string()
+                        .contains(&ledger_identity(&ledger_path(&other))),
+                    "{e}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -4781,7 +4794,7 @@ mod tests {
                     winners.insert(target);
                     recorded += 1;
                 }
-                Err(Error::LedgerChanged { .. }) => {}
+                Err(Error::LedgerChanged { .. } | Error::LedgerElsewhere(_)) => {}
                 other => panic!("{other:?}"),
             }
         }

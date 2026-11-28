@@ -352,6 +352,42 @@ impl Error {
         }
     }
 
+    /// The error for a ledger that could not be created beside its pass. A
+    /// refused permission is the directory's, not a file's: the file does not
+    /// exist yet.
+    pub(crate) fn ledger_create(ledger: &std::path::Path, error: &std::io::Error) -> Self {
+        if error.kind() != std::io::ErrorKind::PermissionDenied {
+            return Self::io(ledger, error);
+        }
+        let dir = ledger
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        Self::Io {
+            path: dir.to_path_buf(),
+            message: format!(
+                "permission denied: hallpass cannot create the ledger {} in this directory because this user cannot write to it. Run `chmod u+w {}` (or ask the directory's owner to), then run the command again.",
+                crate::display_quoted(&ledger.display().to_string()),
+                crate::display_quoted(&dir.display().to_string())
+            ),
+        }
+    }
+
+    /// The error for an existing ledger that could not be opened to append.
+    /// A refused permission names the mode to give the file.
+    pub(crate) fn ledger_append(ledger: &std::path::Path, error: Self) -> Self {
+        match error {
+            Self::Io { message, .. } if message.starts_with("permission denied") => Self::Io {
+                path: ledger.to_path_buf(),
+                message: format!(
+                    "permission denied: this user cannot write to the ledger. Run `chmod 600 {}` (or ask the file's owner to), then run the command again.",
+                    crate::display_quoted(&ledger.display().to_string())
+                ),
+            },
+            other => other,
+        }
+    }
+
     pub(crate) fn io(path: &std::path::Path, error: &std::io::Error) -> Self {
         let message = match error.kind() {
             std::io::ErrorKind::NotFound => "no such file; check the path.".to_owned(),
