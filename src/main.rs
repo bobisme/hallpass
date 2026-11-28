@@ -612,6 +612,7 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
         Error::LockTimeout { .. }
         | Error::AppendRolledBack { .. }
         | Error::Usage(_)
+        | Error::ArchiveCorrupt(_)
         | Error::SharedDirectory { .. }
         | Error::LedgerClockMix { .. } => Some("not-recorded"),
         Error::WitnessUnavailable { detail, .. }

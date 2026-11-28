@@ -790,6 +790,7 @@ is still reported in that candidate's row.
 | the line was written but its sync failed, or a failed write could not be rolled back; the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
+| an archived entry's bytes do not match its digest, or a signature record or its `.sig` file is damaged (the archive was changed or is broken) | `archive-corrupt` |
 | bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a bad reference list or nothing to reconcile, a malformed test clock | `usage` |
 
 A missing ledger is not an error when no witness records lines for the
@@ -818,7 +819,7 @@ failed: the ledger may end with a cut-short line, which `repair
 sync failed: after a failed sync the page cache no longer tells what is on
 disk, and a later sync can report success without writing the line, so
 hallpass leaves the line in place. If it is there, it counts. `lock-timeout` and
-`witness-unavailable` and `shared-directory` have `recording = "not-recorded"`: the attempt appended
+`witness-unavailable`, `shared-directory` and `archive-corrupt` have `recording = "not-recorded"`: the attempt appended
 no entry to the ledger. So does every `usage` error, whether clap or hallpass
 found it, because arguments are checked before any write. So does every error
 of a command that never appends to a ledger (for example `ledger`, `check`,

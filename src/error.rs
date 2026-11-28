@@ -226,6 +226,10 @@ pub enum Error {
     /// The request itself is malformed (for example `--n 0`).
     #[error("{0}")]
     Usage(String),
+    /// Archived bytes do not match their digest, or a signature record or
+    /// its `.sig` file is damaged. The archive was changed or is broken.
+    #[error("{0}")]
+    ArchiveCorrupt(String),
 }
 
 /// The message for [`Error::LedgerClockMix`].
@@ -330,6 +334,7 @@ impl Error {
             Self::WitnessNotUpdated { .. } => "witness-not-updated",
             Self::Exists { .. } => "exists",
             Self::Usage(_) => "usage",
+            Self::ArchiveCorrupt(_) => "archive-corrupt",
         }
     }
 

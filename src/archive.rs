@@ -227,7 +227,7 @@ pub fn retrieve_pass(dir: &Path, digest: Digest) -> Result<Vec<u8>, Error> {
         "check that its content is the approved pass it was archived from",
     )?;
     if Digest::of(&bytes) != digest {
-        return Err(Error::Usage(format!(
+        return Err(Error::ArchiveCorrupt(format!(
             "archive entry {} does not match its digest",
             path.display()
         )));
@@ -316,7 +316,7 @@ fn valid_principal(principal: &str) -> bool {
 }
 
 fn damaged_record(path: &Path, why: &str) -> Error {
-    Error::Usage(format!(
+    Error::ArchiveCorrupt(format!(
         "signature record {} is damaged ({why}); restore it from a copy, or remove it and its .sig and run verify-approval --archive again",
         path.display()
     ))
