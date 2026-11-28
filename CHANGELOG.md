@@ -400,8 +400,29 @@ Changes since commit d70c09f.
 - `compare-backups --ancestry` text changes when a shorter copy is given.
 - `repair` JSON and `TornTail` gain `nul_only`.
 
+- Text output puts long messages one step per line and shows paths under
+  the current directory relative to it; scripts that grep whole text lines
+  should use `--json`, which is unchanged. A preview's `Token:` is on its
+  own line.
+- `adopt --reason` without `--token` is refused when the adoption carries
+  totals or loses lines; it names the preview command. A plain adoption
+  needs no token.
+- `doctor` reports `lock-held` (needs-action) while another process holds the
+  writer or ledger lock.
+- `diff --budget-impact` with no ledger beside either file reads the live
+  ledger the witness names (`ledger_source: "live"`).
+- `--allowed-signers` may name a symlink; the resolved file and its
+  directories must pass the owner and mode checks.
+- `adopt --checkpoint` places a ledger that reached the checkpoint's
+  sequence with another line there (`CheckpointCover::Parted`).
+- `archive-corrupt` has a next step; compare-backups advice can carry a
+  `restore-backup` entry.
+
 ### Added
 
+- `doctor` `lock-held` and the `ledger-not-read` finding.
+- compare-backups `restore-backup` advice with an `argv` for an exact copy
+  when the ledger beside the pass is missing or damaged.
 - `repair --drop-torn-tail` removes a last line of only NUL bytes after a
   crash, under the same witness rules.
 - `compare-backups --ancestry` groups shorter and exact copies, showing the
@@ -878,3 +899,12 @@ Changes since commit d70c09f.
 - `doctor` said HEALTHY while a required counter blocked every spend; a NUL
   tail had no repair (bn-2m96).
 - `caller.py handoff` failed past 1,024 units (bn-3cie).
+- After a restore with 2+ spends since, checkpoint adoption had no way
+  forward (bn-1e7w).
+- `doctor` said HEALTHY while a hung writer held the lock; budget impact
+  could not be reviewed before a change went live (bn-22sm).
+- A ledger given as a pass was called bad TOML; a failed first header was
+  `io`; options after `--` got no hint (bn-22ra).
+- Signers through a symlink were refused; a lossy adopt skipped the
+  reviewed token (bn-37q2).
+- Text messages ran to 900-1,450 characters on one line (bn-2va1).
