@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 
 use super::{Clock, OK, Output, REFUSED, error_output, safe_message};
 
+mod checkpoint;
+
 /// The command name, as in the replies.
 const NAME: &str = "doctor";
 
@@ -102,20 +104,25 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// `hallpass doctor FILE [--archive DIR]`.
-pub fn doctor(file: &Path, archive: Option<&Path>, clock: &Clock) -> Output {
+/// `hallpass doctor FILE [--archive DIR] [--checkpoint CHECKPOINT]`.
+pub fn doctor(
+    file: &Path,
+    archive: Option<&Path>,
+    checkpoint: Option<&Path>,
+    clock: &Clock,
+) -> Output {
     let state = StateDir::from_env().read_only();
-    match diagnose(file, archive, clock, &state) {
+    match diagnose(file, (archive, checkpoint), clock, &state) {
         Ok(diagnosis) => render(file, diagnosis),
         Err(e) => error_output(NAME, Some(file), &e),
     }
 }
 
-/// The diagnosis. An error is doctor's own: a pass path or an archive
-/// directory it cannot read at all.
+/// The diagnosis. An error is doctor's own: a pass path, an archive
+/// directory or a checkpoint file it cannot read at all.
 fn diagnose(
     file: &Path,
-    archive: Option<&Path>,
+    (archive, checkpoint): (Option<&Path>, Option<&Path>),
     clock: &Clock,
     state: &StateDir,
 ) -> Result<Diagnosis, Error> {
@@ -132,21 +139,29 @@ fn diagnose(
     let archived = archive
         .map(|dir| hallpass::archive_provenance(dir, loaded.digest).map(|p| (dir, p)))
         .transpose()?;
+    let checkpoint = checkpoint
+        .map(|path| hallpass::read_checkpoint(path).map(|cp| (path, cp)))
+        .transpose()?;
     let directory_refused = hallpass::refuse_world_writable_directory(file).err();
     if let Some(e) = &directory_refused {
         d.block(error_issue(file, state, e));
     }
     let now = clock.sample();
     match hallpass::read_summary(&loaded, state) {
-        Ok(view) => ledger_findings(
-            &mut d,
-            file,
-            &loaded,
-            &view,
-            state,
-            now,
-            directory_refused.is_some(),
-        ),
+        Ok(view) => {
+            ledger_findings(
+                &mut d,
+                file,
+                &loaded,
+                &view,
+                state,
+                now,
+                directory_refused.is_some(),
+            );
+            if let Some((path, cp)) = &checkpoint {
+                checkpoint::findings(&mut d, file, &loaded, path, cp, state);
+            }
+        }
         Err(Error::LockTimeout { path }) => d.block(lock_issue(file, &path)),
         Err(e) => d.block(error_issue(file, state, &e)),
     }

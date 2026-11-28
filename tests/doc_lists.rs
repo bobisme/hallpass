@@ -360,13 +360,21 @@ bytes = 100
             .unwrap_or_else(|| panic!("no JSON fields entry for {command}"))
     }
 
-    /// Every key of `value` below the top level.
+    /// Every key of `value` below the top level. The keys of an object of
+    /// counter name to amount (`totals` in a checkpoint) are counter names,
+    /// not fields.
     fn nested_keys(value: &Value, out: &mut BTreeSet<String>) {
         match value {
             Value::Object(map) => {
                 for (key, inner) in map {
                     out.insert(key.clone());
-                    nested_keys(inner, out);
+                    let counters = key == "totals"
+                        && inner
+                            .as_object()
+                            .is_some_and(|m| m.values().all(Value::is_u64));
+                    if !counters {
+                        nested_keys(inner, out);
+                    }
                 }
             }
             Value::Array(items) => items.iter().for_each(|v| nested_keys(v, out)),

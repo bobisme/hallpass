@@ -45,6 +45,7 @@ use crate::{MAX_TARGETS, NamedTarget};
 
 mod append;
 pub mod capacity;
+mod checkpoint;
 mod clock;
 mod debit;
 pub mod evidence;
@@ -54,6 +55,9 @@ mod reference;
 mod repair;
 pub mod scenario;
 mod written;
+pub use checkpoint::{
+    CheckpointCover, CheckpointGap, MAX_CHECKPOINT_BYTES, compare_checkpoint, read_checkpoint,
+};
 pub use clock::with_test_clock;
 pub use debit::*;
 use debit::{DEBIT_BATCH_EVENT, DebitBatchLine, DebitLine, parse_debit, parse_debit_batch};
@@ -527,6 +531,10 @@ pub struct Adoption {
     pub carried: BTreeMap<String, u64>,
     /// What the witness recorded before the adoption, if there was one.
     pub previous: Option<Witnessed>,
+    /// The retained checkpoint the adoption acted on (`adopt --checkpoint`),
+    /// if any: the ledger was shorter than it, and the adoption carried what
+    /// its totals record beyond the ledger's.
+    pub checkpoint: Option<Checkpoint>,
     /// True when the line was written under a test clock
     /// ([`crate::with_test_clock`]): its time is not the real time.
     pub test_clock: bool,
@@ -543,6 +551,10 @@ pub enum AdoptCase {
     /// The ledger had no witness (for example a pass brought from another
     /// machine).
     NoWitness,
+    /// The ledger and its witness agree (or there is neither), but a
+    /// retained checkpoint shows that the ledger once held more entries:
+    /// both were restored from an older copy (`adopt --checkpoint`).
+    CheckpointBehind,
 }
 
 impl AdoptCase {
@@ -553,6 +565,7 @@ impl AdoptCase {
             Self::LedgerMissing => "ledger-missing",
             Self::LedgerChanged => "ledger-changed",
             Self::NoWitness => "no-witness",
+            Self::CheckpointBehind => "checkpoint-behind",
         }
     }
 }
@@ -679,6 +692,9 @@ struct Parsed {
     real_clock_seq: Option<u64>,
     /// The first adoption that carried an amount, if any.
     carried_seq: Option<u64>,
+    /// Each adoption that recorded a checkpoint: its own sequence, and the
+    /// checkpoint's sequence and hash.
+    checkpoint_adoptions: Vec<(u64, u64, Digest)>,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
     /// Recorded targets this scan already found valid, so that a target
@@ -837,6 +853,10 @@ struct AdoptLine {
     digest: String,
     carried: BTreeMap<String, u64>,
     witness: Option<WitnessLine>,
+    /// The checkpoint an `adopt --checkpoint` acted on; absent otherwise,
+    /// so every other adoption line is as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<Checkpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_clock: Option<bool>,
     prev: String,
@@ -961,6 +981,7 @@ fn scan_ledger(
         test_clock_seq: None,
         real_clock_seq: None,
         carried_seq: None,
+        checkpoint_adoptions: Vec::new(),
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -1249,6 +1270,13 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
             })
         }
     };
+    if let Some(cp) = &line.checkpoint {
+        let hash = checkpoint::check(cp).map_err(|_| bad)?;
+        if cp.pass_id != parsed.pass_id || cp.seq < line.seq {
+            return Err(bad);
+        }
+        parsed.checkpoint_adoptions.push((line.seq, cp.seq, hash));
+    }
     parsed.last_time = Some(time);
     parsed.adoption_count += 1;
     if !line.carried.is_empty() {
@@ -1258,11 +1286,13 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         add(&mut parsed.tally.spent, counter, *n)
             .ok_or("the recorded amounts add up beyond any ceiling")?;
     }
-    if reference::may_lose_references(
-        &line.carried,
-        previous.as_ref(),
-        line.test_clock != Some(true),
-    ) {
+    if line.checkpoint.is_some()
+        || reference::may_lose_references(
+            &line.carried,
+            previous.as_ref(),
+            line.test_clock != Some(true),
+        )
+    {
         parsed.lossy_adoption = Some(line.seq);
     }
     Ok(Adoption {
@@ -1272,6 +1302,7 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         digest,
         carried: line.carried,
         previous,
+        checkpoint: line.checkpoint,
         test_clock: line.test_clock == Some(true),
     })
 }
@@ -1944,6 +1975,7 @@ fn visit_view(
         test_clock_seq: None,
         real_clock_seq: None,
         carried_seq: None,
+        checkpoint_adoptions: Vec::new(),
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -1957,6 +1989,7 @@ fn visit_view(
             pass_id: parsed.pass_id,
             seq: parsed.seq,
             hash: parsed.tail.to_string(),
+            totals: None,
         }),
         entries: parsed.entries,
         unreconciled_adoption,
@@ -1987,6 +2020,12 @@ pub struct Checkpoint {
     pub seq: u64,
     /// SHA-256 of the original line without its newline.
     pub hash: String,
+    /// The totals (spends and carried amounts) per counter through that
+    /// line, as the ledger counted them when the checkpoint was exported.
+    /// The hash does not cover them: they are what the exporter wrote. A
+    /// checkpoint from a hallpass before they were exported has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<BTreeMap<String, u64>>,
 }
 
 /// Result of verifying a complete ledger against a checkpoint.
@@ -2121,6 +2160,7 @@ pub fn export_checkpoint_observed(
             pass_id: loaded.pass.id.clone(),
             seq: parsed.seq,
             hash: parsed.tail.to_string(),
+            totals: Some(parsed.tally.spent),
         },
         relation,
     ))
@@ -2132,12 +2172,7 @@ pub fn export_checkpoint_observed(
 /// # Errors
 /// If the checkpoint is malformed or the ledger is unavailable or corrupt.
 pub fn verify_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<CheckpointStatus, Error> {
-    if checkpoint.version != 1 || !crate::pass::is_identifier(&checkpoint.pass_id) {
-        return Err(Error::Usage(
-            "invalid checkpoint version or pass ID".to_owned(),
-        ));
-    }
-    let hash = checkpoint.hash.parse::<Digest>().map_err(Error::Usage)?;
+    let hash = checkpoint::check(checkpoint)?;
     let parsed = inspect_candidate(path, Some(checkpoint.seq))?;
     if parsed.pass_id != checkpoint.pass_id {
         return Ok(CheckpointStatus::Foreign);
@@ -2427,13 +2462,12 @@ fn lock_for_writing_inner(
     }
     if let Some(expected) = guard {
         let flags = adopting.cloned().unwrap_or_default();
-        let current = preview_adopt_rehearsal(pass_path, state, flags.carry_noted, flags.rehearsal)
-            .map_err(|e| match e {
-                // The preview's own refusal, so that both say the same.
-                Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
-                e @ (Error::WitnessUnavailable { .. } | Error::LockTimeout { .. }) => e,
-                _ => stale_token(pass_path),
-            })?;
+        let current = preview_adopt_flags(pass_path, state, &flags).map_err(|e| match e {
+            // The preview's own refusal, so that both say the same.
+            Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
+            e @ (Error::WitnessUnavailable { .. } | Error::LockTimeout { .. }) => e,
+            _ => stale_token(pass_path),
+        })?;
         if current.token != expected {
             return Err(stale_token(pass_path));
         }
@@ -2442,24 +2476,22 @@ fn lock_for_writing_inner(
     let created = !exists(&path)?;
     let mut guarded_missing_pass = None;
     if created {
-        if adopting.is_some() {
-            let Some(known) = witness.as_ref().filter(|w| w.seq > 0) else {
-                return Err(Error::Usage(
-                    "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
-                ));
-            };
-            // A ledger intact where the witness last saw it is not lost:
-            // adopting would start a second history for this id, even
-            // when that ledger has grown past the witness.
-            refuse_fork(pass_path, &path, Some(known), state, &id)?;
-            check_projected_witness_size(state, &id, &path, 1, &known.totals)?;
+        if let Some(flags) = adopting {
+            check_new_ledger_adoption(pass_path, &path, witness.as_ref(), flags, state, &id)?;
         } else {
             compare(pass_path, &path, None, witness.as_ref(), state, &id)?;
         }
         if let Some(expected) = guard {
             let snapshot = load(pass_path)?;
             if snapshot.pass.id != id
-                || expected != adoption_token(&snapshot, &path, None, witness.as_ref())
+                || expected
+                    != adoption_token(
+                        &snapshot,
+                        &path,
+                        None,
+                        witness.as_ref(),
+                        adopting.and_then(AdoptFlags::checkpoint),
+                    )
             {
                 return Err(stale_token(pass_path));
             }
@@ -2496,7 +2528,14 @@ fn lock_for_writing_inner(
     clock::check_kind(&path, &parsed)?;
     if !created
         && guard.is_some_and(|expected| {
-            expected != adoption_token(&loaded, &path, Some(&parsed), witness.as_ref())
+            expected
+                != adoption_token(
+                    &loaded,
+                    &path,
+                    Some(&parsed),
+                    witness.as_ref(),
+                    adopting.and_then(AdoptFlags::checkpoint),
+                )
         })
     {
         return Err(stale_token(pass_path));
@@ -2511,6 +2550,39 @@ fn lock_for_writing_inner(
         parsed,
         created,
     })
+}
+
+/// Before an adoption starts a new ledger: refuse it when there is nothing
+/// to adopt (no witnessed spend, no checkpoint totals) or when the ledger
+/// the witness last saw is intact elsewhere, and check the witness it
+/// would write fits.
+fn check_new_ledger_adoption(
+    pass_path: &Path,
+    path: &Path,
+    witness: Option<&Witnessed>,
+    flags: &AdoptFlags,
+    state: &StateDir,
+    id: &str,
+) -> Result<(), Error> {
+    let checkpoint = flags.checkpoint().and_then(|cp| cp.totals.as_ref());
+    match (witness.filter(|w| w.seq > 0), checkpoint) {
+        (Some(known), _) => {
+            // A ledger intact where the witness last saw it is not lost:
+            // adopting would start a second history for this id, even when
+            // that ledger has grown past the witness.
+            refuse_fork(pass_path, path, Some(known), state, id)?;
+            let mut totals = known.totals.clone();
+            for (counter, n) in checkpoint.into_iter().flatten() {
+                let total = totals.entry(counter.clone()).or_insert(0);
+                *total = (*total).max(*n);
+            }
+            check_projected_witness_size(state, id, path, 1, &totals)
+        }
+        (None, Some(recorded)) => check_projected_witness_size(state, id, path, 1, recorded),
+        (None, None) => Err(Error::Usage(
+            "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
+        )),
+    }
 }
 
 /// A recorded time exactly as the ledger writes it (UTC, full precision).
@@ -3114,6 +3186,28 @@ impl RehearsalTotals {
 struct AdoptFlags {
     carry_noted: bool,
     rehearsal: RehearsalTotals,
+    /// `adopt --checkpoint`: the retained checkpoint to act on.
+    checkpoint: Option<checkpoint::Given>,
+}
+
+impl AdoptFlags {
+    fn checkpoint(&self) -> Option<&Checkpoint> {
+        self.checkpoint.as_ref().map(|g| &g.checkpoint)
+    }
+
+    /// With a checkpoint: the refusal when it cannot be acted on, checked
+    /// before anything is locked or created.
+    fn check_checkpoint(&self, loaded: &LoadedPass) -> Result<(), Error> {
+        let Some(given) = &self.checkpoint else {
+            return Ok(());
+        };
+        if let RehearsalTotals::Drop(_) = self.rehearsal {
+            return Err(Error::Usage(
+                "--checkpoint and --drop-rehearsal cannot be used together: a checkpoint's totals may count the rehearsal's units. Adopt with --drop-rehearsal first, then run `hallpass doctor PASS --checkpoint CHECKPOINT` again; nothing was recorded".to_owned(),
+            ));
+        }
+        given.behind(loaded).map(|_| ())
+    }
 }
 
 /// What this adoption does with the totals of `witness` as a rehearsal's,
@@ -3258,6 +3352,8 @@ pub struct AdoptPreview {
     pub last_seen_unchecked: Option<(PathBuf, String)>,
     /// As [`AdoptOutcome::rehearsal`].
     pub rehearsal: Option<RehearsalTotals>,
+    /// The checkpoint the adoption acts on (`adopt --checkpoint`), if any.
+    pub checkpoint: Option<Checkpoint>,
 }
 
 impl AdoptPreview {
@@ -3268,11 +3364,12 @@ impl AdoptPreview {
     /// for [`Adoption::makes_references_inconclusive`].
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
-        reference::may_lose_references(
-            &self.carried,
-            self.previous.as_ref(),
-            clock::marker().is_none(),
-        )
+        self.checkpoint.is_some()
+            || reference::may_lose_references(
+                &self.carried,
+                self.previous.as_ref(),
+                clock::marker().is_none(),
+            )
     }
 }
 
@@ -3285,16 +3382,22 @@ impl Adoption {
     /// ([`crate::reconcile_references`]) names it or a later such adoption.
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
-        reference::may_lose_references(&self.carried, self.previous.as_ref(), !self.test_clock)
+        self.checkpoint.is_some()
+            || reference::may_lose_references(
+                &self.carried,
+                self.previous.as_ref(),
+                !self.test_clock,
+            )
     }
 }
 
 /// The refusal when the ledger and its witness agree, for `adopt` and its
 /// preview alike.
-fn nothing_to_adopt(ledger: &Path) -> Error {
+fn nothing_to_adopt(ledger: &Path, pass_path: &Path) -> Error {
     Error::Usage(format!(
-        "the ledger {} matches its witness, so there is nothing to adopt. Adopt only after the ledger was lost or changed, or when it has no witness; run `hallpass status` to see the current count. Nothing was recorded",
-        ledger.display()
+        "the ledger {} matches its witness, so there is nothing to adopt. Adopt only after the ledger was lost or changed, or when it has no witness; run `hallpass status` to see the current count. If the ledger and the state directory were both restored from an older copy, run `hallpass doctor {} --checkpoint CHECKPOINT` with a checkpoint you retained elsewhere. Nothing was recorded",
+        ledger.display(),
+        pass_path.display()
     ))
 }
 
@@ -3423,6 +3526,7 @@ fn adoption_token(
     path: &Path,
     parsed: Option<&Parsed>,
     witness: Option<&Witnessed>,
+    checkpoint: Option<&Checkpoint>,
 ) -> String {
     let w = witness.map(|w| WitnessLine {
         ledger: w.ledger.clone(),
@@ -3432,7 +3536,12 @@ fn adoption_token(
         updated: w.updated.clone(),
         test_clock: (w.test_clock && clock::marker().is_none()).then_some(true),
     });
-    let input = serde_json::json!({"version": 1, "pass_id": loaded.pass.id, "pass_digest": loaded.digest.to_string(), "ledger": ledger_identity(path), "exists": parsed.is_some(), "seq": parsed.map_or(0, |p| p.seq), "tail": parsed.map(|p| p.tail.to_string()), "witness": w });
+    let mut input = serde_json::json!({"version": 1, "pass_id": loaded.pass.id, "pass_digest": loaded.digest.to_string(), "ledger": ledger_identity(path), "exists": parsed.is_some(), "seq": parsed.map_or(0, |p| p.seq), "tail": parsed.map(|p| p.tail.to_string()), "witness": w });
+    // Only an adoption that acts on a checkpoint commits to it, so every
+    // other token is as before.
+    if let (Some(cp), Some(map)) = (checkpoint, input.as_object_mut()) {
+        map.insert("checkpoint".to_owned(), serde_json::json!(cp));
+    }
     format!("v1:{}", Digest::of(input.to_string().as_bytes()))
 }
 
@@ -3496,11 +3605,68 @@ pub fn preview_adopt_rehearsal(
     carry_noted: bool,
     rehearsal: RehearsalTotals,
 ) -> Result<AdoptPreview, Error> {
-    let flags = AdoptFlags {
-        carry_noted,
-        rehearsal,
-    };
+    preview_adopt_flags(
+        pass_path,
+        state,
+        &AdoptFlags {
+            carry_noted,
+            rehearsal,
+            checkpoint: None,
+        },
+    )
+}
+
+/// [`preview_adopt_rehearsal`] for `adopt --checkpoint`: the preview of an
+/// adoption that acts on the retained checkpoint in `checkpoint` (read as
+/// [`read_checkpoint`] and `verify-checkpoint` read it).
+///
+/// The checkpoint must show that the ledger is behind it: the ledger (or a
+/// missing one) ends before the checkpointed sequence, no adoption in it
+/// acted on this checkpoint yet, the checkpoint records totals, and the
+/// ledger counts no counter higher than they do. The adoption then
+/// carries, per counter, what the checkpoint's totals record beyond the
+/// ledger's (and beyond what the witness carries, in the other adoption
+/// cases), so no count goes down. Its case is
+/// [`AdoptCase::CheckpointBehind`] when the ledger and witness agree.
+///
+/// The checkpoint proves only that the ledger once held more entries;
+/// nothing authenticates its totals beyond the operator who kept it. A
+/// higher count is the safe side for spending; a total edited lower would
+/// carry too little. The adoption always makes references inconclusive
+/// ([`AdoptPreview::makes_references_inconclusive`]).
+///
+/// # Errors
+/// As [`preview_adopt_rehearsal`]; a checkpoint that cannot be read; a
+/// ledger that holds the checkpointed line, already adopted it, records
+/// another history at it, or counts more than it records; a checkpoint
+/// without totals or for another pass; `--drop-rehearsal` with it (all
+/// [`Error::Usage`], naming the next step).
+pub fn preview_adopt_checkpoint(
+    pass_path: &Path,
+    state: &StateDir,
+    carry_noted: bool,
+    rehearsal: RehearsalTotals,
+    checkpoint: &Path,
+) -> Result<AdoptPreview, Error> {
+    preview_adopt_flags(
+        pass_path,
+        state,
+        &AdoptFlags {
+            carry_noted,
+            rehearsal,
+            checkpoint: Some(checkpoint::Given::read(checkpoint)?),
+        },
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn preview_adopt_flags(
+    pass_path: &Path,
+    state: &StateDir,
+    flags: &AdoptFlags,
+) -> Result<AdoptPreview, Error> {
     let loaded = load(pass_path)?;
+    flags.check_checkpoint(&loaded)?;
     let id = &loaded.pass.id;
     let path = ledger_path(pass_path);
     let file = if exists(&path)? {
@@ -3544,21 +3710,28 @@ pub fn preview_adopt_rehearsal(
             AdoptCase::LedgerChanged
         }
         Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
-        Ok(_) => return Err(nothing_to_adopt(&path)),
+        Ok(_) if flags.checkpoint.is_some() => AdoptCase::CheckpointBehind,
+        Ok(_) => return Err(nothing_to_adopt(&path, pass_path)),
         Err(e) => return Err(e),
     };
+    if let (Some(given), Some(parsed)) = (&flags.checkpoint, &parsed) {
+        given.still_behind(parsed, pass_path)?;
+    }
     check_preview_write_access(pass_path, &path, parsed.is_some(), state, id)?;
     let present = parsed
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
-    let raised = noted_totals(state, id, witness.as_ref(), carry_noted, pass_path)?;
-    let rehearsal = rehearsal_totals(witness.as_ref(), &flags, raised.is_some(), pass_path, id)?;
-    let (carried, from_note) = adoption_carry(
+    let raised = noted_totals(state, id, witness.as_ref(), flags.carry_noted, pass_path)?;
+    let rehearsal = rehearsal_totals(witness.as_ref(), flags, raised.is_some(), pass_path, id)?;
+    let (mut carried, from_note) = adoption_carry(
         &present,
         raised.as_ref(),
         witness.as_ref(),
         rehearsal.as_ref(),
     );
+    if let Some(given) = &flags.checkpoint {
+        given.raise(&present, &mut carried);
+    }
     // As the adoption line will record it: a proved rehearsal, on the
     // real clock.
     let mut totals = present.clone();
@@ -3567,7 +3740,13 @@ pub fn preview_adopt_rehearsal(
     }
     let seq = parsed.as_ref().map_or(0, |p| p.seq);
     check_projected_witness_size(state, id, &path, seq + 1, &totals)?;
-    let token = adoption_token(&loaded, &path, parsed.as_ref(), witness.as_ref());
+    let token = adoption_token(
+        &loaded,
+        &path,
+        parsed.as_ref(),
+        witness.as_ref(),
+        flags.checkpoint(),
+    );
     let last_seen_unchecked = match (&case, &witness) {
         (AdoptCase::LedgerMissing | AdoptCase::LedgerChanged, Some(w)) => {
             match last_seen_ledger(&path, w, id)? {
@@ -3590,6 +3769,7 @@ pub fn preview_adopt_rehearsal(
         from_note,
         last_seen_unchecked,
         rehearsal,
+        checkpoint: flags.checkpoint().cloned(),
     })
 }
 
@@ -3625,8 +3805,12 @@ fn locked_adopt_case(
     locked: &Locked,
     state: &StateDir,
     id: &str,
+    checkpoint: bool,
 ) -> Result<AdoptCase, Error> {
     if locked.created {
+        if checkpoint && locked.witness.as_ref().is_none_or(|w| w.seq == 0) {
+            return Ok(AdoptCase::CheckpointBehind);
+        }
         return Ok(AdoptCase::LedgerMissing);
     }
     let witness = locked.witness.as_ref();
@@ -3643,7 +3827,8 @@ fn locked_adopt_case(
             Ok(AdoptCase::LedgerChanged)
         }
         Ok((WitnessStatus::Missing, _)) => Ok(AdoptCase::NoWitness),
-        Ok(_) => Err(nothing_to_adopt(&locked.path)),
+        Ok(_) if checkpoint => Ok(AdoptCase::CheckpointBehind),
+        Ok(_) => Err(nothing_to_adopt(&locked.path, pass_path)),
         Err(e) => Err(e),
     }
 }
@@ -3757,16 +3942,74 @@ pub fn adopt_guarded_rehearsal(
     carry_noted: bool,
     rehearsal: RehearsalTotals,
 ) -> Result<AdoptOutcome, Error> {
-    let flags = AdoptFlags {
-        carry_noted,
-        rehearsal,
-    };
+    adopt_flags(
+        pass_path,
+        reason,
+        now,
+        state,
+        token,
+        &AdoptFlags {
+            carry_noted,
+            rehearsal,
+            checkpoint: None,
+        },
+    )
+}
+
+/// [`adopt_guarded_rehearsal`] for `adopt --checkpoint`.
+///
+/// It records the adoption that [`preview_adopt_checkpoint`] previews,
+/// carrying what the retained checkpoint in `checkpoint` records beyond
+/// the ledger. The adoption line records the checkpoint, so that
+/// `doctor --checkpoint` and a second adoption see it was acted on.
+///
+/// # Errors
+/// As [`adopt_guarded_rehearsal`] and [`preview_adopt_checkpoint`]; a
+/// ledger that changed under the lock so that it is no longer behind the
+/// checkpoint ([`Error::Usage`]).
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_guarded_checkpoint(
+    pass_path: &Path,
+    reason: &str,
+    now: OffsetDateTime,
+    state: &StateDir,
+    token: Option<&str>,
+    carry_noted: bool,
+    rehearsal: RehearsalTotals,
+    checkpoint: &Path,
+) -> Result<AdoptOutcome, Error> {
+    adopt_flags(
+        pass_path,
+        reason,
+        now,
+        state,
+        token,
+        &AdoptFlags {
+            carry_noted,
+            rehearsal,
+            checkpoint: Some(checkpoint::Given::read(checkpoint)?),
+        },
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn adopt_flags(
+    pass_path: &Path,
+    reason: &str,
+    now: OffsetDateTime,
+    state: &StateDir,
+    token: Option<&str>,
+    flags: &AdoptFlags,
+) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
+    if flags.checkpoint.is_some() {
+        flags.check_checkpoint(&load(pass_path)?)?;
+    }
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     let mut locked = lock_for_writing_inner(
         pass_path,
         state,
-        Some(&flags),
+        Some(flags),
         token,
         None,
         None,
@@ -3774,21 +4017,33 @@ pub fn adopt_guarded_rehearsal(
     )?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
-    let case = locked_adopt_case(pass_path, &locked, state, &id)?;
-    let raised = noted_totals(state, &id, locked.witness.as_ref(), carry_noted, pass_path)?;
+    let case = locked_adopt_case(pass_path, &locked, state, &id, flags.checkpoint.is_some())?;
+    if let Some(given) = &flags.checkpoint {
+        given.still_behind(&locked.parsed, pass_path)?;
+    }
+    let raised = noted_totals(
+        state,
+        &id,
+        locked.witness.as_ref(),
+        flags.carry_noted,
+        pass_path,
+    )?;
     let rehearsal = rehearsal_totals(
         locked.witness.as_ref(),
-        &flags,
+        flags,
         raised.is_some(),
         pass_path,
         &id,
     )?;
-    let (carried, from_note) = adoption_carry(
+    let (mut carried, from_note) = adoption_carry(
         &locked.parsed.tally.spent,
         raised.as_ref(),
         locked.witness.as_ref(),
         rehearsal.as_ref(),
     );
+    if let Some(given) = &flags.checkpoint {
+        given.raise(&locked.parsed.tally.spent, &mut carried);
+    }
     let (proved, previous) = recorded_previous(locked.witness.clone(), rehearsal.as_ref());
     let line = AdoptLine {
         seq: locked.parsed.seq + 1,
@@ -3805,6 +4060,7 @@ pub fn adopt_guarded_rehearsal(
             updated: w.updated.clone(),
             test_clock: proved.then_some(true),
         }),
+        checkpoint: flags.checkpoint().cloned(),
         test_clock: clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
@@ -3825,7 +4081,7 @@ pub fn adopt_guarded_rehearsal(
         },
     )?;
     append(&mut locked, &text, "adoption")?;
-    if case != AdoptCase::NoWitness {
+    if !matches!(case, AdoptCase::NoWitness | AdoptCase::CheckpointBehind) {
         note_fork(state, &id, &line, &text, now);
     }
     state.publish(&id, &prepared)
@@ -3846,6 +4102,7 @@ pub fn adopt_guarded_rehearsal(
             digest: locked.loaded.digest,
             carried,
             previous,
+            checkpoint: line.checkpoint.clone(),
             test_clock: line.test_clock == Some(true),
         },
         ledger: locked.path.clone(),
@@ -4115,6 +4372,7 @@ mod tests {
             digest: loaded.digest.to_string(),
             carried: witness.totals.clone(),
             witness: None,
+            checkpoint: None,
             test_clock: None,
             prev: Digest::of(header.trim_end().as_bytes()).to_string(),
         };

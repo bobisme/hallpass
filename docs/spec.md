@@ -564,7 +564,12 @@ pass digest, the witness's previous record, and `carried`):
   is the witness's totals;
 - ledger changed: `carried` is, per counter, what the witness recorded
   beyond what the ledger holds;
-- no witness: `carried` is empty.
+- no witness: `carried` is empty;
+- with `--checkpoint`, a ledger behind a retained checkpoint: `carried`
+  rises, per counter, to what the checkpoint records beyond the ledger
+  (see [After a whole-machine restore](#after-a-whole-machine-restore)).
+  The line then also has `checkpoint`; a hallpass before this one does not
+  read such a line and stops with `ledger-corrupt`.
 
 In the first two cases the ledger cannot confirm the carried totals: the
 ledger is missing, or it does not hold the witnessed line. They come from
@@ -1174,6 +1179,54 @@ the checkpointed line, as an older copy does; `result` is still `mismatch`),
 `shorter`: the checkpoint cannot show that the copy is a true prefix. Verification uses the supplied checkpoint as its trust input and does not
 read or create a witness. Retain checkpoints separately from the ledger.
 
+The checkpoint object also has `totals`: per counter, what the ledger
+counted through the checkpointed line (carried amounts included). The hash
+does not cover them. A checkpoint without `totals` (from an earlier
+hallpass) is still read; `verify-checkpoint` refuses `totals` that are not
+counter names with whole numbers from 0 to the largest ceiling.
+
+### After a whole-machine restore
+
+A restore of both the ledger and the state directory from an older copy
+leaves a ledger and witness that agree, so only a checkpoint retained
+elsewhere shows the loss. `doctor FILE --checkpoint CHECKPOINT` reads the
+checkpoint exactly as `verify-checkpoint` does (a file it would refuse is
+doctor's own error, exit 1) and compares it with the ledger, read only:
+
+- the ledger holds the checkpointed line (`exact`, `extended`): finding
+  `checkpoint-holds`;
+- an adoption in the ledger acted on this checkpoint: finding
+  `checkpoint-adopted`;
+- the ledger ends before the line (`shorter`): **blocked**
+  `checkpoint-behind`, naming `adopt FILE --checkpoint CHECKPOINT
+  --preview`; with a checkpoint without `totals` it names no command;
+- the ledger holds another line at that sequence (`mismatch`), or is
+  shorter but counts more of some counter than the checkpoint records
+  (counts only grow, so it is not an older copy): **blocked**
+  `checkpoint-fork`, with no command: hallpass does not merge two
+  histories;
+- the checkpoint is for another pass: **blocked** `checkpoint-foreign`.
+
+`adopt FILE --checkpoint CHECKPOINT` (with `--preview`, then `--reason` and
+`--token`) acts only on `checkpoint-behind` with `totals`. Every other
+relation is a usage error that names the next step. The adoption carries,
+per counter, what the checkpoint's totals record beyond the ledger's; when
+the witness also calls for an adoption (`ledger-missing`,
+`ledger-changed`, `no-witness`), it carries per counter the higher of the
+two, so no count goes down. Its case is `checkpoint-behind` when the ledger
+and witness agree or there is neither. The line records the checkpoint
+(`checkpoint`, as exported), so it is not adopted twice. The token covers
+the checkpoint. `--checkpoint` cannot be used with `--drop-rehearsal`.
+
+The checkpoint proves only that the ledger once reached its sequence. It
+cannot show what the missing entries were or that the restored ledger is a
+prefix of that history, and nothing authenticates its totals beyond the
+operator who kept it. A higher count is the safe side for spending; a total
+edited lower would carry too little. `adopt --preview` says this in
+`warnings`. An adoption from a checkpoint always may have lost caller
+references, so guarded spends are `reference-inconclusive` until
+`reconcile-references` follows it.
+
 ### Archives and evidence
 
 `archive PASS DIR` retains the exact validated pass bytes in a private
@@ -1272,14 +1325,14 @@ read the JSON, not this text.
 | `init` | template written (mode 0600; it does not validate until filled in) | never | file exists, write failed |
 | `check` | the pass validates (warnings can still be present) | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
-| `doctor` | `healthy`: nothing blocks a spend and nothing needs doing | `needs-action` or `blocked`, with the one next command | a pass path that cannot be read or is not a regular file, an unusable archive directory |
+| `doctor` | `healthy`: nothing blocks a spend and nothing needs doing | `needs-action` or `blocked`, with the one next command | a pass path that cannot be read or is not a regular file, an unusable archive directory, a `--checkpoint` file that `verify-checkpoint` would refuse |
 | `permits` | allowed | refused, also `pass-changed` with `--digest` | invalid pass or target, ledger error (as `status`) |
 | `spend` | recorded (with `--to`: and the destination is permitted); with `--dry-run`, `would-allow` | refused by the digest, the window, the reference guard, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `capacity` | budget count, including zero | invalid unit policy | usage, pass or accounting error |
 | `rehearse` | `simulated`: every step fits | `simulation-refused`: a step is refused | invalid scenario or pass, accounting error |
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
-| `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, the ledger is intact elsewhere, missing reason, stale token, unusable state directory |
+| `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, the ledger is intact elsewhere, missing reason, stale token, unusable state directory, a `--checkpoint` that does not show the ledger behind it |
 | `repair` | the cut-short last line was removed, or the `--preview` | never | invalid pass, no ledger, nothing safe to remove (a complete last line, damage before it, no witness, a line the witness counted), stale token |
 | `reconcile-references` | reconciliation recorded | never | invalid pass, list or reason, damaged, missing or changed ledger, no adoption to reconcile, not the latest such adoption, no witness, unusable state directory |
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
@@ -1303,8 +1356,9 @@ read the JSON, not this text.
 `doctor` runs the checks the other commands run (the pass and its file
 mode, the directory that holds it, the ledger chain, the witness and its
 totals, a ledger elsewhere, a cut-short last line, rehearsal and live
-lines, an in-place edit, the window, and with `--archive DIR` whether the
-archive holds this revision) and names exactly one next command with the
+lines, an in-place edit, the window, with `--archive DIR` whether the
+archive holds this revision, and with `--checkpoint CHECKPOINT` how the
+ledger relates to a retained checkpoint) and names exactly one next command with the
 real paths, or nothing to do. It uses the library's own errors and advice:
 `ledger-corrupt` with a last line that lacks only its line end, which the
 witness recorded, names `repair --restore-final-newline --preview`; a
@@ -1510,11 +1564,13 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   pass digest the spend was decided against, `note` null when none,
   `test_clock` true for a line written under the test clock),
   `adoptions` (list of `{seq, time, reason, digest, carried, previous,
-  may_have_lost_references, test_clock}`; `carried` is an object of counter name to
+  may_have_lost_references, checkpoint, test_clock}`; `checkpoint` is the
+  checkpoint an `adopt --checkpoint` acted on, or null; `carried` is an object of counter name to
   amount, `previous` is `{ledger, seq, totals, updated, test_clock}` or null
   (`test_clock` true when that witness showed a rehearsal),
   `may_have_lost_references` is true for an adoption that records a
-  previous witness of at least one line or carries an amount),
+  previous witness of at least one line, carries an amount, or acted on a
+  checkpoint),
   `reference_reconciliations` (list of `{seq, time, adoption, reason,
   digest, references, test_clock}`; `adoption` is the sequence of the adoption it
   reconciles, `references` the whole list), `unreconciled_adoption` (the
@@ -1529,13 +1585,15 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   null for a counter the pass no longer has; `over_ceiling` is false and `over_by` null there). `spent` includes carried
   amounts.
 - **adopt**: `ledger`, `pass_id`, `digest`, `now`, `test_clock`, `case`
-  (`ledger-missing`, `ledger-changed` or `no-witness`), `created` (a new
+  (`ledger-missing`, `ledger-changed`, `no-witness` or
+  `checkpoint-behind`), `created` (a new
   ledger was started), `seq`, `reason`, `carried` and `totals` (objects of
   counter name to amount), `previous` (as in `ledger`, or null),
   `rehearsal` (null, or `{units, carried, proof}`: see
-  [Test-clock lines](#test-clock-lines)). A preview
+  [Test-clock lines](#test-clock-lines)), `checkpoint` (the checkpoint
+  acted on with `--checkpoint`, as `checkpoint` exports it, or null). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
-  `totals`, `previous`, `rehearsal` and `token`.
+  `totals`, `previous`, `rehearsal`, `checkpoint` and `token`.
 - **repair**: `result` (`preview` or `repaired`), `ledger`, `pass_id`,
   `seq` (the last complete line, kept), `witness_seq`, `kept_bytes`,
   `removed_bytes`, `token` and `copy` (the file that holds the removed
@@ -1561,8 +1619,9 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   are numbers for `charge.<counter>` and `targets.count`, strings for the
   other fields, and null when that side has none; `reconciled_at` as in
   `receipt`).
-- **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash}`, or null
-  when `result` is `empty`), `local_corroboration`, `witness` `{relation,
+- **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash, totals}`,
+  or null when `result` is `empty`; `totals` is an object of counter name
+  to amount), `local_corroboration`, `witness` `{relation,
   witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
   `absent`; `witnessed_seq` is null for `absent`, `exported_seq` null for
   `empty`).
@@ -1753,6 +1812,8 @@ Crate `hallpass` (re-exports `time`):
 | `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared, give_up_in }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
 | `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |
 | `export_checkpoint_observed` (`CheckpointExport`, `WitnessRelation`), `export_checkpoint`, `verify_checkpoint` (`Checkpoint`, `CheckpointStatus`) | checkpoints |
+| `read_checkpoint(path)`, `MAX_CHECKPOINT_BYTES`, `compare_checkpoint(&LoadedPass, &Checkpoint)` (`CheckpointCover`, `CheckpointGap`) | read a retained checkpoint as `verify-checkpoint` does, and what it shows about the ledger beside a pass (`doctor --checkpoint`) |
+| `preview_adopt_checkpoint`, `adopt_guarded_checkpoint` | `adopt --checkpoint` ([After a whole-machine restore](#after-a-whole-machine-restore)) |
 | `archive_pass`, `archive_pass_bytes`, `retrieve_pass` | the private archive of exact pass bytes |
 | `archive_provenance` (`Provenance`, `SignedApproval`), `archive_verified_signature` (`ArchivedSignature`), `APPROVAL_NAMESPACE`, `MAX_SIGNATURE_BYTES` | signature records beside archived bytes; recording one does not verify anything |
 | modules `capacity`, `scenario`, `evidence`, `review` | budget questions, accounting evidence, and approval review |

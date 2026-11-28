@@ -169,6 +169,9 @@ enum Command {
         /// Also check that this archive directory holds this revision of the pass.
         #[arg(long, value_name = "DIR")]
         archive: Option<PathBuf>,
+        /// Also compare the ledger with this retained checkpoint JSON file, as verify-checkpoint does; a ledger behind it, or another history, blocks.
+        #[arg(long, value_name = "CHECKPOINT")]
+        checkpoint: Option<PathBuf>,
         #[command(flatten)]
         lock: LockArgs,
     },
@@ -319,6 +322,11 @@ enum Command {
         /// the rehearsal units count against the ceilings.
         #[arg(long)]
         carry_rehearsal: bool,
+        /// After the ledger and its witness were both restored from an older
+        /// copy: carry, per counter, what this retained checkpoint JSON file
+        /// records beyond the ledger, when it shows the ledger is behind it.
+        #[arg(long, value_name = "CHECKPOINT", conflicts_with = "drop_rehearsal")]
+        checkpoint: Option<PathBuf>,
         #[command(flatten)]
         lock: LockArgs,
     },
@@ -2206,6 +2214,7 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
                 "carried": a.carried,
                 "previous": a.previous.as_ref().map(witnessed_json),
                 "may_have_lost_references": a.makes_references_inconclusive(),
+                "checkpoint": a.checkpoint,
                 "test_clock": a.test_clock,
             })).collect::<Vec<_>>(),
             "reference_reconciliations": selected.reconciliations.iter().map(|r| json!({
@@ -2233,18 +2242,31 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
     }
 }
 
-fn preview_adopt(file: &Path, carry_noted: bool, rehearsal: hallpass::RehearsalTotals) -> Output {
-    match hallpass::preview_adopt_rehearsal(file, &StateDir::from_env(), carry_noted, rehearsal) {
+fn preview_adopt(
+    file: &Path,
+    carry_noted: bool,
+    rehearsal: hallpass::RehearsalTotals,
+    checkpoint: Option<&Path>,
+) -> Output {
+    let state = StateDir::from_env();
+    let preview = match checkpoint {
+        Some(cp) => hallpass::preview_adopt_checkpoint(file, &state, carry_noted, rehearsal, cp),
+        None => hallpass::preview_adopt_rehearsal(file, &state, carry_noted, rehearsal),
+    };
+    match preview {
         Ok(p) => Output {
             code: 0,
             text: format!(
-                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}{}. Projected: {}. Token: {}\n",
+                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}{}{}. Projected: {}. Token: {}\n",
                 p.case.as_str(),
                 p.pass_id,
                 p.seq,
                 hallpass::totals_text(&p.present),
                 hallpass::totals_text(&p.carried),
                 rehearsal_units_text(p.rehearsal.as_ref(), p.previous.as_ref()),
+                p.checkpoint
+                    .as_ref()
+                    .map_or_else(String::new, checkpoint_carry_text),
                 if p.from_note.is_empty() {
                     String::new()
                 } else {
@@ -2256,10 +2278,31 @@ fn preview_adopt(file: &Path, carry_noted: bool, rehearsal: hallpass::RehearsalT
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(checkpoint_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
+}
+
+/// What an adoption carries from a retained checkpoint, after the
+/// carried totals.
+fn checkpoint_carry_text(cp: &hallpass::Checkpoint) -> String {
+    format!(
+        " (so that each count reaches at least what the checkpoint at sequence {} records: {})",
+        cp.seq,
+        cp.totals
+            .as_ref()
+            .map_or_else(|| "nothing".to_owned(), hallpass::totals_text)
+    )
+}
+
+/// What an adoption from a retained checkpoint relies on: what the
+/// checkpoint proves, and what it cannot.
+fn checkpoint_warning(cp: &hallpass::Checkpoint) -> String {
+    format!(
+        "the checkpoint shows only that this ledger once reached sequence {}: it cannot show what the missing entries were, and its hash does not cover its totals. The carried totals are what the checkpoint file says, so they are only as trustworthy as the place you kept it. Carrying them can only raise a count, never lower one. Compare them with your run records before you adopt, and put back a copy of the ledger that holds sequence {} instead if you have one: it keeps the receipts.",
+        cp.seq, cp.seq
+    )
 }
 
 /// The warning for an adoption that carries totals the ledger cannot
@@ -2359,19 +2402,32 @@ fn adopt(
     file: &Path,
     reason: &str,
     token: Option<&str>,
-    (carry_noted, rehearsal): (bool, hallpass::RehearsalTotals),
+    (carry_noted, rehearsal, checkpoint): (bool, hallpass::RehearsalTotals, Option<&Path>),
     clock: &Clock,
 ) -> Output {
     let state = StateDir::from_env();
-    let outcome = match hallpass::adopt_guarded_rehearsal(
-        file,
-        reason,
-        clock.now,
-        &state,
-        token,
-        carry_noted,
-        rehearsal,
-    ) {
+    let adopted = match checkpoint {
+        Some(cp) => hallpass::adopt_guarded_checkpoint(
+            file,
+            reason,
+            clock.now,
+            &state,
+            token,
+            carry_noted,
+            rehearsal,
+            cp,
+        ),
+        None => hallpass::adopt_guarded_rehearsal(
+            file,
+            reason,
+            clock.now,
+            &state,
+            token,
+            carry_noted,
+            rehearsal,
+        ),
+    };
+    let outcome = match adopted {
         Ok(o) => o,
         Err(e) => return error_output("adopt", Some(file), &e),
     };
@@ -2379,18 +2435,26 @@ fn adopt(
         hallpass::AdoptCase::LedgerMissing => "the ledger was missing; a new one was started",
         hallpass::AdoptCase::LedgerChanged => "the ledger did not match its witness",
         hallpass::AdoptCase::NoWitness => "the ledger had no witness",
+        hallpass::AdoptCase::CheckpointBehind => "the ledger was behind a retained checkpoint",
         _ => "adopted",
     };
     let a = &outcome.adoption;
     let text = format!(
-        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}{}. Spent now: {}.\n",
+        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}{}{}. Spent now: {}.\n",
         safe(&outcome.ledger.display().to_string()),
         outcome.pass_id,
         a.seq,
         quoted(&a.reason),
-        carried_source(&outcome.from_note),
+        if a.checkpoint.is_some() && outcome.case == hallpass::AdoptCase::CheckpointBehind {
+            "Carried".to_owned()
+        } else {
+            carried_source(&outcome.from_note)
+        },
         hallpass::totals_text(&a.carried),
         rehearsal_units_text(outcome.rehearsal.as_ref(), a.previous.as_ref()),
+        a.checkpoint
+            .as_ref()
+            .map_or_else(String::new, checkpoint_carry_text),
         hallpass::totals_text(&outcome.totals),
     );
     Output {
@@ -2412,6 +2476,7 @@ fn adopt(
             "from_note": outcome.from_note,
             "previous": a.previous.as_ref().map(witnessed_json),
             "rehearsal": rehearsal_json(outcome.rehearsal.as_ref(), a.previous.as_ref()),
+            "checkpoint": a.checkpoint,
             "totals": outcome.totals,
             "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>(),
         }),
@@ -2576,7 +2641,7 @@ fn checkpoint(file: &Path) -> Output {
         .and_then(|loaded| hallpass::export_checkpoint_observed(&loaded, &StateDir::from_env()));
     match result {
         Ok(hallpass::CheckpointExport::Exported(checkpoint, relation)) => {
-            let value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash});
+            let value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash, "totals": checkpoint.totals});
             let (corroboration, warning) = match relation {
                 hallpass::WitnessRelation::Matches => (
                     json!({"relation": "matches", "witnessed_seq": checkpoint.seq, "exported_seq": checkpoint.seq}),
@@ -2614,22 +2679,8 @@ fn checkpoint(file: &Path) -> Output {
 }
 
 fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
-    let result = (|| {
-        let file = hallpass::open_input(checkpoint)?;
-        let mut bytes = Vec::new();
-        file.take(65537)
-            .read_to_end(&mut bytes)
-            .map_err(|e| Error::Usage(format!("cannot read checkpoint: {e}")))?;
-        if bytes.len() > 65536 {
-            return Err(Error::Usage("checkpoint too large".to_owned()));
-        }
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Usage(format!("invalid checkpoint JSON: {e}")))?;
-        let value = value.get("checkpoint").cloned().unwrap_or(value);
-        let checkpoint = serde_json::from_value(value)
-            .map_err(|e| Error::Usage(format!("invalid checkpoint: {e}")))?;
-        hallpass::verify_checkpoint(ledger, &checkpoint)
-    })();
+    let result = hallpass::read_checkpoint(checkpoint)
+        .and_then(|checkpoint| hallpass::verify_checkpoint(ledger, &checkpoint));
     match result {
         Ok(status) => {
             let (name, added, code) = match status {
@@ -2749,9 +2800,12 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             },
             &clock,
         ),
-        Command::Doctor { file, archive, .. } => {
-            cli_doctor::doctor(file, archive.as_deref(), &clock)
-        }
+        Command::Doctor {
+            file,
+            archive,
+            checkpoint,
+            ..
+        } => cli_doctor::doctor(file, archive.as_deref(), checkpoint.as_deref(), &clock),
         Command::Digest { file } => digest(file),
         Command::Ledger {
             file,
@@ -2800,6 +2854,7 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             carry_noted_totals,
             drop_rehearsal,
             carry_rehearsal,
+            checkpoint,
             ..
         } => {
             let rehearsal = drop_rehearsal.as_ref().map_or(
@@ -2811,13 +2866,13 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
                 |proof| hallpass::RehearsalTotals::Drop(proof.clone()),
             );
             if *preview {
-                preview_adopt(file, *carry_noted_totals, rehearsal)
+                preview_adopt(file, *carry_noted_totals, rehearsal, checkpoint.as_deref())
             } else {
                 adopt(
                     file,
                     reason.as_deref().unwrap_or_default(),
                     token.as_deref(),
-                    (*carry_noted_totals, rehearsal),
+                    (*carry_noted_totals, rehearsal, checkpoint.as_deref()),
                     &clock,
                 )
             }

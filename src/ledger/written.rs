@@ -500,9 +500,16 @@ mod tests {
             proptest::collection::btree_map(text(false), number(), 0..3),
             proptest::option::of((text(false), number(), text(false), text(false))),
             (text(false), test_clock(false), text(false)),
+            proptest::option::of((number(), text(false))),
         )
             .prop_map(
-                |((seq, time, event, reason), carried, witness, (digest, test_clock, prev))| {
+                |(
+                    (seq, time, event, reason),
+                    carried,
+                    witness,
+                    (digest, test_clock, prev),
+                    checkpoint,
+                )| {
                     let adopt = AdoptLine {
                         seq,
                         time,
@@ -517,6 +524,13 @@ mod tests {
                             totals: BTreeMap::new(),
                             updated,
                             test_clock: None,
+                        }),
+                        checkpoint: checkpoint.map(|(seq, hash)| crate::Checkpoint {
+                            version: 1,
+                            pass_id: "p".to_owned(),
+                            seq,
+                            hash,
+                            totals: Some(BTreeMap::new()),
                         }),
                         test_clock,
                         prev,

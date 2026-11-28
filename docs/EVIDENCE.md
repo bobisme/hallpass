@@ -622,7 +622,11 @@ hallpass --json verify-checkpoint engagement.toml.ledger checkpoint.json
 ```
 
 `checkpoint` commits to the last verified line of the ledger. Its
-`checkpoint` object holds `version`, `pass_id`, `seq` and `hash`. Retain it
+`checkpoint` object holds `version`, `pass_id`, `seq`, `hash` and `totals`
+(per counter, what the ledger counted through that line, carried amounts
+included). The hash covers the line, and so the history before it; it does
+not cover `totals`, which are what the exporter wrote. A checkpoint from a
+hallpass before `totals` were exported has none, and still verifies. Retain it
 outside the administrative control of the ledger. `verify-checkpoint` reads
 only the ledger and the supplied checkpoint, and never reads or creates a
 witness. `exact` means the ledger ends at the checkpoint line and
@@ -675,9 +679,57 @@ and proves nothing. After any restore, before the next spend:
    `exact` or `extended` (exit 0): the ledger still holds the exported line.
    `mismatch` (exit 2): the ledger was rolled back or replaced, and spends
    after the checkpoint may be lost.
-3. On `mismatch`, do not spend. Find the lost spends in the callers' own
-   journals and the target's records, restore the newer ledger if one
-   exists, or have the owner decide how much of the approval is left.
+   `hallpass doctor engagement.toml --checkpoint checkpoint.json` makes the
+   same comparison, read only, and names the next step.
+3. On `mismatch`, do not spend. If a newer copy of the ledger exists
+   (`verify-checkpoint` says `exact` or `extended` for it), put it back: it
+   keeps the receipts. Otherwise follow what doctor names, as below.
+
+What doctor does with each relation:
+
+| `verify-checkpoint` relation | `doctor --checkpoint` | Next step |
+| --- | --- | --- |
+| `exact`, `extended` | finding `checkpoint-holds` | Nothing: the ledger holds the line. |
+| `shorter`, ledger counts no more than the checkpoint | **blocked** `checkpoint-behind` | `adopt --checkpoint --preview`, below. |
+| `shorter`, checkpoint without `totals` | **blocked** `checkpoint-behind` | Put back a copy that holds the line, or have the owner decide. |
+| `shorter`, ledger counts more of some counter | **blocked** `checkpoint-fork` | As for `mismatch`. |
+| `mismatch` | **blocked** `checkpoint-fork` | Put back a copy that holds the line, or stop and have the owner decide: hallpass does not merge two histories. |
+| `foreign` | **blocked** `checkpoint-foreign` | Give the checkpoint of this pass. |
+| `shorter` or `mismatch`, already adopted | finding `checkpoint-adopted` | Nothing more for the checkpoint. |
+
+When the ledger is behind the checkpoint and no copy is left, record the
+loss with the checkpoint:
+
+```sh
+hallpass --json adopt engagement.toml --checkpoint checkpoint.json --preview
+hallpass --json adopt engagement.toml --checkpoint checkpoint.json \
+  --reason 'whole-machine restore; checkpoint from the ticket' --token "$token"
+```
+
+The adoption (case `checkpoint-behind`) carries, per counter, what the
+checkpoint's `totals` record beyond the ledger's, so every count rises to at
+least what the checkpoint shows; nothing is ever lowered. The adoption line
+records the checkpoint, so doctor then says `checkpoint-adopted`, and a
+second `adopt --checkpoint` with it is refused. `verify-checkpoint` still
+says `mismatch`: the lost lines are not back.
+
+Know what the checkpoint proves. It proves that this ledger once reached
+the checkpointed sequence. It does not show what the missing entries were,
+and it cannot show that the restored ledger is an older copy of the same
+history: only its length is compared. The totals are what the checkpoint
+file says, and nothing authenticates them beyond the place you kept it. A
+total raised by mistake only spends budget; one lowered would carry too
+little, so keep the checkpoint where it cannot be edited. Compare the
+preview's carry with your run records before you adopt. hallpass refuses
+the adoption when the ledger counts more of a counter than the checkpoint
+records (counts only grow, so the histories differ), when the checkpoint
+records no totals, and for any relation other than `shorter`.
+
+The receipts of the lost entries are gone, so the adoption may have lost
+caller references: from it on, a spend with `--require-new-ref` is refused
+as `reference-inconclusive` until `reconcile-references` records the
+references your run records show for the lost entries. Doctor names that
+command next, and is healthy after it.
 
 A restore older than your newest checkpoint is caught. One newer than it is
 not, so export often enough that the gap is a loss you accept.
