@@ -1499,8 +1499,9 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `reconciled_at` (the first 64 sequences of the reference reconciliations
   that list the reference, empty when none does). **reconcile** has
   `pass_id`, `witness`, `adoption_count` and `rows` (list of `{caller_ref,
-  result, candidate_count, sequences, truncated, differences,
-  reconciled_at}` in manifest order; each entry of `differences` is
+  result, reason, candidate_count, sequences, truncated, differences,
+  reconciled_at}` in manifest order; `reason` is `targets-unrecorded` for an
+  `incomplete` row and null otherwise; each entry of `differences` is
   `{sequence, field, expected, recorded}`, where `expected` and `recorded`
   are numbers for `charge.<counter>` and `targets.count`, strings for the
   other fields, and null when that side has none; `reconciled_at` as in

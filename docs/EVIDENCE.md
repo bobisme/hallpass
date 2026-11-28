@@ -562,7 +562,8 @@ string, such as `"5"`.) Fields are `digest`, `charge.<counter>`,
 `targets.count`, `target[n]` and `name[n]`. With several candidates, the list
 holds the differences of each candidate within the sample cap, and `sequence`
 tells them apart. Missing retained targets
-are incomplete and duplicate references are ambiguous. The result only
+are incomplete, with `reason` `targets-unrecorded` (null on every other row),
+and duplicate references are ambiguous. The result only
 reconciles recorded accounting; it does not establish external actions, retries
 or refunds. Verification failures and malformed manifests exit 1, discrepancies
 exit 2, and a complete match exits 0.

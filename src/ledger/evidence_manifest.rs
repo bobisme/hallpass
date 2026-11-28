@@ -9,6 +9,8 @@ use std::path::Path;
 
 pub const MAX_MANIFEST_BYTES: u64 = 1_048_576;
 pub const MAX_MANIFEST_ROWS: usize = 1024;
+/// The `reason` of an `incomplete` row: the unit lists targets, but the debit recorded none.
+const TARGETS_UNRECORDED: &str = "targets-unrecorded";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -35,6 +37,9 @@ struct ExpectedTarget {
 pub struct ReconcileRow {
     pub caller_ref: String,
     pub result: &'static str,
+    /// Why the row is `incomplete`: `targets-unrecorded` when the manifest
+    /// lists targets and the debit recorded none. Null for every other row.
+    pub reason: Option<&'static str>,
     pub candidate_count: u64,
     pub sequences: Vec<u64>,
     pub truncated: bool,
@@ -342,6 +347,23 @@ fn validate_targets(row: usize, r: &str, targets: &[ExpectedTarget]) -> Result<(
     }
     Ok(())
 }
+/// One row per manifest unit, each `absent` until a debit is found.
+fn absent_rows(units: &[Unit]) -> Vec<ReconcileRow> {
+    units
+        .iter()
+        .map(|u| ReconcileRow {
+            caller_ref: u.caller_ref.clone(),
+            result: "absent",
+            reason: None,
+            candidate_count: 0,
+            sequences: Vec::new(),
+            truncated: false,
+            differences: Vec::new(),
+            reconciled_at: Vec::new(),
+        })
+        .collect()
+}
+
 /// Reconcile one bounded manifest against verified available ledger history.
 ///
 /// # Errors
@@ -358,19 +380,7 @@ pub fn reconcile(
         .enumerate()
         .map(|(i, u)| (u.caller_ref.as_str(), i))
         .collect();
-    let mut rows: Vec<_> = manifest
-        .units
-        .iter()
-        .map(|u| ReconcileRow {
-            caller_ref: u.caller_ref.clone(),
-            result: "absent",
-            candidate_count: 0,
-            sequences: Vec::new(),
-            truncated: false,
-            differences: Vec::new(),
-            reconciled_at: Vec::new(),
-        })
-        .collect();
+    let mut rows = absent_rows(&manifest.units);
     let mut reconciled_rows = 0_usize;
     let view = visit_view(loaded, state, false, &mut |event| {
         if let VerifiedEvent::Reconcile(r) = event {
@@ -428,6 +438,9 @@ pub fn reconcile(
             dir: state.path().ok().map(Path::to_owned),
             detail: reason,
         });
+    }
+    for row in &mut rows {
+        row.reason = (row.result == "incomplete").then_some(TARGETS_UNRECORDED);
     }
     let result = if rows.iter().all(|r| r.result == "match") {
         "match"

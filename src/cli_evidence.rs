@@ -537,6 +537,12 @@ pub fn reconcile(file: &Path, manifest: &Path) -> Output {
                 ),
             }
         );
+        if let Some(reason) = row.reason {
+            let _ = writeln!(
+                text,
+                "      reason {reason}: the manifest lists targets, but the debit was spent without --record-target; remove the targets from the unit to skip endpoint evidence"
+            );
+        }
         if !row.reconciled_at.is_empty() {
             let _ = writeln!(
                 text,
