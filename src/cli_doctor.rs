@@ -735,6 +735,12 @@ fn corrupt_step(
     lines: &mut Vec<String>,
 ) -> Step {
     let pass = shown(file);
+    if hallpass::preview_drop_blank_tail(file, state).is_ok() {
+        return (
+            argv(["hallpass", "repair", &pass, "--drop-blank-tail", "--preview"]),
+            "Everything after the last line is empty lines or white space, and that last line is the one the witness recorded. The preview prints the token for the repair, which removes the blank tail and changes nothing else.".to_owned(),
+        );
+    }
     if cut_short && hallpass::preview_restore_final_newline(file, state).is_ok() {
         return (
             argv([
@@ -824,10 +830,11 @@ pub fn last_resort(file: &Path, report: &hallpass::evidence::BackupReport) -> Op
     match hallpass::read_summary(&loaded, &state) {
         Err(Error::LedgerChanged { .. }) => {}
         Err(Error::LedgerCorrupt { last, complete, .. }) => {
-            if last
-                && !complete
-                && (hallpass::preview_restore_final_newline(file, &state).is_ok()
-                    || hallpass::preview_drop_torn_tail(file, &state).is_ok())
+            if hallpass::preview_drop_blank_tail(file, &state).is_ok()
+                || (last
+                    && !complete
+                    && (hallpass::preview_restore_final_newline(file, &state).is_ok()
+                        || hallpass::preview_drop_torn_tail(file, &state).is_ok()))
             {
                 return None;
             }
@@ -904,10 +911,36 @@ fn missing_step(
             ),
         );
     }
+    let moved = moved_aside(&missing.path);
     (
         next,
-        "First put the ledger back beside the pass if a copy exists (restore it from a backup). If it is really lost, the preview shows what an adoption would carry and prints its token; it records nothing.".to_owned(),
+        if moved.is_empty() {
+            "First put the ledger back beside the pass if a copy exists (restore it from a backup). If it is really lost, the preview shows what an adoption would carry and prints its token; it records nothing.".to_owned()
+        } else {
+            format!(
+                "You moved the damaged ledger aside ({}), and no backup copy was found, so go on with the preview: it shows what an adoption would carry and prints its token; it records nothing. If a backup copy turns up after all, put it beside the pass instead of adopting.",
+                moved.join(", ")
+            )
+        },
     )
+}
+
+/// The files `LEDGER.damaged` and `LEDGER.damaged-N` that are beside the
+/// pass: the ledger moved aside by the advised last-resort step.
+fn moved_aside(ledger: &Path) -> Vec<String> {
+    let name = shown(ledger);
+    let mut found = Vec::new();
+    for n in 1..=100 {
+        let candidate = if n == 1 {
+            format!("{name}.damaged")
+        } else {
+            format!("{name}.damaged-{n}")
+        };
+        if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.is_file()) {
+            found.push(candidate);
+        }
+    }
+    found
 }
 
 /// The step for a ledger intact elsewhere: move it here, or, with a pass

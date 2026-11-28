@@ -328,11 +328,12 @@ enum Command {
     /// witness proves it was never counted; the removed bytes are kept in a
     /// new file beside the ledger (LEDGER.torn-N). --restore-final-newline
     /// adds the missing line end to a last line that is whole, chains, and is
-    /// the line the witness recorded. Anything else is refused and nothing is
-    /// changed.
+    /// the line the witness recorded. --drop-blank-tail removes empty lines
+    /// (or white space) after the last line, when the witness recorded that
+    /// last line. Anything else is refused and nothing is changed.
     #[command(
         group(clap::ArgGroup::new("repair_check").required(true).args(["preview", "token"])),
-        group(clap::ArgGroup::new("repair_kind").required(true).args(["drop_torn_tail", "restore_final_newline"]))
+        group(clap::ArgGroup::new("repair_kind").required(true).args(["drop_torn_tail", "restore_final_newline", "drop_blank_tail"]))
     )]
     Repair {
         /// The pass file.
@@ -343,6 +344,9 @@ enum Command {
         /// Add the missing line end to a whole last line that the witness recorded.
         #[arg(long)]
         restore_final_newline: bool,
+        /// Remove empty lines or white space after the last line, which the witness recorded.
+        #[arg(long)]
+        drop_blank_tail: bool,
         /// Show what would be removed, and the token, without changing anything.
         #[arg(long)]
         preview: bool,
@@ -2821,10 +2825,16 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
         Command::Repair {
             file,
             restore_final_newline,
+            drop_blank_tail,
             preview,
             token,
             ..
-        } => cli_repair::repair(file, *restore_final_newline, *preview, token.as_deref()),
+        } => cli_repair::repair(
+            file,
+            (*restore_final_newline, *drop_blank_tail),
+            *preview,
+            token.as_deref(),
+        ),
         Command::ReconcileReferences {
             file,
             adoption,

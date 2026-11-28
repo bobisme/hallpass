@@ -201,8 +201,9 @@ fn history_guide(name: &str) -> Guide {
                 "hallpass --format json repair engagement.pass.toml --drop-torn-tail --preview",
                 "hallpass --format json repair engagement.pass.toml --drop-torn-tail --token \"$token\"",
                 "hallpass --format json repair engagement.pass.toml --restore-final-newline --preview",
+                "hallpass --format json repair engagement.pass.toml --drop-blank-tail --preview",
             ],
-            "Use this when a command fails ledger-corrupt because the last line is cut short (no line end), for example after a disk filled up during a spend. The preview checks that every complete line verifies, that the witness recorded one of them, and that the cut-short bytes start the next line hallpass would write. Review seq, witness_seq and removed_bytes, then supply the token. The removed bytes are kept in the file named by copy. If the cut-short last line is whole and the witness recorded it, --drop-torn-tail refuses and --restore-final-newline (same preview and --token flow) adds the missing line end and drops nothing. Any other damage is refused: restore the ledger from a backup instead.",
+            "Use this when a command fails ledger-corrupt because the last line is cut short (no line end), for example after a disk filled up during a spend. The preview checks that every complete line verifies, that the witness recorded one of them, and that the cut-short bytes start the next line hallpass would write. Review seq, witness_seq and removed_bytes, then supply the token. The removed bytes are kept in the file named by copy. If the cut-short last line is whole and the witness recorded it, --drop-torn-tail refuses and --restore-final-newline (same preview and --token flow) adds the missing line end and drops nothing. If empty lines were added after the last line (for example by `echo >> ledger`) and the witness recorded that last line, --drop-blank-tail (same flow) removes them. Any other damage is refused: restore the ledger from a backup instead.",
         ),
         "reconcile-references" => (
             &[

@@ -1348,6 +1348,7 @@ fn damaged_totals(
 /// [`Error::NotRegular`], before reading any, a path that is a FIFO, a
 /// device, a socket or a directory: that is a wrong argument, not a damaged
 /// backup. A link, a missing file or a damaged ledger is reported in its row.
+#[allow(clippy::too_many_lines)]
 pub fn compare_backups_with_ancestry(
     loaded: &LoadedPass,
     state: &StateDir,
@@ -1421,7 +1422,12 @@ pub fn compare_backups_with_ancestry(
             // A lock still held says nothing about the backup: try again.
             Err(e @ Error::LockTimeout { .. }) => return Err(e),
             Err(e) => {
-                errors += 1;
+                // The damaged live ledger is why one compares, not a failed backup.
+                if is_damaged_live_ledger(loaded, path, &e) {
+                    warnings.push(DAMAGED_LIVE_WARNING.to_owned());
+                } else {
+                    errors += 1;
+                }
                 row.error = Some(BackupError {
                     code: e.code(),
                     message: e.read_only_message(),
@@ -1454,6 +1460,18 @@ pub fn compare_backups_with_ancestry(
         warnings,
         ancestry: ancestry_result,
     })
+}
+
+const DAMAGED_LIVE_WARNING: &str = "The ledger beside the pass is damaged. It is shown in its row, but it is not counted as an unreadable backup: the result follows the other copies.";
+
+/// Whether `error` says the ledger beside the pass, given as `path`, is
+/// damaged.
+fn is_damaged_live_ledger(loaded: &LoadedPass, path: &Path, error: &Error) -> bool {
+    matches!(error, Error::LedgerCorrupt { .. })
+        && std::fs::canonicalize(path)
+            .ok()
+            .zip(std::fs::canonicalize(super::ledger_path(&loaded.path)).ok())
+            .is_some_and(|(a, b)| a == b)
 }
 
 fn analyze_ancestry(

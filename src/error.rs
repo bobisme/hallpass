@@ -406,7 +406,7 @@ impl Error {
                 detail,
             } => (
                 format!("the ledger is damaged at line {line}, so nothing more can be spent"),
-                if *last && !*complete && detail == CUT_SHORT {
+                if (*last && !*complete && detail == CUT_SHORT) || detail == BLANK_LINE {
                     doctor(&pass_of(path))
                 } else {
                     Some(format!(
@@ -829,6 +829,10 @@ fn without_stop(detail: &str) -> &str {
 /// The detail of [`Error::LedgerCorrupt`] for a last line with no line end.
 pub const CUT_SHORT: &str = "the last line is cut short (no line end)";
 
+/// The detail of [`Error::LedgerCorrupt`] for a line that is empty or only
+/// white space.
+pub const BLANK_LINE: &str = "the line is blank (empty, or only white space)";
+
 /// What to do about a damaged ledger, by where the damage is.
 fn corrupt_advice(
     path: &std::path::Path,
@@ -845,6 +849,11 @@ fn corrupt_advice(
     if complete {
         format!(
             "the line is complete, not cut short, so do not remove it or edit it by hand. {backup}"
+        )
+    } else if detail == BLANK_LINE && line > 1 {
+        format!(
+            "a blank line is not a line hallpass wrote (for example `echo >> ledger` adds one). Do not edit the ledger by hand: if everything from that line on is blank and the line before it is the one the witness recorded, `hallpass repair {pass} --drop-blank-tail --preview` removes the blank lines and changes nothing else. If it refuses, {}",
+            backup.replacen('R', "r", 1)
         )
     } else if last && line > 1 && detail == CUT_SHORT {
         format!(

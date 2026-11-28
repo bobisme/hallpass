@@ -7,10 +7,14 @@ use serde_json::{Value, json};
 
 use super::{OK, Output, error_output, safe};
 
-pub fn repair(file: &Path, newline: bool, preview: bool, token: Option<&str>) -> Output {
+/// `kinds` is (`--restore-final-newline`, `--drop-blank-tail`).
+pub fn repair(file: &Path, kinds: (bool, bool), preview: bool, token: Option<&str>) -> Output {
     let state = StateDir::from_env();
-    if newline {
+    if kinds.0 {
         return restore_newline(file, &state, preview, token);
+    }
+    if kinds.1 {
+        return drop_blank(file, &state, preview, token);
     }
     let result = match token {
         Some(token) if !preview => hallpass::drop_torn_tail(file, &state, token),
@@ -101,6 +105,50 @@ fn restore_newline(file: &Path, state: &StateDir, preview: bool, token: Option<&
             "seq": done.seq,
             "witness_seq": done.seq,
             "length": done.length,
+            "token": done.token,
+        }),
+        text,
+    }
+}
+
+/// `--drop-blank-tail`: the preview and the guarded repair.
+fn drop_blank(file: &Path, state: &StateDir, preview: bool, token: Option<&str>) -> Output {
+    let result = match token {
+        Some(token) if !preview => hallpass::drop_blank_tail(file, state, token),
+        _ => hallpass::preview_drop_blank_tail(file, state),
+    };
+    let done = match result {
+        Ok(done) => done,
+        Err(e) => return error_output("repair", Some(file), &e),
+    };
+    let ledger = safe(&done.ledger.display().to_string()).into_owned();
+    let text = if done.repaired {
+        format!(
+            "REPAIRED: removed {} bytes of blank lines after sequence {} of {ledger}. No line hallpass wrote was changed; nothing was recorded or permitted.\n",
+            done.removed_bytes, done.seq
+        )
+    } else {
+        format!(
+            "BLANK TAIL PREVIEW: the ledger {ledger} ends with {} bytes of empty lines or white space after sequence {}, which is the line the witness recorded. To remove those bytes, and nothing else, run `hallpass repair {} --drop-blank-tail --token TOKEN` with this token. Token: {}\n",
+            done.removed_bytes,
+            done.seq,
+            safe(&file.display().to_string()),
+            done.token
+        )
+    };
+    Output {
+        code: OK,
+        json: json!({
+            "command": "repair",
+            "repair": "drop-blank-tail",
+            "result": if done.repaired { "repaired" } else { "preview" },
+            "file": file.display().to_string(),
+            "ledger": done.ledger.display().to_string(),
+            "pass_id": done.pass_id,
+            "seq": done.seq,
+            "witness_seq": done.seq,
+            "kept_bytes": done.kept_bytes,
+            "removed_bytes": done.removed_bytes,
             "token": done.token,
         }),
         text,

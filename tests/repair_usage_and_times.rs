@@ -67,7 +67,7 @@ fn repair_usage_names_the_required_arguments_and_no_global_flag() {
     assert!(stderr.contains("Usage: hallpass repair"), "{stderr}");
     assert!(stderr.contains("<--preview|--token <TOKEN>>"), "{stderr}");
     assert!(
-        stderr.contains("<--drop-torn-tail|--restore-final-newline>"),
+        stderr.contains("<--drop-torn-tail|--restore-final-newline|--drop-blank-tail>"),
         "{stderr}"
     );
 }
