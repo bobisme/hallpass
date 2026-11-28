@@ -203,8 +203,12 @@ fn walk_value(
 }
 
 /// `0`, or digits that do not start with `0`, with an optional `-` (a
-/// negative number is refused later, where the field is known).
+/// negative number is refused later, where the field is known). `-0` is
+/// refused here, as `+0` is: it is zero written with a sign.
 fn is_plain_decimal(raw: &str) -> bool {
+    if raw == "-0" {
+        return false;
+    }
     let digits = raw.strip_prefix('-').unwrap_or(raw);
     !digits.is_empty()
         && digits.bytes().all(|b| b.is_ascii_digit())
@@ -245,7 +249,9 @@ mod tests {
         for good in ["0", "6", "65535", "-1", "1000000000000"] {
             assert!(is_plain_decimal(good), "{good}");
         }
-        for bad in ["", "+6", "0x10", "0o17", "0b1", "1_000", "-", "007", "6 "] {
+        for bad in [
+            "", "+6", "+0", "-0", "0x10", "0o17", "0b1", "1_000", "-", "007", "6 ",
+        ] {
             assert!(!is_plain_decimal(bad), "{bad}");
         }
     }

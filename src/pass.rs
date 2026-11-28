@@ -1028,6 +1028,10 @@ fn parse_ports(w: &mut Walker, t: &Table, p: &str) -> Option<PortSet> {
                 Ok(port) if port != 0 => Ok((port, port)),
                 _ => Err(format!("{n} is not a port 1-65535")),
             },
+            Value::String(s) if !s.contains('-') => Err(format!(
+                "{} is a port in quotes; write the port as a number, for example 443. Quotes are for a range such as \"8000-8100\"",
+                crate::display_quoted(s)
+            )),
             Value::String(s) => PortSet::parse_element(s),
             other => Err(format!("{} is not a port; {example}", kind(other))),
         };

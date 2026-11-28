@@ -264,7 +264,7 @@ fn labels_that_differ_only_in_letter_case_are_refused() {
 fn a_port_listed_twice_is_refused_and_named() {
     for (ports, message) in [
         ("[443, 443]", "lists `443` twice; remove one"),
-        ("[443, \"443\"]", "lists `443` twice; remove one"),
+        ("[443, \"443-443\"]", "lists `443` twice; remove one"),
         (
             "[80, \"1-1024\"]",
             "lists port 80 twice, in `80` and in `1-1024`; list each port once",

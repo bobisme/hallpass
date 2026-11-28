@@ -343,11 +343,12 @@ JSON reports each total as a decimal string to preserve its exact value.
 
 ### Ports and protocols
 
-Ports are 1-65535. A range is `"start-end"` (inclusive, start not above end,
-no spaces, no leading zeros). An empty list is refused, and so is a port
-listed twice in one destination: `[443, 443]`, or `[80, "1-1024"]`, whose
-range holds 80 again. The problem names the port. Ranges that only touch,
-such as `["1-80", "81-100"]`, are accepted.
+Ports are 1-65535, written as numbers: `443`, not `"443"`. A quoted string
+is a range only: `"start-end"` (inclusive, start not above end, no spaces,
+no leading zeros). A quoted single port is refused. An empty list is
+refused, and so is a port listed twice in one destination: `[443, 443]`, or
+`[80, "1-1024"]`, whose range holds 80 again. The problem names the port.
+Ranges that only touch, such as `["1-80", "81-100"]`, are accepted.
 
 `hallpass lint` gives a `wide-port-grant` finding for a destination that
 grants more than 1,024 ports, or every port (`"1-65535"`), with the count.
