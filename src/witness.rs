@@ -509,7 +509,8 @@ pub struct DamageNote {
     hallpass_witness_damage: u32,
     pass_id: String,
     witness: String,
-    /// The witnessed sequence.
+    /// The sequence of the line the witness names (its own sequence,
+    /// unless that was changed).
     pub seq: u64,
     /// The totals the damaged witness records.
     pub recorded: BTreeMap<String, u64>,
@@ -538,12 +539,14 @@ impl StateDir {
     }
 
     /// Note that the witness `w`, still on disk, was proved damaged: at
-    /// its sequence the verified ledger had `verified`. Best effort, as the
-    /// other notes; nothing is noted unless the file still holds `w`.
+    /// `seq`, the sequence of the line it names, the verified ledger had
+    /// `verified`. Best effort, as the other notes; nothing is noted unless
+    /// the file still holds `w`.
     pub(crate) fn record_damage(
         &self,
         pass_id: &str,
         w: &Witnessed,
+        seq: u64,
         verified: &BTreeMap<String, u64>,
     ) {
         let Some(bytes) = self.witness_bytes(pass_id) else {
@@ -560,7 +563,7 @@ impl StateDir {
             hallpass_witness_damage: 1,
             pass_id: pass_id.to_owned(),
             witness: Digest::of(&bytes).to_string(),
-            seq: w.seq,
+            seq,
             recorded: w.totals.clone(),
             verified: verified.clone(),
         };

@@ -7,7 +7,13 @@ example `hallpass repair PASS --drop-torn-tail --preview`,
 with the real paths, and lists other findings. In JSON, read `result`,
 `problem`, `next` (an argv array) and `findings`. It never names `adopt`
 while the ledger may be intact elsewhere. Run the named command, then
-doctor again, until `result` is `healthy`.
+doctor again, until `result` is `healthy`. When `compare-backups` finds no
+copy that holds the line the witness recorded, a spend fails with
+`ledger-changed` or `ledger-corrupt`, every other candidate was read and no
+other ledger for the pass id is in sight, its `advice` has an entry of type
+`last-resort` whose `argv` moves the ledger aside (`mv LEDGER
+LEDGER.damaged`). Run it only when no other backup copy exists; doctor then
+names the adoption preview.
 
 These commands read local files under shared ledger locks. They produce historical evidence. Sending a unit of work still requires the caller's normal authorization and accounting decision. The audits release the lock before they verify signatures, so a spend never waits for `ssh-keygen`.
 
@@ -486,6 +492,11 @@ hallpass --json ledger engagement.toml
 ```
 
 The comparison performs no file discovery, restoration, adoption or witness update.
+
+A candidate that holds the line the witness names, but at another sequence
+than the witness records, proves the witness damaged (its sequence was
+changed): the warning says so, as for a candidate that holds the witnessed
+line with other totals.
 
 ### Comparing successive backups
 

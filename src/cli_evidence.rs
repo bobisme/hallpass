@@ -455,6 +455,10 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
         let _ = writeln!(text, "Warning: {}", super::safe_message(warning));
     }
     let mut value = json!(report);
+    if let Some(advice) = super::cli_doctor::last_resort(file, &report) {
+        let _ = writeln!(text, "{}", advice["message"].as_str().unwrap_or_default());
+        value["advice"] = json!([advice]);
+    }
     let (result, code) = if report.errors > 0 {
         ("partial-error", ERROR)
     } else if report.assessment == "preserved" {

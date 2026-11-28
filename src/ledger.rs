@@ -1384,7 +1384,7 @@ fn compare(
                 {
                     // Remember it: once the ledger is lost, nothing else
                     // could show that these totals are wrong.
-                    state.record_damage(pass_id, w, spent);
+                    state.record_damage(pass_id, w, w.seq, spent);
                     return Err(state.damaged(
                         pass_id,
                         &format!(
@@ -1402,6 +1402,23 @@ fn compare(
                     WitnessStatus::Extended { added }
                 };
                 return Ok((status, moved));
+            }
+            // The ledger verifies and holds the line the witness names, but
+            // at another sequence: the line records its own sequence, so
+            // hallpass wrote it there, and the witness's sequence was
+            // changed after it was written.
+            if let Some((seq, spent)) = witnessed_line_at(ledger, w) {
+                if !same_totals(&spent, &w.totals) {
+                    state.record_damage(pass_id, w, seq, &spent);
+                }
+                return Err(state.damaged(
+                    pass_id,
+                    &format!(
+                        "it records sequence {}, but the line it names is sequence {seq} of the verified ledger, with spent: {} there",
+                        w.seq,
+                        totals_text(&spent)
+                    ),
+                ));
             }
             let fork = divergence(ledger, p.seq, &state.forks(pass_id));
             let mut detail = match (w.seq > p.seq, fork) {
@@ -1491,6 +1508,63 @@ fn divergence(ledger: &Path, seq: u64, forks: &[Fork]) -> Option<Fork> {
         .into_iter()
         .find(|f| written(f.seq - 1, &f.prev) && !written(f.seq, &f.hash))
         .cloned()
+}
+
+/// The sequence of the line in `ledger` (verified to its end by the caller,
+/// which holds its lock) whose hash is the witness's `tail`, when that is
+/// not the witnessed sequence, and the verified totals there. Each line
+/// records its own sequence and the hash of the line before it, so such a
+/// line is the one hallpass wrote at that sequence, with that history: the
+/// witness, not the ledger, was changed. `None` when no line has that hash
+/// or the ledger cannot be read again. Read only on the way to a refusal.
+fn witnessed_line_at(ledger: &Path, w: &Witnessed) -> Option<(u64, BTreeMap<String, u64>)> {
+    // The caller holds a lock on this ledger (see `divergence`).
+    let file = open_no_follow(ledger, OpenOptions::new().read(true)).ok()?;
+    let mut reader = BufReader::new(&file);
+    let mut line = Vec::new();
+    let mut seq = None;
+    let mut header = true;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            break;
+        }
+        if line.pop() != Some(b'\n') {
+            break;
+        }
+        if Digest::of(&line) == w.tail {
+            seq = Some(if header {
+                0
+            } else {
+                match Line::decode(&line)? {
+                    Line::Spend(e) => e.seq,
+                    Line::Debit(e) => e.seq,
+                    Line::DebitBatch(e) => e
+                        .seq
+                        .checked_add(u64::try_from(e.units.len().checked_sub(1)?).ok()?)?,
+                    Line::Adopt(a) => a.seq,
+                    Line::Reconcile(r) => r.seq,
+                }
+            });
+            break;
+        }
+        header = false;
+    }
+    let seq = seq.filter(|seq| *seq != w.seq)?;
+    let file = open_no_follow(ledger, OpenOptions::new().read(true)).ok()?;
+    let parsed = scan_ledger(
+        ledger,
+        BufReader::new(&file),
+        false,
+        Some(seq),
+        None,
+        &mut |_| Ok(()),
+    )
+    .ok()?;
+    (parsed.prefix == Some((seq, w.tail)))
+        .then_some(parsed.prefix_spent)
+        .flatten()
+        .map(|spent| (seq, spent))
 }
 
 /// The error for a pass with no ledger beside it whose witness recorded

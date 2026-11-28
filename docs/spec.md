@@ -487,6 +487,7 @@ path and the time. Every command that reads the ledger (`status`,
 | present | the witnessed line is there, and `k` entries follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added entries; they count |
 | present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
 | present | the witnessed line is there, but the witness's totals are not the ledger's verified totals at that sequence (a counter added, removed or changed; a counter at 0 counts as absent) | the witness is damaged: as in the next row |
+| present | the witnessed line is not at the witnessed sequence, but the line the witness's hash names is in the verified ledger at another sequence (a line records its own sequence, so the witness's sequence was changed) | the witness is damaged: as in the next row |
 | present | could not be read (no state directory, damaged, not private) | `spend` and `adopt`: **error `witness-unavailable`**. `status`, `permits`, `ledger`: answered, with a warning and `not-checked` |
 
 The same evidence, by command:
@@ -1309,7 +1310,7 @@ real paths, or nothing to do. It uses the library's own errors and advice:
 witness recorded, names `repair --restore-final-newline --preview`; a
 cut-short last line that the repair preview accepts names
 `repair --drop-torn-tail --preview`; other damage and `ledger-changed`
-name `compare-backups`, and with no other ledger for the pass id in sight their step also gives the last resort for a pass with no backup (move the ledger aside, then adopt, with the exact commands and the warning that the moved ledger's receipts leave the chain); `ledger-elsewhere` names the `mv` of the live ledger
+name `compare-backups`, and with no other ledger for the pass id in sight their step also gives the last resort for a pass with no backup (move the ledger aside, then adopt, with the exact commands and the warning that the moved ledger's receipts leave the chain), and `compare-backups` with no copy that holds the witnessed line gives the move as `last-resort` advice with its `argv`, so following the named commands ends; `ledger-elsewhere` names the `mv` of the live ledger
 (or a `diff` with the live pass file when one is beside it), and
 `ledger-missing` names `adopt --preview`. It never names `adopt` while the
 ledger may be intact elsewhere: when a file is still where the witness last

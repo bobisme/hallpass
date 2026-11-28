@@ -1293,7 +1293,8 @@ fn check_backup_paths(paths: &[PathBuf]) -> Result<(), Error> {
 }
 
 /// The warning for a candidate that holds the witnessed line with other
-/// totals there than the witness records: the witness is damaged.
+/// totals there than the witness records, or holds it at another sequence:
+/// the witness is damaged.
 fn damaged_totals(
     state: &StateDir,
     id: &str,
@@ -1302,8 +1303,26 @@ fn damaged_totals(
     path: &Path,
 ) -> Option<String> {
     let w = witness?;
+    if parsed.prefix != Some((w.seq, w.tail)) {
+        // The candidate holds the line the witness names at another
+        // sequence: the witness's sequence was changed.
+        let (seq, spent) = super::witnessed_line_at(path, w)?;
+        return Some(
+            state
+                .damaged(
+                    id,
+                    &format!(
+                        "it records sequence {}, but {} holds the line it names at sequence {seq}, with spent: {} there",
+                        w.seq,
+                        crate::display_quoted(&path.display().to_string()),
+                        crate::witness::totals_text(&spent)
+                    ),
+                )
+                .to_string(),
+        );
+    }
     let spent = parsed.prefix_spent.as_ref()?;
-    if parsed.prefix != Some((w.seq, w.tail)) || crate::witness::same_totals(spent, &w.totals) {
+    if crate::witness::same_totals(spent, &w.totals) {
         return None;
     }
     Some(

@@ -686,19 +686,14 @@ type Step = (Option<Vec<String>>, String);
 /// still there (a copy of the pass, with its ledger, spent from too).
 fn changed_step(file: &Path, state: &StateDir, ledger: &Path) -> Step {
     let pass = shown(file);
-    let other = hallpass::load(file).ok().and_then(|loaded| {
-        state
-            .last_seen_ledger(&loaded.pass.id)
-            .filter(|seen| seen.is_absolute() && seen.is_file())
-            .filter(|seen| std::fs::canonicalize(ledger).ok().as_ref() != Some(seen))
-    });
-    other.map_or_else(
+    other_ledger(file, state, ledger).map_or_else(
         || {
             (
                 argv(["hallpass", "compare-backups", &pass, &shown(ledger)]),
                 format!(
-                    "Add each backup copy of the ledger after {}: compare-backups shows which copy holds the line the witness recorded. Restore that copy beside the pass.",
-                    shown(ledger)
+                    "Add each backup copy of the ledger after {}: compare-backups shows which copy holds the line the witness recorded. Restore that copy beside the pass.{}",
+                    shown(ledger),
+                    last_resort_text(&pass, ledger)
                 ),
             )
         },
@@ -756,31 +751,97 @@ fn corrupt_step(
             )),
         }
     }
-    let elsewhere = hallpass::load(file).is_ok_and(|loaded| {
-        state
-            .last_seen_ledger(&loaded.pass.id)
-            .filter(|seen| seen.is_absolute() && seen.is_file())
-            .is_some_and(|seen| std::fs::canonicalize(ledger).ok().as_ref() != Some(&seen))
-    });
     let mut step = format!(
         "Add each backup copy of the ledger after {}: compare-backups shows which copy is the good one. Restore that copy beside the pass. Do not edit the ledger by hand.",
         shown(ledger)
     );
-    if elsewhere {
+    if other_ledger(file, state, ledger).is_some() {
         step.push_str(" Another ledger for this pass id may be intact, so do not adopt: add it to compare-backups too.");
     } else {
-        let _ = write!(
-            step,
-            " If no backup copy exists, the last resort is to move this ledger aside (keep it) with `mv {ledger} {aside}`, then run doctor again: it shows the adoption preview (`hallpass adopt {pass} --preview`), and `hallpass adopt {pass} --reason \"...\"` with the token starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain.",
-            ledger = shell_word(&shown(ledger)),
-            aside = shell_word(&aside(ledger)),
-            pass = shell_word(&pass),
-        );
+        step.push_str(&last_resort_text(&pass, ledger));
     }
     (
         argv(["hallpass", "compare-backups", &pass, &shown(ledger)]),
         step,
     )
+}
+
+/// The file where the witness last saw the ledger, when that is another
+/// file that is still there: a ledger for this pass id that may be intact.
+fn other_ledger(file: &Path, state: &StateDir, ledger: &Path) -> Option<std::path::PathBuf> {
+    hallpass::load(file).ok().and_then(|loaded| {
+        state
+            .last_seen_ledger(&loaded.pass.id)
+            .filter(|seen| seen.is_absolute() && seen.is_file())
+            .filter(|seen| std::fs::canonicalize(ledger).ok().as_ref() != Some(seen))
+    })
+}
+
+/// The last resort for a damaged or changed ledger with no backup, in
+/// words (with a leading space). compare-backups gives its first command
+/// as advice ([`last_resort`]).
+fn last_resort_text(pass: &str, ledger: &Path) -> String {
+    format!(
+        " If no backup copy exists, the last resort is to move this ledger aside (keep it) with `mv {ledger} {aside}`, then run doctor again: it shows the adoption preview (`hallpass adopt {pass} --preview`), and `hallpass adopt {pass} --reason \"...\"` with the token starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain.",
+        ledger = shell_word(&shown(ledger)),
+        aside = shell_word(&aside(ledger)),
+        pass = shell_word(pass),
+    )
+}
+
+/// The advice `compare-backups` gives when its comparison leaves the
+/// operator with no copy to restore: the first command of the last resort
+/// (the `mv` of the ledger beside the pass aside) in `argv`, after which
+/// doctor names the adoption preview. Given only when all of these hold,
+/// so that it is never named while a ledger may be intact elsewhere:
+///
+/// - a spend fails with `ledger-changed` or `ledger-corrupt` (the witness
+///   was read, and is not proved damaged);
+/// - the assessment is `no-match`: no candidate holds the witnessed line;
+/// - every candidate but the ledger beside the pass was read;
+/// - doctor gives no other step: no repair of a cut-short last line
+///   applies, and no other ledger for the pass id is where the witness
+///   last saw it.
+///
+/// `None` otherwise.
+pub fn last_resort(file: &Path, report: &hallpass::evidence::BackupReport) -> Option<Value> {
+    if report.assessment != "no-match" || report.anchor.is_none() {
+        return None;
+    }
+    let state = StateDir::from_env().read_only();
+    let loaded = hallpass::load(file).ok()?;
+    let ledger = hallpass::ledger_path(file);
+    match hallpass::read_summary(&loaded, &state) {
+        Err(Error::LedgerChanged { .. }) => {}
+        Err(Error::LedgerCorrupt { last, complete, .. }) => {
+            if last
+                && !complete
+                && (hallpass::preview_restore_final_newline(file, &state).is_ok()
+                    || hallpass::preview_drop_torn_tail(file, &state).is_ok())
+            {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let live = std::fs::canonicalize(&ledger).ok()?;
+    let unread = report.candidates.iter().any(|row| {
+        row.error.is_some() && std::fs::canonicalize(&row.path).ok().as_ref() != Some(&live)
+    });
+    if unread || other_ledger(file, &state, &ledger).is_some() {
+        return None;
+    }
+    let pass = shown(file);
+    let mv = argv(["mv", &shown(&ledger), &aside(&ledger)])?;
+    Some(json!({
+        "level": "warn",
+        "type": "last-resort",
+        "message": format!(
+            "No copy given holds the line the witness recorded. Add any other backup copy of the ledger to compare-backups.{}",
+            last_resort_text(&pass, &ledger)
+        ),
+        "argv": mv,
+    }))
 }
 
 /// The step for a missing ledger. When a file is still where the witness
