@@ -369,10 +369,10 @@ from it. Every adoption record already has the `witness` and `carried`
 fields that tell the kinds apart, so the adoption line is unchanged.
 
 A new caller reference is nonblank, at most 128 characters, without
-leading or trailing spaces, and holds no control character and none of the
-characters a note refuses (line separators, Unicode format characters,
-other invisible characters and spaces other than the ASCII space): two
-references that differ only in those could look the same. Reading a
+leading or trailing spaces, and made only of ASCII characters with no
+control character: two references that differ only in a combining mark, a
+look-alike letter or hyphen (Cyrillic е, U+2010) or an invisible or
+look-alike-space character could look the same. Reading a
 ledger, and looking a reference up with `receipt` or a `reconcile`
 manifest, applies the earlier rule (nonblank, at most 128 characters, no
 control character, line separator or bidirectional control), so a

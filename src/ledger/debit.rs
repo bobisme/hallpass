@@ -197,8 +197,10 @@ pub(super) fn valid_text(text: &str, max: usize) -> bool {
 /// disguising character ([`is_disguising`]: a line separator, a Unicode
 /// format character such as U+200B or U+202E, another invisible character
 /// such as U+034F or U+FE0F, or a look-alike space such as U+00A0) and
-/// without leading or trailing spaces. Two references that differ only in
-/// such characters could look the same. The error says what is wrong, after
+/// without leading or trailing spaces, and only ASCII (a precomposed and a
+/// combining é, a Cyrillic е and a U+2010 hyphen all look like their ASCII
+/// twins). Two references that differ only in such characters could look the
+/// same. The error says what is wrong, after
 /// "the reference".
 pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
@@ -216,6 +218,12 @@ pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
             describe_disguising(c)
         ));
     }
+    if let Some(c) = text.chars().find(|c| !c.is_ascii()) {
+        return Err(format!(
+            "contains the non-ASCII character U+{:04X}, which can look the same as another character",
+            u32::from(c)
+        ));
+    }
     if text.trim() != text {
         return Err("has leading or trailing spaces".to_owned());
     }
@@ -225,7 +233,7 @@ pub(super) fn check_new_reference(text: &str) -> Result<(), String> {
 /// The rule of [`check_new_reference`], as a sentence for a message.
 pub(super) fn new_reference_rule() -> String {
     format!(
-        "A caller reference is nonblank, at most {MAX_CALLER_REF} characters, without leading or trailing spaces, control characters, line separators, Unicode format characters, other invisible characters or spaces other than the ASCII space"
+        "A caller reference is nonblank, at most {MAX_CALLER_REF} characters, without leading or trailing spaces and made only of printable ASCII characters (letters, digits, punctuation and the space)"
     )
 }
 
@@ -1967,6 +1975,7 @@ mod tests {
         defined_valid_text(text, MAX_CALLER_REF)
             && text.trim() == text
             && !text.chars().any(is_disguising)
+            && text.is_ascii()
     }
 
     fn defined_note(note: &str) -> bool {

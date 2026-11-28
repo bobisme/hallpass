@@ -519,11 +519,10 @@ previous ledger line, respectively.
 
 The note and receipt are optional. The receipt is present only if the caller
 opts in. A new caller reference is nonblank, at most 128 characters, has
-no leading or trailing spaces, and holds no control character, line or
-paragraph separator, Unicode format character, other invisible character
-or space other than the ASCII space (the characters a pass text field
-refuses), so a reference cannot differ from another only by a character
-that does not show or a look-alike space. A reader still
+no leading or trailing spaces, and holds only ASCII characters and no
+control character, so a reference cannot differ from another only by a
+character that does not show, a look-alike space, a combining mark or a
+look-alike letter. A reader still
 accepts a reference recorded under the earlier rule, which
 refused only control characters, line separators and bidirectional
 controls. The target list is optional and records the approved literals and
