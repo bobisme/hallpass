@@ -511,6 +511,30 @@ pub fn write_within_size_limit(file: &mut File, bytes: &[u8]) -> io::Result<()> 
     file.write_all(bytes)
 }
 
+/// Refuse a write to standard output or error that would pass the file size limit.
+///
+/// Only a regular file has the limit. Past it the kernel kills the process
+/// with SIGXFSZ, and the crate cannot ignore that signal without `unsafe`.
+///
+/// # Errors
+/// Returns `FileTooLarge` when the write would pass the limit.
+pub fn check_stream_write<Fd: std::os::fd::AsFd>(fd: Fd, bytes: &[u8]) -> io::Result<()> {
+    use rustix::fs::{FileType, OFlags, SeekFrom};
+    let Ok(info) = rustix::fs::fstat(&fd) else {
+        return Ok(());
+    };
+    if FileType::from_raw_mode(info.st_mode) != FileType::RegularFile {
+        return Ok(());
+    }
+    let append = rustix::fs::fcntl_getfl(&fd).is_ok_and(|f| f.contains(OFlags::APPEND));
+    let start = if append {
+        u64::try_from(info.st_size).unwrap_or(0)
+    } else {
+        rustix::fs::seek(&fd, SeekFrom::Current(0)).unwrap_or(0)
+    };
+    check_size_limit(start, bytes.len())
+}
+
 /// Refuse writing `adding` bytes to a file of `len` bytes when the file
 /// would end past the soft file size limit; see [`write_within_size_limit`].
 fn check_size_limit(len: u64, adding: usize) -> io::Result<()> {

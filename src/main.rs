@@ -2941,7 +2941,10 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
 fn stderr_text(text: &str) {
     use std::io::Write as _;
     // There is nowhere left to report a failure to write the error stream.
-    let _ = std::io::stderr().write_all(text.as_bytes());
+    // A file past `ulimit -f` would kill the process, so skip that write.
+    if hallpass::check_stream_write(std::io::stderr(), text.as_bytes()).is_ok() {
+        let _ = std::io::stderr().write_all(text.as_bytes());
+    }
 }
 
 fn stderr_line(line: &str) {
@@ -2951,6 +2954,7 @@ fn stderr_line(line: &str) {
 fn write_stdout(text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut out = std::io::stdout().lock();
+    hallpass::check_stream_write(std::io::stdout(), text.as_bytes())?;
     out.write_all(text.as_bytes())?;
     out.flush()
 }
