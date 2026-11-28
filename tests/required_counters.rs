@@ -177,6 +177,60 @@ fn cli_reports_missing_costs_and_reviews_the_rule() {
     );
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn check_shows_required_counters_in_text_and_json() {
+    let dir = tempfile::tempdir().expect("temp");
+    let required = dir.path().join("required.toml");
+    let optional = dir.path().join("optional.toml");
+    let with_target = METERED.replacen(
+        "required_counters_v1",
+        "require_target_v1 = true\nrequired_counters_v1",
+        1,
+    );
+    fs::write(&required, &with_target).expect("required pass");
+    fs::write(&optional, with_target.replace(RULE, "")).expect("optional pass");
+    for file in [&required, &optional] {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o600)).expect("mode");
+    }
+
+    let check = |file: &std::path::Path, format: &str| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_hallpass"))
+            .args(["--format", format, "check", file.to_str().expect("path")])
+            .env("HALLPASS_UNSAFE_TEST_CLOCK", "2026-11-20T09:00:00Z")
+            .env("HOME", dir.path())
+            .env("XDG_STATE_HOME", dir.path().join("state"))
+            .output()
+            .expect("check");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("UTF-8")
+    };
+
+    let required_text = check(&required, "text");
+    let optional_text = check(&optional, "text");
+    assert!(required_text.contains("Required on every debit: bytes, requests\n"));
+    assert!(optional_text.contains("Required on every debit: none\n"));
+    for text in [&required_text, &optional_text] {
+        assert!(text.contains("Every debit requires a checked destination.\n"));
+    }
+
+    let required_json: serde_json::Value =
+        serde_json::from_str(&check(&required, "json")).expect("required JSON");
+    let optional_json: serde_json::Value =
+        serde_json::from_str(&check(&optional, "json")).expect("optional JSON");
+    assert_eq!(
+        required_json["required_counters"],
+        serde_json::json!(["bytes", "requests"])
+    );
+    assert_eq!(optional_json["required_counters"], serde_json::json!([]));
+    assert_eq!(required_json["require_target"], true);
+    assert_eq!(optional_json["require_target"], true);
+}
+
 #[test]
 fn pure_permits_keeps_its_scope_and_window_semantics() {
     let named = "192.0.2.10:443/tcp@app.example.org"

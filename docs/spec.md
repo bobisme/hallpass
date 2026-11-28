@@ -1184,7 +1184,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `not-recorded`), `problems` (list of
   `{field, message}`, empty unless `invalid-pass`).
 - **init**: no more fields.
-- **check**: `digest`, `pass_id`, `require_target`, `problems` (empty),
+- **check**: `digest`, `pass_id`, `require_target`, `required_counters`
+  (sorted list, empty when none are required), `problems` (empty),
   `breadth` `{ipv4, ipv6}` (declared address counts as decimal strings),
   `now`, `test_clock`, `window_warnings` (see "Window warnings"),
   `name_restriction_overlaps` (list of `{code, named_label, unnamed_label,

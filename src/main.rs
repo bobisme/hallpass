@@ -719,6 +719,14 @@ fn check(file: &Path, clock: &Clock) -> Output {
     match hallpass::load(file) {
         Ok(loaded) => {
             let breadth = hallpass::review::breadth(&loaded.pass);
+            let required_term = if loaded.pass.required_counters.is_empty() {
+                "Required on every debit: none\n".to_owned()
+            } else {
+                format!(
+                    "Required on every debit: {}\n",
+                    loaded.pass.required_counters.join(", ")
+                )
+            };
             let target_term = if loaded.pass.require_target {
                 "Every debit requires a checked destination.\n"
             } else {
@@ -743,13 +751,14 @@ fn check(file: &Path, clock: &Clock) -> Output {
                     "digest": loaded.digest.to_string(),
                     "pass_id": loaded.pass.id,
                     "require_target": loaded.pass.require_target,
+                    "required_counters": loaded.pass.required_counters,
                     "problems": [],
                     "breadth": breadth,
                     "warnings": warnings,
                     "name_restriction_overlaps": overlaps,
                 }),
                 text: format!(
-                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{target_term}",
+                    "{}: OK, pass {} with {} destination(s) and {} ceiling(s). Declared breadth: IPv4 {}, IPv6 {}. The window is checked by `hallpass status`.\nDigest: {}\n{required_term}{target_term}",
                     file.display(),
                     loaded.pass.id,
                     loaded.pass.destinations.len(),

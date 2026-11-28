@@ -127,6 +127,7 @@ hallpass check engagement.pass.toml
 ```text
 engagement.pass.toml: OK, pass web-2026-11 with 1 destination(s) and 2 ceiling(s). Declared breadth: IPv4 1, IPv6 0. The window is checked by `hallpass status`.
 Digest: sha256:87d2830137b2c9dc893dfeda671aaff3bd71e3999c07cd33fc80a63ce3f6faf0
+Required on every debit: bytes, requests
 Every debit requires a checked destination.
 ```
 

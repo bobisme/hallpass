@@ -409,6 +409,8 @@ Changes since commit d70c09f.
 
 ### Changed
 
+- `check` text names the counters required on every debit, or says none are
+  required. Its JSON includes `required_counters` as a sorted array.
 - An atomic batch ceiling refusal distinguishes the durable balance from its
   prospective units: it reports the actual pre-batch spend, full-batch
   projection, first refused unit and that zero batch units committed.
