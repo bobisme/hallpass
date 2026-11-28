@@ -329,8 +329,29 @@ Changes since commit d70c09f.
 - `hallpass repair` needs one of `--drop-torn-tail` or
   `--restore-final-newline`.
 
+- `verify-approval`, `audit-receipts` and `audit-charges` refuse an
+  `--allowed-signers` file that group or others can write
+  (`insecure-permissions`) or another user owns (`untrusted-owner`), the pass
+  file's rule. New signature reason `key-not-permitted-for-namespace`.
+- `diff --containment` proves each NEW rule against the union of OLD's rules.
+  Reason `single-rule-coverage-unproved` is now `union-coverage-unproved`, and
+  `pair-limit` is now `work-limit`; `compared_pairs` counts the union check's
+  pairs.
+- `hallpass doctor` without `--lock-timeout-ms` waits 3 s for a lock, then
+  reports `blocked` (`lock-timeout`, exit 2) instead of waiting forever.
+- `caller.py reconcile-references` records nothing when the journals show
+  fewer debits than the adoption carried, unless `--accept-shortfall` is given.
+- A pass time with second 60 is refused in every spelling; status keeps a
+  pass time's fraction of a second. `hallpass <command> --version` is gone
+  (`hallpass --version` remains).
+
 ### Added
 
+- `HALLPASS_SSH_KEYGEN`: the absolute path of the ssh-keygen that verifies
+  signatures. Library `open_trusted_signers`, `check_stream_write`,
+  `lock_holder_pid`.
+- `caller.py reconcile-references` splits a list above 10,000 references into
+  parts and records them in order.
 - `hallpass repair --restore-final-newline` (with `--preview` and `--token`;
   library `preview_restore_final_newline`, `restore_final_newline`,
   `FinalNewline`) adds the missing line end to a whole last ledger line that
@@ -733,3 +754,17 @@ Changes since commit d70c09f.
   dropping receipts (bn-ulz6).
 - INTEGRATING says that a closed stdout loses the reply undetectably: the
   runtime reopens it on `/dev/null` before hallpass runs (bn-2i6n).
+- A local user who could write the trusted signers file could add a key for
+  the owner's principal and make an audit `complete` on a widened pass
+  (bn-11g7).
+- A reply written to a regular file past `ulimit -f` killed hallpass with
+  SIGXFSZ after it recorded a debit; it now exits 1 and says the debit IS
+  recorded (bn-bei5).
+- Doctor's loop now finishes when a damaged ledger has no backup, and doctor
+  names the lock holder instead of waiting forever (bn-875w).
+- Merged port ranges, merged networks and names spread over several rules are
+  `contained`, not `inconclusive`; a near miss is `expanded` with the exact
+  request (bn-1ixb).
+- The 10,000-reference error says how to split; the minimal caller's
+  rehearsal message names the unset variable (bn-239c).
+- `repair`'s usage line shows its real required arguments (bn-3lic).
