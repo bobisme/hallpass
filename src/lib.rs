@@ -80,6 +80,7 @@ pub use decision::{
 };
 pub use error::Summary;
 pub use error::{ElsewhereLedger, Error, MissingLedger};
+pub use files::open_trusted_checkpoint;
 pub use files::{
     Digest, LoadedPass, LockWait, MAX_PASS_BYTES, check_stream_write, future_mtime_warning, load,
     load_with_bytes, lock_holder_pid, open_input, open_trusted_signers,

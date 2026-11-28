@@ -729,11 +729,48 @@ fn check_owner_mode(
 /// [`Error::NotRegular`], [`Error::UntrustedOwner`], [`Error::Insecure`]
 /// and [`Error::Io`].
 pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
+    open_trusted(
+        path,
+        "other users can add a key for any principal to the trusted signers",
+        "check that every line in it names a key you trust, because a key added there can sign a pass",
+        "other users can rename the trusted signers file, which a link resolved to, and put their own in its place",
+        "check that the trusted signers file in it is the one you trust",
+    )
+}
+
+/// Open a retained checkpoint file (`verify-checkpoint`, `doctor
+/// --checkpoint`, `adopt --checkpoint`) under the same rule and symbolic
+/// link handling as [`open_trusted_signers`].
+///
+/// A checkpoint is the trust input against a rollback: whoever can write it
+/// can swap in an older one, and the check then says `exact`. So a file that
+/// group or others can write, or that another user owns, is refused rather
+/// than warned about.
+///
+/// # Errors
+/// As [`open_trusted_signers`].
+pub fn open_trusted_checkpoint(path: &Path) -> Result<File, Error> {
+    open_trusted(
+        path,
+        "other users can swap in an older checkpoint, so that a rolled-back ledger checks as exact",
+        "check that it is the checkpoint you exported. To write one with mode 0600, run `hallpass checkpoint PASS --output FILE`",
+        "other users can rename the checkpoint file, which a link resolved to, and put their own in its place",
+        "check that the checkpoint file in it is the one you exported",
+    )
+}
+
+fn open_trusted(
+    path: &Path,
+    who: &'static str,
+    advice: &'static str,
+    dir_who: &'static str,
+    dir_advice: &'static str,
+) -> Result<File, Error> {
     let linked = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
     let resolved;
     let path = if linked {
         resolved = fs::canonicalize(path).map_err(|e| Error::io(path, &e))?;
-        check_resolved_directories(&resolved)?;
+        check_resolved_directories(&resolved, dir_who, dir_advice)?;
         resolved.as_path()
     } else {
         path
@@ -743,8 +780,8 @@ pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
     check_owner_mode(
         path,
         (meta.uid(), rustix::process::geteuid().as_raw(), meta.mode()),
-        "other users can add a key for any principal to the trusted signers",
-        "check that every line in it names a key you trust, because a key added there can sign a pass",
+        who,
+        advice,
     )?;
     Ok(file)
 }
@@ -753,7 +790,11 @@ pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
 /// owned by the effective user or root, and not writable by group or others
 /// (a sticky directory is allowed): otherwise another user could rename the
 /// real file away and put theirs in its place.
-fn check_resolved_directories(resolved: &Path) -> Result<(), Error> {
+fn check_resolved_directories(
+    resolved: &Path,
+    who: &'static str,
+    advice: &'static str,
+) -> Result<(), Error> {
     let effective = rustix::process::geteuid().as_raw();
     for dir in resolved.ancestors().skip(1) {
         let meta = fs::metadata(dir).map_err(|e| Error::io(dir, &e))?;
@@ -769,9 +810,9 @@ fn check_resolved_directories(resolved: &Path) -> Result<(), Error> {
             return Err(Error::Insecure {
                 path: dir.to_path_buf(),
                 mode: mode & 0o7777,
-                who: "other users can rename the trusted signers file, which a link resolved to, and put their own in its place",
+                who,
                 fix: "go-w",
-                advice: "check that the trusted signers file in it is the one you trust",
+                advice,
             });
         }
     }

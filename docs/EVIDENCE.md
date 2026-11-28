@@ -207,6 +207,11 @@ hallpass --json audit-receipts engagement.toml approval-archive \
 jq -e '.result == "complete"' audit.json
 ```
 
+A gate that also runs `hallpass diff --containment` on each proposed pass
+fails every renewal under the same id, because a later `valid_until` is
+`widened`. See [Renewing or extending an approval](PASS-FORMAT.md#renewing-or-extending-an-approval)
+for what a reviewer does, and for how the audits treat the renewed revision.
+
 `--allowed-signers` may name a symbolic link, such as a Kubernetes
 `ConfigMap` or `Secret` mount or a link under `/etc`. hallpass resolves the
 link and checks the file it reaches (owned by you or root, not writable by
@@ -667,9 +672,22 @@ exit 2, and a complete match exits 0.
 ## Export and verify a checkpoint
 
 ```sh
-hallpass --json checkpoint engagement.toml > checkpoint.json
+hallpass --json checkpoint engagement.toml --output checkpoint.json
 hallpass --json verify-checkpoint engagement.toml.ledger checkpoint.json
 ```
+
+`--output FILE` creates the file with mode 0600, whatever the umask, and
+refuses an existing file or a link; give each export a new name, such as one
+with the date. A `>` redirect uses the umask instead, and under `umask 002`
+the file is 0664. `verify-checkpoint`, `doctor --checkpoint` and
+`adopt --checkpoint` apply the `--allowed-signers` rule to the checkpoint
+file: it must be owned by you or root, and not writable by group or others,
+or the command refuses it (`insecure-permissions`, exit 1) and says to run
+`chmod 600`. They refuse rather than warn because the checkpoint is the
+trust input against a rollback: whoever can write it can swap in an older one
+so that the check says `exact`. A symbolic link is allowed (a mount from
+another host, say); hallpass checks the file it reaches and each directory
+above it.
 
 `checkpoint` commits to the last verified line of the ledger. Its
 `checkpoint` object holds `version`, `pass_id`, `seq`, `hash`, `totals`
@@ -723,7 +741,7 @@ Export a checkpoint now and then, and keep it where a snapshot or backup of
 this machine does not reach (another host, a password manager, a ticket):
 
 ```sh
-hallpass --json checkpoint engagement.toml > checkpoint.json
+hallpass --json checkpoint engagement.toml --output checkpoint.json
 ```
 
 A checkpoint stored inside the snapshot is rolled back with everything else

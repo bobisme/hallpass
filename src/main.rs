@@ -273,6 +273,11 @@ enum Command {
     Checkpoint {
         /// Pass with an existing ledger to checkpoint.
         file: PathBuf,
+        /// Write the checkpoint to this new file (mode 0600) instead of
+        /// printing it. Refuses an existing file or a link. Checkpoint inputs
+        /// refuse a file that group or others can write.
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
         #[command(flatten)]
         lock: LockArgs,
     },
@@ -2756,7 +2761,7 @@ fn retrieve(directory: &Path, digest: &str, output: Option<&Path>) -> Output {
     }
 }
 
-fn checkpoint(file: &Path) -> Output {
+fn checkpoint(file: &Path, output: Option<&Path>) -> Output {
     let result = hallpass::load(file)
         .and_then(|loaded| hallpass::export_checkpoint_observed(&loaded, &StateDir::from_env()));
     match result {
@@ -2787,10 +2792,29 @@ fn checkpoint(file: &Path) -> Output {
                     Some("There is no local witness corroboration.".to_owned()),
                 ),
             };
+            let mut text = format!("{value}\n");
+            let mut written = None;
+            if let Some(path) = output {
+                if let Err(e) = hallpass::write_new_private(path, text.as_bytes()) {
+                    return error_output("checkpoint", Some(path), &e);
+                }
+                written = Some(path.display().to_string());
+                text = format!(
+                    "Checkpoint at sequence {} written to {} (mode 0600, {} bytes)\n",
+                    checkpoint.seq,
+                    safe(&path.display().to_string()),
+                    text.len()
+                );
+            }
+            let mut json = json!({"command": "checkpoint", "result": "ok", "checkpoint": value, "local_corroboration": relation != hallpass::WitnessRelation::Absent, "witness": corroboration, "warnings": warning.into_iter().collect::<Vec<_>>()});
+            if let (Some(path), Some(map)) = (written, json.as_object_mut()) {
+                map.insert("output".to_owned(), json!(path));
+                map.insert("mode".to_owned(), json!("0600"));
+            }
             Output {
                 code: 0,
-                text: format!("{value}\n"),
-                json: json!({"command": "checkpoint", "result": "ok", "checkpoint": value, "local_corroboration": relation != hallpass::WitnessRelation::Absent, "witness": corroboration, "warnings": warning.into_iter().collect::<Vec<_>>()}),
+                text,
+                json,
             }
         }
         // Nothing is recorded, so there is no line to commit to. Exit 2 and an
@@ -2968,7 +2992,7 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             ancestry,
             ..
         } => cli_evidence::backups(file, candidates, *ancestry),
-        Command::Checkpoint { file, .. } => checkpoint(file),
+        Command::Checkpoint { file, output, .. } => checkpoint(file, output.as_deref()),
         Command::VerifyCheckpoint {
             ledger, checkpoint, ..
         } => verify_checkpoint(ledger, checkpoint),
@@ -3311,7 +3335,7 @@ fn durable_effect(json: &Value) -> Option<String> {
         ("verify-approval", "verified") if !json["archive"].is_null() => {
             Some("the signature record IS archived".to_string())
         }
-        ("retrieve", "ok") if json.get("output").is_some() => {
+        ("retrieve" | "checkpoint", "ok") if json.get("output").is_some() => {
             Some("the output file IS written".to_string())
         }
         ("init", "ok") => Some("the pass file IS created".to_string()),

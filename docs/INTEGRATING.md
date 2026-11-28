@@ -896,6 +896,11 @@ given with `--principal`. The file decides whose keys count, and
 `--principal` decides who must have approved. A failed signature check
 publishes nothing.
 
+To renew or extend an approval, see
+[Renewing or extending an approval](PASS-FORMAT.md#renewing-or-extending-an-approval):
+whether the renewal keeps the id and the budget, why a containment gate
+reports it `widened`, and how the audits treat the new revision.
+
 The [reference caller](reference-caller/README.md#pinning-a-signed-revision)
 does these steps for you and refuses to pin an unsigned edit. Its `pin
 --require-signature PRINCIPAL --allowed-signers FILE` runs `verify-approval`

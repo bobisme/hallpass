@@ -421,6 +421,58 @@ the pass. A pinned spend refuses every pass that differs from the pinned
 bytes, a part-written one included: `pass-changed`, or `invalid-pass` when
 the save is caught in progress.
 
+### Renewing or extending an approval
+
+An owner who renews an approval (a later `valid_until`, a higher ceiling,
+another destination) chooses between two things:
+
+- **The same `id`.** The ledger beside the pass carries on, so the budget
+  already spent counts against the renewed pass. Use it for an extension of
+  the same engagement. A later window adds time, not budget: each ceiling is
+  still the whole total, spent and left together.
+- **A new `id`.** It starts a new ledger with every counter at zero. Use it
+  when the owner approves a new engagement with its own budget. The old
+  ledger keeps its history and its revisions, and is audited on its own.
+
+A renewal under the same id is `widened` to `hallpass diff --containment`
+and exits 2. A later `approval.valid_until` is a loosening, and so are a
+higher ceiling and any change of `approval.reference`, `approval.owner` or
+`approval.operator`. A CI containment gate therefore fails on every renewal.
+That is correct, and hallpass has no flag to override it: the gate is where
+a person decides. The steps:
+
+```sh
+# 1. Compare the proposed pass with the revision the ledger used.
+hallpass retrieve approval-archive "$OLD_DIGEST" --output reviewed.toml
+hallpass diff --containment --at 2026-11-28T09:00:00Z reviewed.toml engagement.pass.new
+# Overall verdict: widened (exit 2). A reviewer reads the loosenings it lists.
+# 2. The owner signs the exact bytes of the new revision.
+ssh-keygen -Y sign -n hallpass-approval-v1 -f ~/.ssh/approval_key engagement.pass.new
+# 3. The operator verifies and archives it, then replaces the pass.
+hallpass verify-approval engagement.pass.new --signature engagement.pass.new.sig \
+  --allowed-signers trusted_signers --principal owner@example.org --archive approval-archive
+mv engagement.pass.new engagement.pass.toml
+mv engagement.pass.new.sig engagement.pass.toml.sig
+# 4. Spend under the new digest (the one verify-approval printed).
+hallpass spend engagement.pass.toml --charge requests=1 --digest "$NEW_DIGEST"
+```
+
+The renewal passes the gate when the reviewer overrides the `widened`
+verdict for this revision (merges the change by hand, or re-runs the job
+with the reviewer's approval) and the signed revision is in the archive. The
+signature is the evidence that the owner approved the renewal. The override
+is the reviewer's decision that the loosenings listed are what the owner
+approved. Keep the two apart: a signature alone does not pass the
+containment gate.
+
+The audits treat a renewal as one more revision. `audit-charges` and
+`audit-receipts` replay each ledger line against the revision that decided
+it: the debits before the renewal against the old bytes, the later ones
+against the new bytes. Each revision needs its own verified signature for the
+audit to be `complete`. A renewal that was not signed and recorded with
+`verify-approval --archive` leaves an `approval-unverified` gap. See
+[what an audit proves](EVIDENCE.md#what-an-audit-proves).
+
 ## Ledger
 
 `spend` records into `<pass file>.ledger` beside the pass (for

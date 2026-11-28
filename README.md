@@ -248,7 +248,7 @@ What it does not guard against:
   puts back both the ledger and the state directory (`$XDG_STATE_HOME`), the
   witness matches the old ledger, nothing is noticed, and the spends made
   since the snapshot are forgotten (a ceiling of 3 can be spent to 5 across
-  the two histories). Keep a periodic `hallpass --json checkpoint PASS >
+  the two histories). Keep a periodic `hallpass --json checkpoint PASS --output
   checkpoint.json` where the snapshot or backup does not reach, and after any
   restore run `hallpass --json verify-checkpoint PASS.ledger checkpoint.json`:
   `mismatch` (exit 2) means the ledger no longer holds the line you
@@ -299,12 +299,12 @@ hallpass audit-receipts engagement.pass.toml approval-archive \
   --allowed-signers trusted_signers --principal owner@example.org
 hallpass --format json ledger engagement.pass.toml
 hallpass retrieve approval-archive "$reviewed_digest" --output reviewed-pass.toml
-hallpass --format json checkpoint engagement.pass.toml > checkpoint.json
+hallpass --format json checkpoint engagement.pass.toml --output checkpoint.json
 ```
 
 Use the full pass digest from the ledger entry as `reviewed_digest`.
 `--output FILE` creates the file with mode 0600 and refuses an existing file or a link; a `>` redirect would use your umask, and under `umask 002` the 0664 file is one `diff` and `archive` refuse.
-Retain the checkpoint separately with the report. `retrieve` in text mode writes
+Retain the checkpoint separately with the report. `checkpoint --output` writes the file the same way (mode 0600, never over an existing file), so give each export a new name, such as one with the date. `verify-checkpoint`, `doctor --checkpoint` and `adopt --checkpoint` refuse a checkpoint that group or others can write, or that another user owns, like `--allowed-signers`: a writer could swap in an older one so the check says `exact`. `retrieve` in text mode writes
 exact original UTF-8 bytes, including comments and the original ending; JSON
 mode instead emits metadata and a JSON string. The archive is user-owned and
 may contain sensitive approval text. Its directory must be private and its

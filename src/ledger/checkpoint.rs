@@ -127,15 +127,17 @@ fn latest(checkpoint: &Checkpoint) -> Option<OffsetDateTime> {
 ///
 /// The file holds the JSON that `hallpass --format json checkpoint`
 /// prints, or the checkpoint object alone, at most
-/// [`MAX_CHECKPOINT_BYTES`]; it is opened without following a symbolic
-/// link.
+/// [`MAX_CHECKPOINT_BYTES`]. It is opened under the trusted signers
+/// file's owner and mode rule and symbolic link handling
+/// ([`crate::open_trusted_checkpoint`]): a file that group or others can
+/// write is refused.
 ///
 /// # Errors
 /// [`Error::Usage`] for a file that cannot be read, is too large, or is not
-/// a valid checkpoint; as [`crate::open_input`] for one that cannot be
-/// opened.
+/// a valid checkpoint; as [`crate::open_trusted_checkpoint`] for one that
+/// cannot be opened or is not trusted.
 pub fn read_checkpoint(path: &Path) -> Result<Checkpoint, Error> {
-    let file = crate::files::open_input(path)?;
+    let file = crate::files::open_trusted_checkpoint(path)?;
     let mut bytes = Vec::new();
     file.take(MAX_CHECKPOINT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)

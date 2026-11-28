@@ -1215,6 +1215,8 @@ approval.
 
 ### Checkpoints
 
+`checkpoint --output FILE` writes the checkpoint object to a new file of mode 0600 (as `retrieve --output` does) and replies with `output` and `mode`; it refuses an existing file or link. `verify-checkpoint`, `doctor --checkpoint` and `adopt --checkpoint` read the file under the `--allowed-signers` rule (owned by the effective user or root, not writable by group or others, a link resolved and its directories checked) and refuse it otherwise with `insecure-permissions` or `untrusted-owner`.
+
 `checkpoint` exports a versioned pass ID, sequence and exact-line hash, plus
 whether a local witness corroborates the history. JSON `witness.relation` is
 `matches`, `lags` or `absent`, observed under the same lock as the export, with
