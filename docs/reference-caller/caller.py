@@ -5,7 +5,8 @@
     caller.py run     JOURNAL PASS REF --to ADDR:PORT/PROTO[@NAME] --charge COUNTER=N
                       [--to ...] [--charge ...] [--duration S] [--outbox FILE] [--rehearsal]
     caller.py handoff JOURNAL PASS [--ref-prefix PREFIX] [--since SEQ] [--all]
-    caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [--rehearsal]
+    caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...]
+                                     [--accept-shortfall] [--rehearsal]
 
 The hallpass ledger is the authority for debits. The journal is the authority
 for what this caller did. Python 3 standard library only. See README.md.
@@ -26,6 +27,9 @@ import check  # noqa: E402  The reference reply decoder, docs/conformance/check.
 
 # Test hook: exit at once at this point, as a crash would.
 INTERRUPT = os.environ.get("REFERENCE_CALLER_INTERRUPT")  # after-spend, after-callback
+
+
+MAX_REFERENCES = 10_000  # hallpass records at most this many references in one reconciliation
 
 
 def fail(message):
@@ -494,25 +498,53 @@ def reconcile_references(a):
         print("No adoption that may have lost lines waits for a reference reconciliation: nothing to do.")
         return 0
     references = []
+    debited = {}  # counter -> units the journals say they debited
+    in_ledger = {(e.get("receipt") or {}).get("caller_ref") for e in ledger.get("entries", [])}
     for journal in [a.journal, *a.also]:
         if not os.path.exists(journal):
             fail(f"no journal at {journal}")
-        for ref in units(read_journal(journal), ledger["pass_id"]):
+        for ref, rs in units(read_journal(journal), ledger["pass_id"]).items():
             if ref not in references:
                 references.append(ref)
-    listing = {"version": 1, "pass_id": ledger["pass_id"], "references": references}
-    with tempfile.TemporaryDirectory() as directory:
-        path = os.path.join(directory, "references.json")
-        with open(path, "w") as f:
-            json.dump(listing, f)
-        code, out = hallpass("reconcile-references", "--adoption", str(adoption), "--references", path,
-                             "--reason", a.reason, "--", a.pass_file, rehearsal=a.rehearsal)
-    reply = decode(out)
-    if code != 0 or reply.get("result") != "ok" or not isinstance(reply.get("seq"), int):
-        fail(f"reconcile-references failed: {message(reply)}")
-    append(a.journal, event="reconcile-references", **{"pass": pass_key(a.pass_file)},
-           pass_id=ledger["pass_id"], adoption=adoption,
-           seq=reply["seq"], references=len(references))
+                # A debit already in the ledger is not one the adoption lost.
+                if ref not in in_ledger and any(r["event"] == "spend" and r.get("outcome") == "debited" for r in rs):
+                    for charge in rs[0].get("charges", []):
+                        debited[charge["counter"]] = debited.get(charge["counter"], 0) + charge["n"]
+    # The adoption carried the totals the witness knew. If the journals show fewer debited units
+    # than that, a journal is missing, and its references would be accepted as new later.
+    carried = next((x.get("carried", {}) for x in ledger.get("adoptions", []) if x.get("seq") == adoption), {})
+    short = {c: n - debited.get(c, 0) for c, n in carried.items() if n > debited.get(c, 0)}
+    if short:
+        names = ", ".join(f"{c} {n}" for c, n in sorted(short.items()))
+        print(f"warning: the journals show fewer debited units than the adoption at seq {adoption} carried: "
+              f"short by {names}. A caller's journal may be missing, and its references would be accepted as new "
+              f"after this. Name every journal with --also. If the shortfall is expected (a debit by a caller "
+              f"with no journal, or a spend whose outcome is unknown), run again with --accept-shortfall.",
+              file=sys.stderr)
+        if not a.accept_shortfall:
+            fail("nothing was recorded; add the missing journals, or pass --accept-shortfall")
+    parts = [references[i:i + MAX_REFERENCES] for i in range(0, len(references), MAX_REFERENCES)] or [[]]
+    recorded = 0
+    for number, part in enumerate(parts, 1):
+        listing = {"version": 1, "pass_id": ledger["pass_id"], "references": part}
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "references.json")
+            with open(path, "w") as f:
+                json.dump(listing, f)
+            code, out = hallpass("reconcile-references", "--adoption", str(adoption), "--references", path,
+                                 "--reason", a.reason, "--", a.pass_file, rehearsal=a.rehearsal)
+        reply = decode(out)
+        if code != 0 or reply.get("result") != "ok" or not isinstance(reply.get("seq"), int):
+            left = f" Part {number} of {len(parts)} failed; {recorded} references are recorded and the rest are not. " \
+                   f"Spend nothing until the rest are recorded with `hallpass reconcile-references --adoption {adoption}`." \
+                if recorded else ""
+            fail(f"reconcile-references failed: {message(reply)}.{left}")
+        recorded += len(part)
+        append(a.journal, event="reconcile-references", **{"pass": pass_key(a.pass_file)},
+               pass_id=ledger["pass_id"], adoption=adoption,
+               seq=reply["seq"], references=len(part), part=number, parts=len(parts))
+        if len(parts) > 1:
+            print(f"part {number} of {len(parts)}: {len(part)} references, ledger seq {reply['seq']}")
     print(f"reconciled {len(references)} references for the adoption at seq {adoption}: ledger seq {reply['seq']}")
     return 0
 
@@ -545,6 +577,8 @@ def main():
     reconcile_command.add_argument("--reason", required=True, help="why the list is complete; recorded in the ledger")
     reconcile_command.add_argument("--also", action="append", default=[], metavar="JOURNAL",
                                    help="the journal of another caller that spent on this pass; repeat for each")
+    reconcile_command.add_argument("--accept-shortfall", action="store_true",
+                                   help="record even when the journals show fewer debits than the adoption carried")
     reconcile_command.add_argument("--rehearsal", action="store_true",
                                    help="keep HALLPASS_UNSAFE_TEST_CLOCK for a debug hallpass")
     run_command.add_argument("ref")

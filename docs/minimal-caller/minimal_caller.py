@@ -68,8 +68,9 @@ try:
     pre = json.loads(out)
     # A rehearsal needs a hallpass that honours the test clock; a live one needs a hallpass that does not.
     if pre.get("test_clock") is not rehearsal:
-        sys.exit("stop: " + ("--rehearsal, but this hallpass uses the real clock (a release build ignores "
-                 "HALLPASS_UNSAFE_TEST_CLOCK), so a spend would be live; use a debug build"
+        sys.exit("stop: " + ("--rehearsal, but this hallpass uses the real clock, so a spend would be live. "
+                 "Use a debug build (a release build ignores HALLPASS_UNSAFE_TEST_CLOCK) and set "
+                 "HALLPASS_UNSAFE_TEST_CLOCK in the environment, or run without --rehearsal"
                  if rehearsal else "this hallpass reports a test clock, but this is not a rehearsal"))
     target = {"target": pre["targets"][0]["target"], "name": pre["targets"][0]["name"]}
     assert code == 0 and pre["command"] == "permits" and len(pre["targets"]) == 1

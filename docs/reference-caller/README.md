@@ -190,7 +190,17 @@ sequence and the number of references.
 
 A reference that is left off the list would be accepted as new. Pass the
 journal of every caller that spent on this pass, in one command: the guard
-resumes as soon as the line is recorded. If another adoption loses lines
+resumes as soon as the line is recorded. The adoption carried the totals
+that hallpass had counted. If the debits that the journals show add up to
+less than that for a counter, a journal is probably missing: the caller
+warns on standard error, names the shortfall, and records nothing unless you
+pass `--accept-shortfall` (use it when a caller with no journal made the
+debit, or a spend's outcome is unknown). A recorded debit that the ledger
+already holds is not counted. hallpass takes at most 10,000 references in a
+list, so the caller splits a longer list into parts and records them in
+order, one `reconcile-references` record in the journal for each part. Until
+the last part is recorded, a reference not yet listed is accepted as new, so
+nothing should spend in between. If another adoption loses lines
 later, run it again. `--rehearsal` keeps `HALLPASS_UNSAFE_TEST_CLOCK`, as for
 `run`.
 

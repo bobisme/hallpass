@@ -125,7 +125,7 @@ fn check_reference_list(
 ) -> Result<(), String> {
     if references.len() > MAX_RECONCILED_REFERENCES {
         return Err(format!(
-            "the list has {} references, more than the {MAX_RECONCILED_REFERENCES} one reconciliation may hold",
+            "the list has {} references, more than the {MAX_RECONCILED_REFERENCES} one reconciliation may hold. Split it into parts of at most {MAX_RECONCILED_REFERENCES} and record them back to back with the same --adoption, before any spend: each part adds to the earlier ones, but until the last is recorded a reference not yet listed is accepted as new",
             references.len()
         ));
     }

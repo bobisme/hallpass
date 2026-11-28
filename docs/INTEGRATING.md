@@ -330,7 +330,10 @@ what a real disk gives. All the numbers, with the setup, are in
   go into the ledger. Guarded spends then refuse a listed reference as
   `duplicate-reference` and check any other reference against the ledger. A
   reference you leave out is accepted as new, so record one list with every
-  caller's references before any caller spends again. Another adoption that
+  caller's references before any caller spends again. A list holds at most
+  10,000 references: record a longer one in parts, back to back with the same
+  `--adoption` and before any spend, because a reference in a part not yet
+  recorded is accepted as new. Another adoption that
   may lose lines needs its own reconciliation. The reference caller does
   this with `caller.py reconcile-references`.
 - **`permits`, `status` and `ledger` are read-only and more forgiving than

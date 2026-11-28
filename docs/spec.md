@@ -697,7 +697,7 @@ hallpass reconcile-references FILE --adoption SEQ --references LIST --reason TEX
 every caller reference that may be in the lines the adoption lost: in
 practice, every reference that the run records of every caller on this pass
 used. Each reference follows the caller reference rules, each appears once,
-and a list holds at most 10,000. An empty list states that no reference was
+and a list holds at most 10,000. Record a longer list in parts of at most 10,000, one reconciliation after another with the same `--adoption`; each adds to the earlier ones, and until the last is recorded a reference not yet listed is accepted as new, so spend only after it. An empty list states that no reference was
 lost. `--adoption` names the latest adoption that may have lost lines: the
 sequence that the `reference-inconclusive` message and
 `ledger --format json` (`unreconciled_adoption`) give. The reason follows

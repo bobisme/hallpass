@@ -63,7 +63,8 @@ list every reference your run records used on the pass and record the list
 with `hallpass reconcile-references FILE --adoption SEQ --references LIST
 --reason TEXT`: a listed reference is then a duplicate, with
 `reference_evidence.reconciled_at`, and any other is checked against the
-ledger again. Until then, spend without the guard only when your run record
+ledger again. A list holds at most 10,000 references: record a longer one in
+parts, back to back, before any spend. Until then, spend without the guard only when your run record
 shows the unit was never submitted. See [the
 rule](spec.md#caller-references-and-receipts) and
 [`reconcile-references`](spec.md#reconcile-referencespass-adoption-references-reason-now). A dry run reports the
