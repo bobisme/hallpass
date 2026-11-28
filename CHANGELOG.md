@@ -326,7 +326,6 @@ Changes since commit d70c09f.
   `LedgerView::check_clock_kind()`.
 - A pass whose modification time is in the future gives a warning in `spend`,
   `permits` and `status`.
-
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
   `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`,
   `SpendChargesBatchOutcome`, `SpendChargesBatchUnitOutcome` and
