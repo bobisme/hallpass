@@ -65,14 +65,26 @@ def message(reply):
                                           "no reply (if hallpass said on stderr that the entry IS recorded, it is: inspect the ledger)")
 
 
-def append(journal, **record):
-    """Append one record and force it to disk before the caller acts on it."""
+def append(journal, _unless_ref=None, **record):
+    """Append one record and force it to disk before the caller acts on it.
+
+    With _unless_ref, the record is written only if no record of that reference is
+    in the journal. The check and the write happen under the one lock, so of
+    several runs that start with one reference at once, exactly one gets True."""
     record = {"at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **record}
     new = not os.path.exists(journal)
     fd = os.open(journal, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)  # one writer at a time, so the tail check below is true
         drop_torn_tail(fd, journal)
+        if _unless_ref is not None:
+            for line in os.pread(fd, os.fstat(fd).st_size, 0).split(b"\n"):
+                try:
+                    seen = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(seen, dict) and seen.get("ref") == _unless_ref:
+                    return False
         os.write(fd, (json.dumps(record) + "\n").encode())
         os.fsync(fd)
     finally:
@@ -83,6 +95,7 @@ def append(journal, **record):
             os.fsync(fd)
         finally:
             os.close(fd)
+    return True
 
 
 def drop_torn_tail(fd, journal):
@@ -327,8 +340,12 @@ def run(a):
         "mode": "charges", "charges": a.charge, "targets": a.to,
         "record_targets": True, "caller_ref": a.ref, "note": None,
     }
-    append(a.journal, ref=a.ref, event="intent", **{"pass": pass_key(a.pass_file)}, pass_id=pinned["pass_id"],
-           digest=pinned["digest"], targets=a.to, charges=a.charge, rehearsal=a.rehearsal)
+    # The early check above is only a quick refusal. This one is the real one: it
+    # is made under the journal lock, so two runs of one reference cannot both pass.
+    if not append(a.journal, _unless_ref=a.ref, ref=a.ref, event="intent", **{"pass": pass_key(a.pass_file)},
+                  pass_id=pinned["pass_id"], digest=pinned["digest"], targets=a.to, charges=a.charge,
+                  rehearsal=a.rehearsal):
+        fail(f"{a.ref} is already in {a.journal} (another run took it first); give every unit a new reference")
 
     args = ["spend", "--digest", pinned["digest"], "--duration", str(a.duration),
             "--caller-ref", a.ref, "--require-new-ref", "--record-target"]
@@ -379,10 +396,33 @@ def run(a):
     return 1
 
 
+def spend_record(records):
+    """The spend record that matters for one reference: the one that debited, else the first."""
+    spends = [r for r in records if r["event"] == "spend"]
+    return next((r for r in spends if r.get("outcome") == "debited"), spends[0] if spends else {})
+
+
+def intent_record(records):
+    """The intent of the run that debited (the last intent before its spend record),
+    else the first intent."""
+    spend = spend_record(records)
+    intents = [r for r in records if r["event"] == "intent"]
+    if spend.get("outcome") == "debited":
+        before = []
+        for r in records:
+            if r is spend:
+                break
+            if r["event"] == "intent":
+                before.append(r)
+        if before:
+            return before[-1]
+    return intents[0] if intents else records[0]
+
+
 def caller_record(records):
     """What the journal says this caller did for one reference."""
     events = [r["event"] for r in records]
-    spend = next((r for r in records if r["event"] == "spend"), {})
+    spend = spend_record(records)
     if spend.get("outcome") == "refused":
         return f"refused {spend['code']}"
     if "callback-done" in events:
@@ -425,11 +465,12 @@ def handoff(a):
     if code != 0 or ledger.get("verified") is not True:
         fail(f"the ledger could not be verified: {message(ledger)}")
     mine = units(records, ledger["pass_id"])
+    pending = ledger.get("unreconciled_adoption")
     rows = {}
     if mine:
         manifest = {"version": 1, "pass_id": ledger["pass_id"], "units": [
-            {"caller_ref": ref, "digest": rs[0]["digest"], "charges": rs[0]["charges"],
-             "targets": rs[0]["targets"]} for ref, rs in mine.items()]}
+            {"caller_ref": ref, "digest": intent_record(rs)["digest"], "charges": intent_record(rs)["charges"],
+             "targets": intent_record(rs)["targets"]} for ref, rs in mine.items()]}
         with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
             json.dump(manifest, f)
             f.flush()
@@ -464,6 +505,14 @@ def handoff(a):
         found = "no debit" if result == "absent" else f"{kind} seq {','.join(map(str, seqs))}"
         state = "refused" if did.startswith("refused ") else did
         verdict = VERDICTS.get((state, result), "ATTENTION: journal and ledger disagree; reconcile by hand")
+        if pending is not None and result == "absent" and state != "refused":
+            # The ledger was adopted and may have lost lines: absent does not mean not debited.
+            verdict = (f"ATTENTION: may be in the lines the adoption at seq {pending} lost; "
+                       f"run `caller.py reconcile-references` first, then `handoff` again")
+        repeats = sum(r["event"] == "intent" for r in mine[ref]) if ref in mine else 0
+        if repeats > 1:
+            verdict = (f"ATTENTION: {repeats} intent records for this reference, from runs that raced; "
+                       f"judged by the one that debited. {verdict}")
         lines.append((ref, did, found, verdict))
     attention = sum(line[3].startswith("ATTENTION") for line in lines)
     if a.all:
@@ -502,6 +551,10 @@ def handoff(a):
     scope = f"{len(ledger['entries'])} debits" if not shown else (
         f"{len(ledger['entries'])} debits from seq {a.since} (of {shown['of']})")
     print(f"Ledger: {scope}, witness {ledger['witness']}. Spent: {spent}.")
+    if pending is not None:
+        print(f"Pending: the adoption at seq {pending} may have lost ledger lines, and its references are not "
+              f"reconciled. Debits in those lines are not shown. Run `caller.py reconcile-references` with every "
+              f"caller's journal before anything is spent.")
     if others:
         print(f"{len(others)} other debits by other callers or without a reference, not judged"
               + ("." if a.all else "; use --all to list them."))
@@ -527,6 +580,8 @@ def reconcile_references(a):
         return 0
     references = []
     debited = {}  # counter -> units the journals say they debited
+    possible = {}  # counter -> units whose outcome is unknown: they may have been debited
+    unknown = 0
     in_ledger = {(e.get("receipt") or {}).get("caller_ref") for e in ledger.get("entries", [])}
     for journal in [a.journal, *a.also]:
         if not os.path.exists(journal):
@@ -535,19 +590,31 @@ def reconcile_references(a):
             if ref not in references:
                 references.append(ref)
                 # A debit already in the ledger is not one the adoption lost.
-                if ref not in in_ledger and any(r["event"] == "spend" and r.get("outcome") == "debited" for r in rs):
-                    for charge in rs[0].get("charges", []):
-                        debited[charge["counter"]] = debited.get(charge["counter"], 0) + charge["n"]
+                if ref in in_ledger:
+                    continue
+                spend = spend_record(rs)
+                if spend.get("outcome") == "debited":
+                    book = debited
+                elif spend.get("outcome") == "refused":
+                    continue
+                else:  # an intent with no reply, or an unknown outcome: perhaps debited
+                    book = possible
+                    unknown += 1
+                for charge in intent_record(rs).get("charges", []):
+                    book[charge["counter"]] = book.get(charge["counter"], 0) + charge["n"]
     # The adoption carried the totals the witness knew. If the journals show fewer debited units
     # than that, a journal is missing, and its references would be accepted as new later.
     carried = next((x.get("carried", {}) for x in ledger.get("adoptions", []) if x.get("seq") == adoption), {})
-    short = {c: n - debited.get(c, 0) for c, n in carried.items() if n > debited.get(c, 0)}
+    if unknown:
+        print(f"{unknown} units with unknown outcome counted as possibly debited.")
+    counted = {c: debited.get(c, 0) + possible.get(c, 0) for c in {*debited, *possible}}
+    short = {c: n - counted.get(c, 0) for c, n in carried.items() if n > counted.get(c, 0)}
     if short:
         names = ", ".join(f"{c} {n}" for c, n in sorted(short.items()))
-        print(f"warning: the journals show fewer debited units than the adoption at seq {adoption} carried: "
+        print(f"warning: the journals show fewer debited units (counting unknown outcomes as debited) than the adoption at seq {adoption} carried: "
               f"short by {names}. A caller's journal may be missing, and its references would be accepted as new "
               f"after this. Name every journal with --also. If the shortfall is expected (a debit by a caller "
-              f"with no journal, or a spend whose outcome is unknown), run again with --accept-shortfall.",
+              f"with no journal), run again with --accept-shortfall.",
               file=sys.stderr)
         if not a.accept_shortfall:
             fail("nothing was recorded; add the missing journals, or pass --accept-shortfall")

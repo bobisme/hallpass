@@ -79,7 +79,9 @@ each `run`. `--allowed-signers` and `--signature` without
 ## One unit
 
 `run` refuses a reference that is already in its journal. A reference is
-used once, whatever its outcome. Then it:
+used once, whatever its outcome. The check and the write of the intent are
+one step under the journal lock, so of several runs that start with the same
+reference at once, one writes its intent and the others refuse. Then it:
 
 1. journals `intent`: the reference, the pass, the pinned ID and digest, the
    targets with their names, and the charges;
@@ -137,6 +139,12 @@ bytes. A journal that was never signed is not flagged.
 | `refused CODE` | reconciled | ok |
 | `unconfirmed` | reconciled | attention: the unit may have run. Check the target's own records. |
 | `not sent` or `unknown` | reconciled | attention: nothing was sent, and the debit, if there was one, is missing from the adopted ledger |
+| any but `refused CODE` | no debit, while `unreconciled_adoption` is set | attention: the unit may be in the lines the adoption lost. Run `reconcile-references` first, then `handoff` again. It is never reported as "not debited". |
+
+While an adoption waits for its reference reconciliation, `handoff` prints a
+`Pending:` line after its ledger line. A reference with more than one
+`intent` record (older runs that raced) is flagged, and `handoff` judges it by
+the run that debited, not by the first record.
 
 ### A ledger that other callers share
 
@@ -195,8 +203,10 @@ that hallpass had counted. If the debits that the journals show add up to
 less than that for a counter, a journal is probably missing: the caller
 warns on standard error, names the shortfall, and records nothing unless you
 pass `--accept-shortfall` (use it when a caller with no journal made the
-debit, or a spend's outcome is unknown). A recorded debit that the ledger
-already holds is not counted. hallpass takes at most 10,000 references in a
+debit). A unit whose outcome is unknown (a crash after the spend, or a spend
+whose reply was lost) counts as possibly debited, so an ordinary crash does
+not trip the check; the caller reports how many such units it counted. A
+recorded debit that the ledger already holds is not counted. hallpass takes at most 10,000 references in a
 list, so the caller splits a longer list into parts and records them in
 order, one `reconcile-references` record in the journal for each part. Until
 the last part is recorded, a reference not yet listed is accepted as new, so

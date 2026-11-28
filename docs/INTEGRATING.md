@@ -346,7 +346,10 @@ what a real disk gives. All the numbers, with the setup, are in
   `--adoption` and before any spend, because a reference in a part not yet
   recorded is accepted as new. Another adoption that
   may lose lines needs its own reconciliation. The reference caller does
-  this with `caller.py reconcile-references`.
+  this with `caller.py reconcile-references`. Its shortfall check counts a
+  unit with an unknown outcome as possibly debited, and its `handoff` says
+  such a unit may be in the lost lines (never "not debited") until the
+  reconciliation is recorded.
 - **`permits`, `status` and `ledger` are read-only and more forgiving than
   `spend`**: when the witness cannot be checked they still answer, with a
   warning and `"witness": "not-checked"`. Only a `spend` is the permission
@@ -493,6 +496,8 @@ Give each caller its own reference prefix and pass it as `--ref-prefix`, and a
 debit with that prefix and no journal record is flagged (exit 2). See
 [a ledger that other callers
 share](reference-caller/README.md#a-ledger-that-other-callers-share).
+Its `run` checks and writes the intent under the journal lock, so two runs of
+one reference cannot both start.
 After an adoption that may have lost lines, its `reconcile-references`
 records every reference in its journals, so that its guarded spends resume.
 See [after a lost

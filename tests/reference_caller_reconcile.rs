@@ -165,7 +165,10 @@ fn the_reference_caller_reconciles_its_journals_and_sends_again() {
     );
     let (code, stdout) = shift.caller(&["handoff", "a.jsonl", &pass]);
     assert_eq!(code, Some(2), "{stdout}");
-    assert!(stdout.contains("journal and ledger disagree"), "{stdout}");
+    assert!(
+        stdout.contains("may be in the lines the adoption at seq 1 lost"),
+        "{stdout}"
+    );
 
     // Both journals in one reconciliation: the guard resumes only once the
     // line is recorded, so a reference from a journal left out would be
