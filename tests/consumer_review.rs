@@ -432,7 +432,7 @@ fn every_small_containment_certificate_agrees_with_exhaustive_endpoint_decisions
 }
 
 #[test]
-fn pair_limit_and_union_proofs_remain_inconclusive() {
+fn many_renamed_rules_and_unions_of_rules_are_contained() {
     use hallpass::review::endpoint_containment;
     let now = OffsetDateTime::parse(AT, &Rfc3339).expect("time");
     let (head, _) = BASE.split_once("[[destination]]").expect("head");
@@ -444,9 +444,10 @@ fn pair_limit_and_union_proofs_remain_inconclusive() {
     let pass = Pass::parse(&many).expect("pass");
     assert_eq!(endpoint_containment(&pass, &pass, now).compared_pairs, 190);
     let renamed = Pass::parse(&many.replace("label = \"r", "label = \"s")).expect("renamed");
-    let capped = endpoint_containment(&pass, &renamed, now);
-    assert_eq!(capped.result, "inconclusive");
-    assert_eq!(capped.reason, "pair-limit");
+    // Before the union proof (bn-1ixb), this stopped at a 16,384 pair limit.
+    let renamed = endpoint_containment(&pass, &renamed, now);
+    assert_eq!(renamed.result, "contained");
+    assert_eq!(renamed.compared_pairs, 190 * 190);
     let split = format!(
         "{BASE}\n[[destination]]\nlabel = \"other\"\naddress = \"192.0.2.10\"\nports = 444\nprotocol = \"tcp\"\nnames = [\"app.example.com\"]\n"
     );
@@ -456,6 +457,6 @@ fn pair_limit_and_union_proofs_remain_inconclusive() {
         &Pass::parse(&proposed).expect("pass"),
         now,
     );
-    assert_eq!(union.result, "inconclusive");
-    assert_eq!(union.reason, "single-rule-coverage-unproved");
+    assert_eq!(union.result, "contained");
+    assert_eq!(union.reason, "rules-and-ipv4-edges-covered");
 }

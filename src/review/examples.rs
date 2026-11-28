@@ -346,6 +346,32 @@ impl<'a> Sampler<'a> {
     }
 }
 
+/// One request replayed through the ordinary decision procedure under both
+/// revisions, kept only when OLD refuses it and NEW allows it.
+pub(super) fn replayed_new_allowance(
+    old: &Pass,
+    new: &Pass,
+    now: OffsetDateTime,
+    target: Target,
+    name: Option<&HostName>,
+) -> Option<DecisionExample> {
+    let decide =
+        |pass: &Pass| ExampleDecision::from(pass.permits_named(&target, name, now, Duration::ZERO));
+    let before = decide(old);
+    let after = decide(new);
+    (classify(&before, &after) == NEWLY_ALLOWED).then(|| DecisionExample {
+        target: target.to_string(),
+        name: name.map(ToString::to_string),
+        at: super::exact_stamp(now),
+        before,
+        after,
+        change: NEWLY_ALLOWED,
+        bypasses_names_of: None,
+        request: target,
+        host: name.cloned(),
+    })
+}
+
 /// Like [`decision_examples`]. Refused-to-refused changes in which only the
 /// code differs are counted, and listed (last) only when `list_refusal_codes`.
 ///

@@ -173,10 +173,11 @@ fn a_destination_that_overlaps_no_named_one_leaves_the_examples_unchanged() {
 }
 
 #[test]
-fn a_widened_class_without_a_counterexample_sets_more_counterexamples() {
+fn a_range_two_old_rules_cover_together_is_not_a_widened_class() {
     // OLD allows 443 and 444 through two rules, so NEW's single 443-444 rule
-    // allows nothing new there, but no one OLD rule covers it: the class
-    // cannot be ruled out. Port 8000 is new.
+    // allows nothing new there. The union proof shows that (bn-1ixb: before
+    // it, no one OLD rule covered the range, and the class stayed open with
+    // more_counterexamples true). Port 8000 is new.
     let old = "[[destination]]\nlabel = \"a\"\naddress = \"192.0.2.10\"\nprotocol = \"tcp\"\nports = 443\n[[destination]]\nlabel = \"b\"\naddress = \"192.0.2.10\"\nprotocol = \"tcp\"\nports = 444\n";
     let new = "[[destination]]\nlabel = \"a\"\naddress = \"192.0.2.10\"\nprotocol = \"tcp\"\nports = [443, 444, 8000]\n";
     let (json, text) = diff(old, new, "--containment", 2);
@@ -185,6 +186,6 @@ fn a_widened_class_without_a_counterexample_sets_more_counterexamples() {
     let counter = list(&c["counterexamples"]);
     assert_eq!(counter.len(), 1, "{c}");
     assert_eq!(counter[0]["target"], "192.0.2.10:8000/tcp", "{c}");
-    assert_eq!(c["more_counterexamples"], true, "{c}");
-    assert!(text.contains("More new allowances may exist"), "{text}");
+    assert_eq!(c["more_counterexamples"], false, "{c}");
+    assert!(!text.contains("More new allowances may exist"), "{text}");
 }
