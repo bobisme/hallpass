@@ -2758,9 +2758,15 @@ impl Invocation {
         let mut topic = None;
         let mut looking_for_command = true;
         let mut json_flag = false;
+        let mut json_count = 0;
+        let mut format_count = 0;
         let mut other_format: Option<String> = None;
         for arg in args.iter_mut().skip(1).take_while(|arg| *arg != "--") {
+            if arg == "--format" || arg.to_str().is_some_and(|s| s.starts_with("--format=")) {
+                format_count += 1;
+            }
             if arg == "--json" {
+                json_count += 1;
                 json_flag = true;
                 *arg = "--format=json".into();
             } else if let Some(value) = arg.to_str().and_then(|s| s.strip_prefix("--format=")) {
@@ -2815,11 +2821,20 @@ impl Invocation {
             ));
         }
         env_warning.extend(ignored_clock_warning());
-        let flag_conflict = other_format.filter(|_| json_flag).map(|format| {
-            format!(
-                "`{format}` conflicts with `--json`, which means `--format json`; use one of them"
+        let flag_conflict = if json_count > 1 {
+            Some("`--json` is given more than once; give it once".to_string())
+        } else if format_count > 1 {
+            Some(
+                "`--format` is given more than once; give one format, for example `--format json`"
+                    .to_string(),
             )
-        });
+        } else {
+            other_format.filter(|_| json_flag).map(|format| {
+                format!(
+                    "`{format}` conflicts with `--json`, which means `--format json`; use one of them"
+                )
+            })
+        };
         let json = json_flag || requested_format.as_deref() == Some(OsStr::new("json"));
         Self {
             args,

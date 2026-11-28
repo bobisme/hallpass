@@ -125,11 +125,11 @@ fn conflicting_format_flags_are_a_usage_error_naming_both() {
         );
         assert!(out.stderr.is_empty(), "{args:?}");
     }
-    // The same format twice is not a conflict.
+    // The same format once more is not a conflict. A repeated --json is refused
+    // in tests/cli_polish_r10.rs.
     for args in [
         vec!["--json", "--format", "json", "version"],
         vec!["--format=json", "--json", "version"],
-        vec!["--json", "--json", "version"],
     ] {
         let out = case.run(&args);
         assert_eq!(out.status.code(), Some(0), "{args:?}");

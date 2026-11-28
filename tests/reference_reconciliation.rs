@@ -62,8 +62,13 @@ impl Engagement {
 
     /// `hallpass --format json COMMAND PASS ARGS...`.
     fn command(&self, name: &str, args: &[&str]) -> Command {
+        self.command_as("json", name, args)
+    }
+
+    /// `hallpass --format FORMAT COMMAND PASS ARGS...`, with one format flag.
+    fn command_as(&self, format: &str, name: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hallpass"));
-        cmd.args(["--format", "json", name])
+        cmd.args(["--format", format, name])
             .arg(self.pass())
             .args(args)
             .current_dir(self.dir.path())
@@ -79,8 +84,7 @@ impl Engagement {
 
     fn text(&self, name: &str, args: &[&str]) -> String {
         let out = self
-            .command(name, args)
-            .args(["--format", "text"])
+            .command_as("text", name, args)
             .output()
             .expect("hallpass");
         String::from_utf8_lossy(&out.stdout).into_owned()

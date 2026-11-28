@@ -197,7 +197,9 @@ fn parse_amount(text: &str) -> Result<u64, String> {
     if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
         text.parse::<u64>().map_err(|_| {
             format!(
-                "N must be a positive integer no larger than the maximum whole number, not `{text}`"
+                "N must be a whole number from 1 to {}, not {}. Write an amount in that range",
+                hallpass::MAX_CEILING,
+                hallpass::display_quoted(text)
             )
         })
     } else {
