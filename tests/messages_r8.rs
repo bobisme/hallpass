@@ -117,7 +117,7 @@ fn a_bad_value_uses_the_usual_error_format() {
     let out = case.run(&["spend", "--help"]);
     assert_eq!(out.status.code(), Some(0));
     let out = case.run(&["spend", "p.toml", "calls", "--bogus"]);
-    assert!(stderr(&out).starts_with("error: unexpected argument"));
+    assert!(stderr(&out).starts_with("hallpass spend: error: usage: unexpected argument"));
 }
 
 #[test]

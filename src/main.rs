@@ -16,7 +16,10 @@ use std::io::{IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{
+    FromArgMatches, Parser, Subcommand, ValueEnum,
+    error::{ContextKind, ContextValue, ErrorKind},
+};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
     Digest, Error, LoadedPass, NamedTarget, Pass, Problem, Refusal, SpendRequest, StateDir,
@@ -2979,6 +2982,7 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
     if output.json.get("warnings").is_none() {
         output.json["warnings"] = json!([]);
     }
+    dedupe_warnings(&mut output.json);
     let mut stdout_text = String::new();
     match format {
         Format::Json => {
@@ -3138,9 +3142,110 @@ fn parse_error(command: Option<&str>, message: &str) -> Output {
         None,
         &Error::Usage(message.to_string()),
     );
+    if command.is_none() {
+        output.text = output.text.replacen("hallpass hallpass: ", "hallpass: ", 1);
+    }
     output.json["command"] = command.map_or(Value::Null, Value::from);
     output.json["error"]["recording"] = json!("not-recorded");
     output
+}
+
+/// The lines of a clap error in hallpass's usage shape: the first line is the
+/// headline (clap's `error: ` prefix dropped), and clap's other lines follow as
+/// detail, without blank lines or its help pointer. A value that starts with
+/// `-` is clap's unknown argument; it gets a sentence of its own, because clap's
+/// tip for it would make the value a file.
+fn clap_usage_lines(
+    error: &clap::Error,
+    definition: &clap::Command,
+    topic: Option<&str>,
+    args: &[OsString],
+) -> Vec<String> {
+    let command = topic
+        .and_then(|name| definition.find_subcommand(name))
+        .unwrap_or(definition);
+    if error.kind() == ErrorKind::UnknownArgument
+        && let Some(sentence) = leading_dash_value_sentence(error, command, args)
+    {
+        return vec![sentence];
+    }
+    if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+        return vec!["no command was given; run `hallpass help` for the commands".to_owned()];
+    }
+    let rendered = error.render().to_string();
+    let mut lines = rendered
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("For more information"));
+    let first = lines.next().unwrap_or_default();
+    let headline = first
+        .strip_prefix("error: ")
+        .unwrap_or(first)
+        .trim_end_matches(':');
+    std::iter::once(headline.to_owned())
+        .chain(lines.map(str::to_owned))
+        .collect()
+}
+
+/// The sentence for an option whose value starts with `-`, when that option
+/// takes a value and the value came straight after it.
+fn leading_dash_value_sentence(
+    error: &clap::Error,
+    command: &clap::Command,
+    args: &[OsString],
+) -> Option<String> {
+    let ContextValue::String(value) = error.get(ContextKind::InvalidArg)? else {
+        return None;
+    };
+    let previous = args
+        .windows(2)
+        .find(|pair| pair[1].to_str() == Some(value.as_str()))?[0]
+        .to_str()?;
+    let option = command.get_arguments().find(|arg| {
+        previous.strip_prefix("--").map_or_else(
+            || arg.get_short().is_some_and(|c| previous == format!("-{c}")),
+            |long| arg.get_long() == Some(long),
+        )
+    })?;
+    if !option.get_action().takes_values() {
+        return None;
+    }
+    let number = value.strip_prefix('-').is_some_and(|digits| {
+        digits.chars().any(|c| c.is_ascii_digit())
+            && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+    });
+    Some(if number {
+        format!("`{previous}` needs a value; a negative value is not allowed")
+    } else {
+        format!(
+            "`{previous}` needs a value; a value that starts with `-` must be written as `{previous}=VALUE`"
+        )
+    })
+}
+
+/// A clap error as a usage error: its first line is the headline, and the
+/// other lines are indented detail after it.
+fn clap_error_output(topic: Option<&str>, lines: &[String]) -> Output {
+    let headline = lines.first().map_or("", String::as_str);
+    let mut output = parse_error(topic, headline);
+    let mut detail = String::new();
+    for line in lines.iter().skip(1) {
+        let _ = writeln!(detail, "  {}", safe_message(line));
+    }
+    if let Some(end) = output.text.find('\n') {
+        output.text.insert_str(end + 1, &detail);
+    }
+    output.json["error"]["message"] = json!(lines.join("\n"));
+    output
+}
+
+/// Drops exact repeats of a warning, keeping the first of each. Two sources
+/// can report the same condition; it is said once on stderr and listed once.
+fn dedupe_warnings(json: &mut Value) {
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(list) = json["warnings"].as_array_mut() {
+        list.retain(|warning| seen.insert(warning.to_string()));
+    }
 }
 
 fn add_warning(output: &mut Output, warning: &str) {
@@ -3169,6 +3274,7 @@ fn main() -> ExitCode {
         output.text = format!("hallpass: error: {message}\n");
         return emit(output, Format::Text);
     }
+    let raw_args = input.args.clone();
     let cli = definition
         .try_get_matches_from_mut(input.args)
         .and_then(|matches| Cli::from_arg_matches(&matches));
@@ -3190,13 +3296,35 @@ fn main() -> ExitCode {
             }
             emit(output, format)
         }
-        Err(e) if e.kind() == ErrorKind::ValueValidation => {
-            // A bad value is a usage error like any other: the usual error
-            // format, without clap's own prefix and trailing hint.
-            let rendered = e.render().to_string();
-            let first = rendered.lines().next().unwrap_or_default();
-            let message = first.strip_prefix("error: ").unwrap_or(first);
-            let mut out = parse_error(topic.as_deref(), message);
+        Err(e)
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+                || (e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                    && !input.json) =>
+        {
+            // Help and version are printed as clap writes them. With no
+            // command, the text output still lists the commands on stderr.
+            if input.json {
+                let out = match e.kind() {
+                    ErrorKind::DisplayHelp => {
+                        cli_help::help(input.topic.as_deref().and_then(OsStr::to_str), Format::Json)
+                    }
+                    _ => cli_help::version(),
+                };
+                emit(out, Format::Json)
+            } else {
+                for warning in &input.env_warning {
+                    stderr_line(&format!("hallpass: warning: {}", safe_message(warning)));
+                }
+                let code = if e.use_stderr() { ERROR } else { OK };
+                let _ = e.print();
+                ExitCode::from(code)
+            }
+        }
+        Err(e) => {
+            // Every other parse error is a usage error like any other: the
+            // usual error format, with clap's own prefix and tips replaced.
+            let lines = clap_usage_lines(&e, &definition, topic.as_deref(), &raw_args);
+            let mut out = clap_error_output(topic.as_deref(), &lines);
             for warning in &input.env_warning {
                 add_warning(&mut out, warning);
             }
@@ -3208,32 +3336,6 @@ fn main() -> ExitCode {
                     Format::Text
                 },
             )
-        }
-        Err(e) => {
-            if input.json {
-                let out = match e.kind() {
-                    ErrorKind::DisplayHelp => {
-                        cli_help::help(input.topic.as_deref().and_then(OsStr::to_str), Format::Json)
-                    }
-                    ErrorKind::DisplayVersion => cli_help::version(),
-                    _ => {
-                        let mut out =
-                            parse_error(topic.as_deref(), e.render().to_string().trim_end());
-                        for warning in &input.env_warning {
-                            add_warning(&mut out, warning);
-                        }
-                        out
-                    }
-                };
-                emit(out, Format::Json)
-            } else {
-                for warning in &input.env_warning {
-                    stderr_line(&format!("hallpass: warning: {}", safe_message(warning)));
-                }
-                let code = if e.use_stderr() { ERROR } else { OK };
-                let _ = e.print();
-                ExitCode::from(code)
-            }
         }
     }
 }
