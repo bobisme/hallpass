@@ -395,7 +395,7 @@ fn carry_rehearsal_counts_the_units_and_names_them() {
     ]);
     assert!(
         text.contains(
-            "Carried from the witness: requests 3 (rehearsal units: the witness's requests 3 were recorded under a test clock, and they count against the ceilings). Spent now: requests 3."
+            "Carried from the witness: requests 3 (rehearsal units: the witness's requests 3 were recorded under a test clock, and they count against the ceilings).\n  - Spent now: requests 3."
         ),
         "{text}"
     );

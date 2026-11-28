@@ -443,13 +443,9 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
             (None, Some(e)) => format!("error {}: {}", e.code, super::safe_message(&e.message)),
             (None, None) => String::new(),
         };
-        let _ = writeln!(
-            text,
-            "  {:>2}  {:<10} {}  {detail}",
-            i + 1,
-            row.relation,
-            safe(&row.path)
-        );
+        // An error's later sentences go on their own lines under the row.
+        let row = format!("  {:>2}  {:<10} {}  ", i + 1, row.relation, safe(&row.path));
+        text.push_str(&super::readable::prose(&detail, &row, "      "));
     }
     for warning in &report.warnings {
         let _ = writeln!(text, "Warning: {}", super::safe_message(warning));
@@ -458,7 +454,8 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
     if let Some(advice) = super::cli_doctor::last_resort(file, &report)
         .or_else(|| super::cli_doctor::restore_exact(file, &report))
     {
-        let _ = writeln!(text, "{}", advice["message"].as_str().unwrap_or_default());
+        let message = super::safe_message(advice["message"].as_str().unwrap_or_default());
+        text.push_str(&super::readable::prose(&message, "", "  "));
         value["advice"] = json!([advice]);
     }
     let (result, code) = if report.errors > 0 {

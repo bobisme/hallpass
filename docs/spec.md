@@ -1421,13 +1421,23 @@ it was recognized (null otherwise). Help and version requests return their own c
 A text error starts with a short headline:
 `hallpass COMMAND: error: CODE: WHAT IS WRONG`. When there is one next
 step, the second line is `Next: STEP`. The full message follows, indented
-by two spaces; it says the same as `error.message` in JSON. An error with
+by two spaces; it says the same as `error.message` in JSON. A long message
+is one step per line: its first sentence, then each later sentence or
+alternative on its own `- ` line, indented two spaces more. An error with
 no headline of its own (`io`, `usage`, `untrusted-owner`,
 `archive-corrupt`) puts the first line of its message after the code.
 `doctor` prints its verdict the same way: `BLOCKED: CODE: HEADLINE` (or
 `NEEDS ACTION:`), then `Next:` and the step, then `Details:` with the
-rest of the explanation, then `Also:` with the other findings. Callers
-read the JSON, not this text.
+rest of the explanation, then `Also:` with the other findings. Details
+and findings are broken into steps the same way, and so are a refusal and
+the long lines of `adopt`, `reconcile-references` and `repair`. Only white
+space changes: the words are those of the JSON message. Text output shows a
+path under the current directory relative to it, so a command it names runs
+as written in that directory; other paths stay absolute (never `../`). On a
+terminal (standard output and standard error both), long lines wrap at 100
+columns, or `COLUMNS` when that is smaller, and a command in backticks is
+never broken; otherwise there is no wrapping. JSON keeps absolute paths and
+one-line messages. Callers read the JSON, not this text.
 
 | Command | Exit 0 | Exit 2 | Exit 1 |
 |---|---|---|---|

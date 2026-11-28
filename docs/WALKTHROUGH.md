@@ -548,8 +548,15 @@ hallpass adopt engagement.pass.toml --reason "pass moved to the colleague's acco
 ```
 
 ```text
-ADOPTION PREVIEW: no-witness for web-2026-11 at sequence 2. Present: bytes 48, requests 2. Carry: nothing. Projected: bytes 48, requests 2. Token: TOKEN
-ADOPTED: engagement.pass.toml.ledger for pass web-2026-11 (the ledger had no witness). Recorded as ledger entry 3 with the reason "pass moved to the colleague's account". Carried from the witness: nothing. Spent now: bytes 48, requests 2.
+ADOPTION PREVIEW: no-witness for web-2026-11 at sequence 2.
+  - Present: bytes 48, requests 2.
+  - Carry: nothing.
+  - Projected: bytes 48, requests 2.
+  - Token: TOKEN
+ADOPTED: engagement.pass.toml.ledger for pass web-2026-11 (the ledger had no witness).
+  - Recorded as ledger entry 3 with the reason "pass moved to the colleague's account".
+  - Carried from the witness: nothing.
+  - Spent now: bytes 48, requests 2.
 ```
 
 The colleague now spends from the same count, and the adoption is entry 3

@@ -113,6 +113,19 @@ fn error_lines<'a>(shown: &'a str, prefix: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// Text lines as the one-line message they show: each step's line has its
+/// indent and `- ` taken off, and the steps are joined with a space.
+fn joined(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|l| {
+            let l = l.trim_start();
+            l.strip_prefix("- ").unwrap_or(l)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[test]
 fn an_error_starts_with_its_code_a_headline_and_the_next_step() {
     let case = Case::new();
@@ -126,10 +139,12 @@ fn an_error_starts_with_its_code_a_headline_and_the_next_step() {
     assert!(headline.len() < 100, "{headline}");
     assert!(!headline.contains("p.toml"), "{headline}");
     assert_eq!(lines[1], "Next: run `chmod 600 p.toml`", "{shown}");
-    // The full message follows, indented and unchanged.
+    // The full message follows, indented, one step per line, and its
+    // words unchanged.
     let message = reply["error"]["message"].as_str().expect("message");
-    assert_eq!(lines[2..].len(), 1, "{shown}");
-    assert_eq!(lines[2].strip_prefix("  "), Some(message), "{shown}");
+    assert!(lines[2].starts_with("  p.toml has mode 0664"), "{shown}");
+    assert!(lines[3].starts_with("    - If you saved it"), "{shown}");
+    assert_eq!(joined(&lines[2..]), message, "{shown}");
     assert_eq!(reply["error"]["code"], "insecure-permissions");
     assert_eq!(reply["error"]["headline"].as_str(), Some(headline));
     assert_eq!(reply["error"]["next"], "run `chmod 600 p.toml`");
@@ -166,9 +181,8 @@ fn a_rehearsal_ledger_under_the_real_clock_gets_a_short_headline() {
         lines[1],
         "Next: run `hallpass doctor p.toml`, which names the safe step"
     );
-    let detail: Vec<&str> = lines[2..].iter().map(|l| l.trim_start()).collect();
     assert_eq!(
-        Some(detail.join(" ").as_str()),
+        Some(joined(&lines[2..]).as_str()),
         reply["error"]["message"].as_str()
     );
     assert!(shown.ends_with("Nothing was permitted.\n"), "{shown}");
@@ -228,9 +242,18 @@ fn doctor_puts_the_headline_then_next_then_the_details() {
         "Next: hallpass compare-backups p.toml p.toml.ledger"
     );
     assert!(lines[2].starts_with("  Add each backup copy"), "{shown}");
-    assert_eq!(lines[3], "Details:", "{shown}");
+    assert!(lines[3].starts_with("    - Restore that copy"), "{shown}");
+    let details = lines
+        .iter()
+        .position(|l| *l == "Details:")
+        .expect("details");
     let message = reply["message"].as_str().expect("message");
-    assert_eq!(lines[4].strip_prefix("  "), Some(message), "{shown}");
+    let rest: Vec<&str> = lines[details + 1..]
+        .iter()
+        .copied()
+        .take_while(|l| l.starts_with("  "))
+        .collect();
+    assert_eq!(joined(&rest), message, "{shown}");
     assert_eq!(
         reply["headline"].as_str(),
         lines[0].strip_prefix("BLOCKED: ledger-corrupt: ")

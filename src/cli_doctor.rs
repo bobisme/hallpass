@@ -19,7 +19,7 @@ use hallpass::time::Duration;
 use hallpass::{Error, LedgerView, LoadedPass, RehearsalTotals::Drop, StateDir, WitnessStatus};
 use serde_json::{Value, json};
 
-use super::{Clock, OK, Output, REFUSED, error_output, safe_message};
+use super::{Clock, OK, Output, REFUSED, error_output, readable, safe_message};
 
 mod checkpoint;
 
@@ -1198,9 +1198,13 @@ fn command_line(words: &[String]) -> String {
 fn next_lines(text: &mut String, next: Option<&[String]>, step: &str) {
     if let Some(words) = next {
         let _ = writeln!(text, "Next: {}", safe_message(&command_line(words)));
-        let _ = writeln!(text, "  {}", safe_message(step));
+        text.push_str(&readable::prose(&safe_message(step), "  ", "    "));
     } else {
-        let _ = writeln!(text, "Next: no command. {}", safe_message(step));
+        text.push_str(&readable::prose(
+            &safe_message(step),
+            "Next: no command. ",
+            "  ",
+        ));
     }
 }
 
@@ -1249,7 +1253,7 @@ fn render(file: &Path, d: Diagnosis) -> Output {
         if !rest.is_empty() {
             text.push_str("Details:\n");
             for line in rest {
-                let _ = writeln!(text, "  {}", safe_message(line));
+                text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
             }
         }
         (
@@ -1278,7 +1282,8 @@ fn render(file: &Path, d: Diagnosis) -> Output {
     if !findings.is_empty() {
         text.push_str("Also:\n");
         for f in &findings {
-            let _ = writeln!(text, "  - {}: {}", f.code, safe_message(&f.message));
+            let line = format!("{}: {}", f.code, safe_message(&f.message));
+            text.push_str(&readable::prose(&line, "  - ", "    "));
         }
     }
     let findings: Vec<Value> = findings

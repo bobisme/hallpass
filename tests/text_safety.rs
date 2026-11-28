@@ -270,7 +270,7 @@ fn reconcile_and_reference_reconciliation_text_quote_references_once() {
     assert_eq!(code, 0, "{out}");
     let (value, rest) = quoted_after(&out, "with the reason ");
     assert_eq!(value, r#"lost "by" \ mistake"#);
-    assert!(rest.starts_with(". Carried from the witness"), "{out}");
+    assert!(rest.starts_with(".\n  - Carried from the witness"), "{out}");
     let list = case.file(
         "refs.json",
         &json!({"version": 1, "pass_id": "text-1", "references": [CRAFTED, r"back\slash"]})

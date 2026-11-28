@@ -485,7 +485,7 @@ fn damage_seen_before_the_ledger_is_lost_stops_the_adoption() {
     let shown = case.run(&["adopt", "p.toml", "--preview", "--carry-noted-totals"]);
     assert!(
         String::from_utf8_lossy(&shown.stdout).contains(
-            "Carry: calls 3 (the higher of the witness's and the noted verified totals; from the note: calls 3). Projected: calls 3."
+            "Carry: calls 3 (the higher of the witness's and the noted verified totals; from the note: calls 3).\n  - Projected: calls 3."
         ),
         "{}",
         String::from_utf8_lossy(&shown.stdout)
@@ -584,7 +584,7 @@ fn the_adopted_line_names_the_counters_carried_from_the_note() {
     let stdout = String::from_utf8_lossy(&shown.stdout);
     assert!(
         stdout.contains(
-            "Carried, per counter, the higher of the witness's total and the verified total noted when the witness was found damaged (from the note: calls 3): calls 3. Spent now: calls 3."
+            "Carried, per counter, the higher of the witness's total and the verified total noted when the witness was found damaged (from the note: calls 3): calls 3.\n  - Spent now: calls 3."
         ),
         "{stdout}"
     );

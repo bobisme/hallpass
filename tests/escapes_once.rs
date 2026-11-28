@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
@@ -339,7 +339,9 @@ fn evidence_warning_quotes_the_path_once_and_escapes_controls() {
         .find(|l| l.starts_with("Warning: "))
         .unwrap_or_else(|| panic!("no warning in {}{}", ran.out, ran.err));
     let shown = quoted_after(warning, "cannot be used: ");
-    let full = env.path(name).join("hallpass/review-example.witness");
+    // The state directory is under the current directory, so text output
+    // shows the path from there.
+    let full = Path::new(name).join("hallpass/review-example.witness");
     assert_eq!(unquote(shown).as_deref(), full.to_str(), "{warning}");
     assert!(
         warning.contains("\\u{001b}") && warning.contains("\\u{202e}"),
@@ -349,7 +351,7 @@ fn evidence_warning_quotes_the_path_once_and_escapes_controls() {
     let dir = quoted_after(warning, "state directory (");
     assert_eq!(
         unquote(dir).as_deref(),
-        env.path(name).join("hallpass").to_str(),
+        Path::new(name).join("hallpass").to_str(),
         "{warning}"
     );
     // No control character reaches the terminal, and the same warning is

@@ -156,12 +156,18 @@ preview adoption and review the totals before recording recovery. Set
 $ hallpass status engagement.pass.toml
 hallpass status: error: ledger-missing: the ledger is missing, but the witness says spends were recorded
 Next: run `hallpass doctor engagement.pass.toml`, which names the safe step
-  the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says its last logical ledger sequence was 1 (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
+  the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says its last logical ledger sequence was 1 (spent: calls 1); the ledger was last seen at the same path on …
+    - hallpass will not count from zero.
+    - Put the ledger back beside the pass (move it from there, or restore it from a backup);
+    - if it is really lost, run `hallpass adopt engagement.pass.toml --preview`, review what it carries, then `hallpass adopt engagement.pass.toml --reason "..." --token TOKEN` …
 
 $ hallpass adopt engagement.pass.toml --preview --json
 …
 $ hallpass adopt engagement.pass.toml --reason "original ledger lost" --token "$reviewed_token"
-ADOPTED: engagement.pass.toml.ledger for pass example-2026-11 (the ledger was missing; a new one was started). Recorded as ledger entry 1 … Carried from the witness: calls 1. Spent now: calls 1.
+ADOPTED: engagement.pass.toml.ledger for pass example-2026-11 (the ledger was missing; a new one was started).
+  - Recorded as ledger entry 1 …
+  - Carried from the witness: calls 1.
+  - Spent now: calls 1.
 ```
 
 Every command accepts `--json` and writes one JSON object to stdout.

@@ -27,25 +27,25 @@ pub fn repair(file: &Path, kinds: (bool, bool), preview: bool, token: Option<&st
     let ledger = safe(&torn.ledger.display().to_string()).into_owned();
     let text = torn.copy.as_ref().map_or_else(
         || {
-            format!(
-                "TORN LINE PREVIEW: the ledger {ledger} ends with {} bytes of {} after sequence {}. The witness recorded sequence {}, so that line was never counted. To remove those bytes and keep a copy of them beside the ledger, run `hallpass repair {} --drop-torn-tail --token TOKEN` with this token. Token: {}\n",
+            super::readable::prose(&format!(
+                "TORN LINE PREVIEW: the ledger {ledger} ends with {} bytes of {} after sequence {}. The witness recorded sequence {}, so that line was never counted. To remove those bytes and keep a copy of them beside the ledger, run `hallpass repair {} --drop-torn-tail --token TOKEN` with this token. Token: {}",
                 torn.removed_bytes,
                 if torn.nul_only { "NUL bytes" } else { "a line cut short" },
                 torn.seq,
                 torn.witness_seq,
                 safe(&file.display().to_string()),
                 torn.token
-            )
+            ), "", "  ")
         },
         |copy| {
-            format!(
-                "REPAIRED: removed {} bytes of {} after sequence {} from {ledger}. A copy of them is in {}. The ledger now ends at sequence {}; nothing was recorded or permitted.\n",
+            super::readable::prose(&format!(
+                "REPAIRED: removed {} bytes of {} after sequence {} from {ledger}. A copy of them is in {}. The ledger now ends at sequence {}; nothing was recorded or permitted.",
                 torn.removed_bytes,
                 if torn.nul_only { "NUL bytes" } else { "a line cut short" },
                 torn.seq,
                 safe(&copy.display().to_string()),
                 torn.seq
-            )
+            ), "", "  ")
         },
     );
     Output {
@@ -84,16 +84,24 @@ fn restore_newline(file: &Path, state: &StateDir, preview: bool, token: Option<&
     };
     let ledger = safe(&done.ledger.display().to_string()).into_owned();
     let text = if done.restored {
-        format!(
-            "REPAIRED: added the missing line end after sequence {} of {ledger}. No line was changed or removed; nothing was recorded or permitted.\n",
-            done.seq
+        super::readable::prose(
+            &format!(
+                "REPAIRED: added the missing line end after sequence {} of {ledger}. No line was changed or removed; nothing was recorded or permitted.",
+                done.seq
+            ),
+            "",
+            "  ",
         )
     } else {
-        format!(
-            "NEWLINE PREVIEW: the last line of the ledger {ledger} (sequence {}) is whole and is the line the witness recorded, but it has no line end. To add the line end, and nothing else, run `hallpass repair {} --restore-final-newline --token TOKEN` with this token. Token: {}\n",
-            done.seq,
-            safe(&file.display().to_string()),
-            done.token
+        super::readable::prose(
+            &format!(
+                "NEWLINE PREVIEW: the last line of the ledger {ledger} (sequence {}) is whole and is the line the witness recorded, but it has no line end. To add the line end, and nothing else, run `hallpass repair {} --restore-final-newline --token TOKEN` with this token. Token: {}",
+                done.seq,
+                safe(&file.display().to_string()),
+                done.token
+            ),
+            "",
+            "  ",
         )
     };
     Output {
@@ -126,17 +134,25 @@ fn drop_blank(file: &Path, state: &StateDir, preview: bool, token: Option<&str>)
     };
     let ledger = safe(&done.ledger.display().to_string()).into_owned();
     let text = if done.repaired {
-        format!(
-            "REPAIRED: removed {} bytes of blank lines after sequence {} of {ledger}. No line hallpass wrote was changed; nothing was recorded or permitted.\n",
-            done.removed_bytes, done.seq
+        super::readable::prose(
+            &format!(
+                "REPAIRED: removed {} bytes of blank lines after sequence {} of {ledger}. No line hallpass wrote was changed; nothing was recorded or permitted.",
+                done.removed_bytes, done.seq
+            ),
+            "",
+            "  ",
         )
     } else {
-        format!(
-            "BLANK TAIL PREVIEW: the ledger {ledger} ends with {} bytes of empty lines or white space after sequence {}, which is the line the witness recorded. To remove those bytes, and nothing else, run `hallpass repair {} --drop-blank-tail --token TOKEN` with this token. Token: {}\n",
-            done.removed_bytes,
-            done.seq,
-            safe(&file.display().to_string()),
-            done.token
+        super::readable::prose(
+            &format!(
+                "BLANK TAIL PREVIEW: the ledger {ledger} ends with {} bytes of empty lines or white space after sequence {}, which is the line the witness recorded. To remove those bytes, and nothing else, run `hallpass repair {} --drop-blank-tail --token TOKEN` with this token. Token: {}",
+                done.removed_bytes,
+                done.seq,
+                safe(&file.display().to_string()),
+                done.token
+            ),
+            "",
+            "  ",
         )
     };
     Output {

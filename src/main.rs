@@ -9,6 +9,7 @@ mod cli_doctor;
 mod cli_evidence;
 mod cli_help;
 mod cli_repair;
+mod readable;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -710,7 +711,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
         let _ = writeln!(text, "Next: {}", safe_message(next));
     }
     for line in &summary.detail {
-        let _ = writeln!(text, "  {}", safe_message(line));
+        text.push_str(&readable::prose(&safe_message(line), "  ", "    "));
     }
     for p in problems {
         let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
@@ -1507,7 +1508,13 @@ fn permits(
                 window_text(&loaded.pass, &state)
             )
         },
-        |r| format!("REFUSED: {asked}: {}\n", sentence(&r.reason.message)),
+        |r| {
+            readable::prose(
+                &format!("REFUSED: {asked}: {}", sentence(&r.reason.message)),
+                "",
+                "  ",
+            )
+        },
     );
     Output {
         code: if refused.is_some() { REFUSED } else { OK },
@@ -1549,9 +1556,9 @@ fn announce_lock_wait(wait: &hallpass::LockWait) {
             )
         },
     );
-    stderr_line(&format!(
+    stderr_line(&readable::paths(&format!(
         "hallpass: waiting for the {lock} lock on {path}, {who}. Nothing is recorded yet; {end}."
-    ));
+    )));
 }
 
 fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
@@ -1600,7 +1607,7 @@ fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
             "WOULD ALLOW: {} {}; no debit recorded.\n",
             outcome.amount, outcome.counter
         ),
-        (Some(r), _, _) => format!("REFUSED: {}\n", sentence(&r.message)),
+        (Some(r), _, _) => readable::prose(&format!("REFUSED: {}", sentence(&r.message)), "", "  "),
         _ => "REFUSED: no decision.\n".to_owned(),
     };
     let reply = cli_debit::SpendReply {
@@ -1666,7 +1673,7 @@ fn debit_spend(
         (Some(r), _) => (
             "refused",
             REFUSED,
-            format!("REFUSED: {}\n", sentence(&r.message)),
+            readable::prose(&format!("REFUSED: {}", sentence(&r.message)), "", "  "),
         ),
         (None, Some(seq)) => ("allowed", OK, format!("RECORDED: ledger entry {seq}\n")),
         (None, None) => (
@@ -2256,30 +2263,34 @@ fn preview_adopt(
     match preview {
         Ok(p) => Output {
             code: 0,
-            text: format!(
-                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}{}{}. Projected: {}. Token: {}\n",
-                p.case.as_str(),
-                p.pass_id,
-                p.seq,
-                hallpass::totals_text(&p.present),
-                hallpass::totals_text(&p.carried),
-                rehearsal_units_text(p.rehearsal.as_ref(), p.previous.as_ref()),
-                p.checkpoint
-                    .as_ref()
-                    .map_or_else(String::new, |cp| checkpoint_carry_text(
-                        cp,
-                        p.checkpoint_gap.as_ref()
-                    )),
-                if p.from_note.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " (the higher of the witness's and the noted verified totals; from the note: {})",
-                        hallpass::totals_text(&p.from_note)
-                    )
-                },
-                hallpass::totals_text(&p.totals),
-                p.token
+            text: readable::prose(
+                &format!(
+                    "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}{}{}. Projected: {}. Token: {}",
+                    p.case.as_str(),
+                    p.pass_id,
+                    p.seq,
+                    hallpass::totals_text(&p.present),
+                    hallpass::totals_text(&p.carried),
+                    rehearsal_units_text(p.rehearsal.as_ref(), p.previous.as_ref()),
+                    p.checkpoint
+                        .as_ref()
+                        .map_or_else(String::new, |cp| checkpoint_carry_text(
+                            cp,
+                            p.checkpoint_gap.as_ref()
+                        )),
+                    if p.from_note.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " (the higher of the witness's and the noted verified totals; from the note: {})",
+                            hallpass::totals_text(&p.from_note)
+                        )
+                    },
+                    hallpass::totals_text(&p.totals),
+                    p.token
+                ),
+                "",
+                "  ",
             ),
             json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(|cp| checkpoint_warning(cp, p.checkpoint_gap.as_ref()))).chain(p.checkpoint_gap.as_ref().filter(|g| !g.exact()).map(placement_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
@@ -2540,23 +2551,27 @@ fn adopt(
         _ => "adopted",
     };
     let a = &outcome.adoption;
-    let text = format!(
-        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}{}{}. Spent now: {}.\n",
-        safe(&outcome.ledger.display().to_string()),
-        outcome.pass_id,
-        a.seq,
-        quoted(&a.reason),
-        if a.checkpoint.is_some() && outcome.case == hallpass::AdoptCase::CheckpointBehind {
-            "Carried".to_owned()
-        } else {
-            carried_source(&outcome.from_note)
-        },
-        hallpass::totals_text(&a.carried),
-        rehearsal_units_text(outcome.rehearsal.as_ref(), a.previous.as_ref()),
-        a.checkpoint
-            .as_ref()
-            .map_or_else(String::new, |cp| checkpoint_carry_text(cp, None)),
-        hallpass::totals_text(&outcome.totals),
+    let text = readable::prose(
+        &format!(
+            "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}{}{}. Spent now: {}.",
+            safe(&outcome.ledger.display().to_string()),
+            outcome.pass_id,
+            a.seq,
+            quoted(&a.reason),
+            if a.checkpoint.is_some() && outcome.case == hallpass::AdoptCase::CheckpointBehind {
+                "Carried".to_owned()
+            } else {
+                carried_source(&outcome.from_note)
+            },
+            hallpass::totals_text(&a.carried),
+            rehearsal_units_text(outcome.rehearsal.as_ref(), a.previous.as_ref()),
+            a.checkpoint
+                .as_ref()
+                .map_or_else(String::new, |cp| checkpoint_carry_text(cp, None)),
+            hallpass::totals_text(&outcome.totals),
+        ),
+        "",
+        "  ",
     );
     Output {
         code: OK,
@@ -2602,15 +2617,19 @@ fn reconcile_references(
         Err(e) => return error_output("reconcile-references", Some(file), &e),
     };
     let r = &outcome.reconciliation;
-    let text = format!(
-        "RECONCILED: {} caller reference(s) for the adoption at sequence {} of pass {}, recorded in {} as entry {} with the reason {}. From here on a guarded spend (--require-new-ref) refuses a listed reference as duplicate-reference, and the adoption at sequence {} no longer makes other references inconclusive.\n",
-        r.references.len(),
-        r.adoption,
-        outcome.pass_id,
-        safe(&outcome.ledger.display().to_string()),
-        r.seq,
-        quoted(&r.reason),
-        r.adoption,
+    let text = readable::prose(
+        &format!(
+            "RECONCILED: {} caller reference(s) for the adoption at sequence {} of pass {}, recorded in {} as entry {} with the reason {}. From here on a guarded spend (--require-new-ref) refuses a listed reference as duplicate-reference, and the adoption at sequence {} no longer makes other references inconclusive.",
+            r.references.len(),
+            r.adoption,
+            outcome.pass_id,
+            safe(&outcome.ledger.display().to_string()),
+            r.seq,
+            quoted(&r.reason),
+            r.adoption,
+        ),
+        "",
+        "  ",
     );
     Output {
         code: OK,
@@ -3150,6 +3169,26 @@ impl Invocation {
     }
 }
 
+/// The commands whose text output is messages about files, where a path
+/// under the current directory is shown relative to it.
+const SHORT_PATHS: &[&str] = &[
+    "spend",
+    "permits",
+    "check",
+    "capacity",
+    "rehearse",
+    "status",
+    "doctor",
+    "adopt",
+    "reconcile-references",
+    "repair",
+    "compare-backups",
+    "archive",
+    "checkpoint",
+    "verify-checkpoint",
+    "init",
+];
+
 fn emit(mut output: Output, format: Format) -> ExitCode {
     if output.json.get("warnings").is_none() {
         output.json["warnings"] = json!([]);
@@ -3189,12 +3228,24 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
                 {
                     continue;
                 }
-                stderr_line(&format!("hallpass: warning: {w}"));
+                stderr_text(&readable::prose(&w, "hallpass: warning: ", "  "));
             }
-            if output.code == ERROR {
-                stderr_text(&output.text);
+            // Paths under the current directory are shown relative to it,
+            // except in a reply whose text is data (pass bytes, a diff, a
+            // listing of ledger entries), which is shown as it is.
+            let text = if output.json["result"] == "error"
+                || output.json["command"]
+                    .as_str()
+                    .is_some_and(|c| SHORT_PATHS.contains(&c))
+            {
+                readable::paths(&output.text)
             } else {
-                stdout_text = std::mem::take(&mut output.text);
+                std::mem::take(&mut output.text)
+            };
+            if output.code == ERROR {
+                stderr_text(&text);
+            } else {
+                stdout_text = text;
             }
         }
     }
