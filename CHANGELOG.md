@@ -260,6 +260,29 @@ Changes since commit d70c09f.
   The batch ceiling refusal no longer repeats "Nothing was recorded".
   Library: `LockWait.give_up_in`.
 
+- **Witness totals are checked.** A witness whose totals differ from the
+  verified ledger at the witnessed sequence is damaged: `witness-unavailable`
+  for spend, adopt and audits, and `not-checked` with a warning for status,
+  permits and ledger. Proven damage is remembered in `<id>.witness-damage`, and
+  `adopt` refuses to carry totals from that witness unless
+  `--carry-noted-totals` is given. The witness format is unchanged.
+- A failed ledger write that hallpass rolls back gives the new code
+  `ledger-append-failed` with `recording: not-recorded` (it used to be
+  `ledger-append-uncertain`); resubmitting the same unit is safe. The
+  `ledger-corrupt` advice for a cut-short last line names `hallpass repair`
+  instead of asking for a hand edit.
+- CLI amounts and other numeric flags (`--n`, `--charge`, `--duration`,
+  `--lock-timeout-ms`, `--tail`, `--since`, `--adoption`) refuse a leading
+  zero. `diff --containment` calls a changed `approval.reference` `widened`.
+- In a release build, an ignored `HALLPASS_UNSAFE_TEST_CLOCK` is a JSON
+  `warnings` entry on every command. The reference and minimal callers under
+  `--rehearsal` refuse a hallpass that ignores the test clock, and a live
+  caller refuses one that reports a test clock.
+- The reference caller matches journal records by pass ID, not by the path as
+  typed; `reconcile-references` records carry `pass_id`.
+- The `ledger-elsewhere` advice says to replace the live pass file by `mv`.
+  Library: `AdoptPreview.from_note` (a new public field).
+
 ### Added
 
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
@@ -406,6 +429,22 @@ Changes since commit d70c09f.
 
 - Library: `with_test_clock`, which marks the ledger lines written inside it
   as test-clock lines.
+
+- `hallpass repair FILE --drop-torn-tail` (`--preview`, then `--token`), and in
+  Rust `preview_drop_torn_tail`, `drop_torn_tail` and `TornTail`. It removes a
+  cut-short last ledger line only when the witness proves the line was never
+  counted, and keeps the removed bytes in `LEDGER.torn-N`.
+- `adopt --carry-noted-totals`, which carries per counter the higher of the
+  witness total and the verified total noted when the witness was found
+  damaged; `preview_adopt_with`, `adopt_guarded_with`, and `from_note` in adopt
+  results.
+- A warning when a pass file is changed in place since the last `spend`,
+  `permits` or `status` (`StateDir::observe_pass_file`, note `<id>.pass-file`).
+- Spend and `capacity` warn when the ledger has spend on a counter the pass no
+  longer has. `check` and `lint` warn when a destination repeats another.
+- `adopt --preview` warns that carried totals come from the witness alone;
+  `compare-backups` warns about a witness whose totals differ from a
+  candidate.
 
 ### Changed
 
@@ -573,3 +612,19 @@ Changes since commit d70c09f.
   for a signature it did not store (bn-1re).
 - The reference caller's `handoff` no longer says "Nothing needs attention"
   when the pass on disk is not the pinned revision (bn-37z).
+- `diff` marks a changed `approval.reference` `[review required]`.
+- An integer too large for the TOML reader gets the field's own rule
+  (`ceilings.*`, `destination[N].ports`, `format`) instead of "not valid TOML".
+- A ledger from before an adoption is called "a different history from
+  sequence N", not "an older copy"; `compare-backups --ancestry` leads with its
+  conclusion; the adoption reference warning ends with a full stop.
+- A one-digit witness edit followed by an adoption could allow an overspend
+  (bn-2pm).
+- A short write during an append no longer leaves a torn line that blocks
+  every later command: the ledger is cut back and synced under the lock
+  (bn-2pi).
+- The reference caller no longer appends onto a torn journal record, and a
+  damaged journal line is refused with its number instead of a traceback
+  (bn-ykr). `handoff` no longer says "Nothing needs attention" when the pass
+  path is spelled differently (bn-yi9). Rehearsal mode against a release build
+  no longer debits live and runs the callback (bn-2kr).
