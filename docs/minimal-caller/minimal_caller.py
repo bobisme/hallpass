@@ -93,7 +93,7 @@ if verdict == "proceed":
 elif code == 2:  # refused: nothing was recorded, do not send
     print("refused:", refusal_message(out), file=sys.stderr)
     sys.exit(2)
-elif verdict == "reconcile":  # a debit may exist: never retry, see EVIDENCE.md
+elif verdict == "reconcile":  # a debit may exist (also exit 1 with no reply: hallpass could not write it): never retry, see EVIDENCE.md
     print("reconcile: the spend may be recorded; look up this ref with hallpass receipt", file=sys.stderr)
     sys.exit(3)
 else:  # error, crash, odd reply: unknown outcome, do not send

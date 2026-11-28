@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::{Cli, Error, Format, OK, Output, error_output};
 
-const EXITS: &str = "Exit codes\n  0  Success (inspect command and result)\n  1  Usage, file or accounting error\n  2  Policy refusal, verification mismatch, coverage gaps or inconclusive evidence";
+const EXITS: &str = "Exit codes\n  0  Success (inspect command and result)\n  1  Usage, file or accounting error, or a reply that could not be written (stderr says what is recorded)\n  2  Policy refusal, verification mismatch, coverage gaps or inconclusive evidence";
 
 struct Guide {
     examples: &'static [&'static str],

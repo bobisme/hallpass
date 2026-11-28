@@ -56,7 +56,8 @@ def decode(stdout):
 
 
 def message(reply):
-    return (reply.get("error") or {}).get("message", "no reply")
+    return (reply.get("error") or {}).get("message",
+                                          "no reply (if hallpass said on stderr that the entry IS recorded, it is: inspect the ledger)")
 
 
 def append(journal, **record):

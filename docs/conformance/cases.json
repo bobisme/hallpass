@@ -174,6 +174,12 @@
       "action": "reconcile"
     },
     {
+      "id": "reply-not-written-after-spend",
+      "exit": 1,
+      "stdout": "",
+      "action": "reconcile"
+    },
+    {
       "id": "duplicate-result",
       "exit": 0,
       "stdout": "{\"command\":\"spend\",\"result\":\"refused\",\"result\":\"allowed\",\"test_clock\":false,\"seq\":1,\"warnings\":[],\"pass_id\":\"example-2026-11\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}],\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\",\"charges\":[{\"counter\":\"calls\",\"n\":1,\"spent\":1,\"total\":1,\"remaining\":0},{\"counter\":\"bytes\",\"n\":100,\"spent\":100,\"total\":100,\"remaining\":0}],\"receipt\":{\"caller_ref\":\"unit-42\",\"targets\":[{\"target\":\"192.0.2.10:5060/udp\",\"name\":\"sip.example.net\",\"label\":\"sip-edge\"},{\"target\":\"[2001:db8::1]:443/tcp\",\"name\":null,\"label\":\"web\"}]},\"refusal\":null,\"refused_target\":null,\"note\":null,\"file\":\"review.pass.toml\"}",

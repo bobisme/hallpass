@@ -559,9 +559,9 @@ fn clock() -> Result<Clock, Error> {
                 "{TEST_CLOCK_VAR} is `{text}`, not an RFC 3339 timestamp; unset it to use the real clock"
             ))
         })?;
-    eprintln!(
+    stderr_line(&format!(
         "hallpass: WARNING: test clock in use ({TEST_CLOCK_VAR}={text}); decisions are NOT about the real time"
-    );
+    ));
     Ok(Clock { now, test: true })
 }
 
@@ -1484,9 +1484,9 @@ fn announce_lock_wait(wait: &hallpass::LockWait) {
             )
         },
     );
-    eprintln!(
+    stderr_line(&format!(
         "hallpass: waiting for the {lock} lock on {path}, {who}. Nothing is recorded yet; {end}."
-    );
+    ));
 }
 
 fn spend(args: &SpendArgs<'_>, clock: &Clock) -> Output {
@@ -2852,6 +2852,7 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
     if output.json.get("warnings").is_none() {
         output.json["warnings"] = json!([]);
     }
+    let mut stdout_text = String::new();
     match format {
         Format::Json => {
             let mut advice = output.json["advice"]
@@ -2872,7 +2873,7 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
                 advice.push(json!({"level":"info","type":"check-pass","message":"Fill in the owner's written approval, then run hallpass check on the new file."}));
             }
             output.json["advice"] = Value::Array(advice);
-            println!("{}", output.json);
+            stdout_text = format!("{}\n", output.json);
         }
         Format::Text | Format::Pretty => {
             for w in output.json["warnings"].as_array().into_iter().flatten() {
@@ -2885,16 +2886,109 @@ fn emit(mut output: Output, format: Format) -> ExitCode {
                 {
                     continue;
                 }
-                eprintln!("hallpass: warning: {w}");
+                stderr_line(&format!("hallpass: warning: {w}"));
             }
             if output.code == ERROR {
-                eprint!("{}", output.text);
+                stderr_text(&output.text);
             } else {
-                print!("{}", output.text);
+                stdout_text = std::mem::take(&mut output.text);
             }
         }
     }
+    if let Err(error) = write_stdout(&stdout_text) {
+        return unwritten_reply(&output, &error);
+    }
     ExitCode::from(output.code)
+}
+
+fn stderr_text(text: &str) {
+    use std::io::Write as _;
+    // There is nowhere left to report a failure to write the error stream.
+    let _ = std::io::stderr().write_all(text.as_bytes());
+}
+
+fn stderr_line(line: &str) {
+    stderr_text(&format!("{line}\n"));
+}
+
+fn write_stdout(text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    out.write_all(text.as_bytes())?;
+    out.flush()
+}
+
+/// What a command that finished leaves behind that the caller must know of,
+/// phrased for "... IS recorded". `None` when the reply held nothing durable.
+fn durable_effect(json: &Value) -> Option<String> {
+    let seq = json["seq"].as_u64();
+    let reference = json["receipt"]["caller_ref"]
+        .as_str()
+        .map(|r| format!(" (caller reference {})", hallpass::display_quoted(r)));
+    let command = json["command"].as_str()?;
+    if json["result"] == "error" {
+        let seq = json["error"]["seq"].as_u64();
+        return match json["error"]["recording"].as_str()? {
+            "recorded" => Some(format!(
+                "the {command} IS recorded{}",
+                seq.map_or_else(String::new, |n| format!(" as ledger entry {n}"))
+            )),
+            "uncertain" => Some(format!("the {command} MAY be recorded; inspect the ledger")),
+            _ => None,
+        };
+    }
+    let entry = |what: &str| {
+        Some(format!(
+            "the {what} IS recorded{}{}",
+            seq.map_or_else(String::new, |n| format!(" as ledger entry {n}")),
+            reference.clone().unwrap_or_default()
+        ))
+    };
+    match (command, json["result"].as_str()?) {
+        ("spend", "allowed") => entry("debit"),
+        ("adopt", "ok") => entry("adoption"),
+        ("reconcile-references", "ok") => entry("reference reconciliation"),
+        ("repair", "repaired") => Some("the repair IS done".to_string()),
+        ("archive", "ok") => Some("the pass IS archived".to_string()),
+        ("verify-approval", "verified") if !json["archive"].is_null() => {
+            Some("the signature record IS archived".to_string())
+        }
+        ("retrieve", "ok") if json.get("output").is_some() => {
+            Some("the output file IS written".to_string())
+        }
+        ("init", "ok") => Some("the pass file IS created".to_string()),
+        _ => None,
+    }
+}
+
+/// The reply could not be written to standard output. Nothing is lost for a
+/// command that only reads: a closed pipe is quiet, and any other failure is
+/// said on standard error. After a command recorded something, standard error
+/// says what is recorded and the status is 1, so a caller reconciles instead
+/// of reading the empty reply as "nothing happened". A reply that said an
+/// error (1) or a refusal (2) keeps that status; a success becomes 1.
+fn unwritten_reply(output: &Output, error: &std::io::Error) -> ExitCode {
+    let effect = durable_effect(&output.json);
+    let broken_pipe = error.kind() == std::io::ErrorKind::BrokenPipe;
+    if let Some(effect) = &effect {
+        stderr_line(&format!(
+            "hallpass {}: error: the reply could not be written ({error}); {effect}: reconcile before retrying.",
+            output.json["command"].as_str().unwrap_or("hallpass")
+        ));
+        return ExitCode::from(ERROR);
+    }
+    if broken_pipe {
+        return ExitCode::from(output.code);
+    }
+    stderr_line(&format!(
+        "hallpass {}: error: the reply could not be written ({error}); nothing was recorded.",
+        output.json["command"].as_str().unwrap_or("hallpass")
+    ));
+    ExitCode::from(if output.code == OK {
+        ERROR
+    } else {
+        output.code
+    })
 }
 
 /// Only a command name from clap's definition is passed here.
@@ -3003,7 +3097,7 @@ fn main() -> ExitCode {
                 emit(out, Format::Json)
             } else {
                 for warning in &input.env_warning {
-                    eprintln!("hallpass: warning: {}", safe_message(warning));
+                    stderr_line(&format!("hallpass: warning: {}", safe_message(warning)));
                 }
                 let code = if e.use_stderr() { ERROR } else { OK };
                 let _ = e.print();

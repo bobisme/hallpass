@@ -105,6 +105,10 @@ def _reject_constant(token):
 def _inspect(code, stdout, expected, on_allowed, show_warning, matches):
     if type(code) is not int:
         return "stop"
+    if code == 1 and not stdout.strip():
+        # hallpass could not write its reply (a full disk, a closed pipe). It says on stderr what is
+        # recorded; the debit may be, so this is never "nothing happened".
+        return "reconcile"
     try:
         reply = json.loads(stdout, object_pairs_hook=_unique_members, parse_constant=_reject_constant)
     except (ValueError, TypeError, UnicodeError):

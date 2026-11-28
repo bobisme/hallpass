@@ -386,6 +386,17 @@ appropriate. Never automatically retry either outcome. If the caller recorded a
 reference before submitting, use `hallpass --json receipt FILE --caller-ref REF`
 to match the debit to that durable run record. [Worked reconciliation](EVIDENCE.md#reconcile-a-lost-spend-response)
 
+If hallpass cannot write its reply (stdout is a full disk or a closed pipe), it
+never panics. After a command recorded something (a spend, an adoption, a
+reconciliation, a repair, an archive), it says so on stderr, for example `the
+reply could not be written (...); the debit IS recorded as ledger entry 4
+(caller reference "run-9"): reconcile before retrying`, and exits 1 with an
+empty stdout. Treat exit 1 with an empty stdout from `spend` as `reconcile`,
+not as `stop`: the debit may exist. Look the reference up with `receipt`. A
+refusal keeps exit 2 and a success becomes exit 1, with nothing recorded to
+reconcile. A read-only command whose reader closed the pipe (`hallpass ledger
+FILE | head -1`) says nothing and keeps its own exit status.
+
 A failed write that hallpass rolled back is `error.code =
 "ledger-append-failed"` with `recording = "not-recorded"`: nothing was
 debited, and the unit may be submitted again after the cause (a full disk, a

@@ -92,7 +92,8 @@ used once, whatever its outcome. Then it:
 4. on a refusal (exit 2, `result = "refused"`, no sequence) journals `spend`
    with `"outcome": "refused"` and the refusal code;
 5. on anything else journals `spend` with `"outcome": "unknown"` and the exit
-   code. It sends nothing and does not retry.
+   code. It sends nothing and does not retry. This includes exit 1 with an empty
+   reply: hallpass could not write it, and its stderr says what is recorded.
 
 Each record is a JSON line, appended and synced to disk before the next step.
 A crash can cut off the last line. The caller ignores a last line without a
