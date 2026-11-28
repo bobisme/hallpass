@@ -190,6 +190,9 @@ impl Walker {
             Value::String(text) if text.is_empty() => Err(format!(
                 "is empty; write the timestamp from the written approval, {example}"
             )),
+            // Second 60 is refused in both spellings, before the parser can
+            // accept it (the RFC 3339 parser takes it as 59.999...).
+            Value::String(text) if has_leap_second(text) => Err(leap_second_message(text)),
             Value::String(text) => OffsetDateTime::parse(text, &Rfc3339).map_err(|_| {
                 format!("`{text}` is not an RFC 3339 timestamp with an explicit offset ({example})")
             }),
@@ -342,12 +345,28 @@ pub fn is_counter_name(text: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
 }
 
+/// Whether `text` is a date and time whose seconds are 60 (a leap second).
+fn has_leap_second(text: &str) -> bool {
+    text.get(17..19) == Some("60") && text.as_bytes().get(16) == Some(&b':')
+}
+
+/// The refusal for second 60, the same in an unquoted and a quoted timestamp.
+fn leap_second_message(shown: &str) -> String {
+    format!(
+        "{} has second 60, a leap second, which hallpass does not accept; write the moment just before it instead, for example 2026-12-31T23:59:59.999Z",
+        crate::display_quoted(shown)
+    )
+}
+
 fn from_toml_datetime(dt: &toml::value::Datetime) -> Result<OffsetDateTime, String> {
     let (Some(d), Some(t)) = (dt.date, dt.time) else {
         return Err(format!(
             "`{dt}` is not a full date and time; write for example 2026-11-20T08:00:00Z"
         ));
     };
+    if t.second == Some(60) {
+        return Err(leap_second_message(&dt.to_string()));
+    }
     let Some(offset) = dt.offset else {
         return Err(format!(
             "`{dt}` has no offset, so its instant depends on the reader's time zone; add one, for example {dt}Z or {dt}+01:00"

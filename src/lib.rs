@@ -74,7 +74,7 @@ pub use archive::{
 };
 pub use decision::{
     Decision, Refusal, RefusalCode, WindowState, span, span_left, span_until, stamp,
-    whole_seconds_up,
+    stamp_with_fraction, whole_seconds_up,
 };
 pub use error::{ElsewhereLedger, Error, MissingLedger};
 pub use files::{

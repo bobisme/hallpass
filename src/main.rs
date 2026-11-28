@@ -20,7 +20,7 @@ use clap::{FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use hallpass::time::{Duration, OffsetDateTime};
 use hallpass::{
     Digest, Error, LoadedPass, NamedTarget, Pass, Problem, Refusal, SpendRequest, StateDir,
-    WindowState, span, span_left, span_until, stamp,
+    WindowState, span, span_left, span_until, stamp, stamp_with_fraction,
 };
 use serde_json::{Value, json};
 
@@ -35,7 +35,6 @@ const TEST_CLOCK_VAR: &str = "HALLPASS_UNSAFE_TEST_CLOCK";
 #[command(
     name = "hallpass",
     version,
-    propagate_version = true,
     disable_help_subcommand = true,
     about = "Check written approval for literal network destinations and record usage against shared limits"
 )]
@@ -312,7 +311,10 @@ enum Command {
     /// adds the missing line end to a last line that is whole, chains, and is
     /// the line the witness recorded. Anything else is refused and nothing is
     /// changed.
-    #[command(group(clap::ArgGroup::new("repair_kind").required(true).args(["drop_torn_tail", "restore_final_newline"])))]
+    #[command(
+        group(clap::ArgGroup::new("repair_check").required(true).args(["preview", "token"])),
+        group(clap::ArgGroup::new("repair_kind").required(true).args(["drop_torn_tail", "restore_final_newline"]))
+    )]
     Repair {
         /// The pass file.
         file: PathBuf,
@@ -326,12 +328,7 @@ enum Command {
         #[arg(long)]
         preview: bool,
         /// The token the preview printed; the repair runs only if nothing changed since.
-        #[arg(
-            long,
-            value_name = "TOKEN",
-            conflicts_with = "preview",
-            required_unless_present = "preview"
-        )]
+        #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
         token: Option<String>,
         #[command(flatten)]
         lock: LockArgs,
@@ -736,8 +733,8 @@ fn window_json(pass: &Pass, state: &WindowState) -> Value {
     };
     json!({
         "state": state.as_str(),
-        "valid_from": stamp(pass.approval.valid_from),
-        "valid_until": stamp(pass.approval.valid_until),
+        "valid_from": stamp_with_fraction(pass.approval.valid_from),
+        "valid_until": stamp_with_fraction(pass.approval.valid_until),
         "seconds_remaining": remaining,
         "seconds_until_open": opens,
         "seconds_since_end": ended,
@@ -748,8 +745,8 @@ fn window_json(pass: &Pass, state: &WindowState) -> Value {
 fn window_text(pass: &Pass, state: &WindowState) -> String {
     let range = format!(
         "{} to {}",
-        stamp(pass.approval.valid_from),
-        stamp(pass.approval.valid_until)
+        stamp_with_fraction(pass.approval.valid_from),
+        stamp_with_fraction(pass.approval.valid_until)
     );
     match state {
         WindowState::Valid { remaining } => {

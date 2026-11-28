@@ -168,10 +168,27 @@ pub fn in_utc(instant: OffsetDateTime) -> Option<OffsetDateTime> {
 /// with its own offset instead (a validated pass never holds one).
 #[must_use]
 pub fn stamp(instant: OffsetDateTime) -> String {
+    render(instant, false)
+}
+
+/// `stamp` with the fraction of a second that a pass may hold:
+/// `2026-11-20T08:00:00.5Z`. Used where a pass's own instant is shown, so
+/// a window end is not shown earlier or later than the pass wrote it.
+#[must_use]
+pub fn stamp_with_fraction(instant: OffsetDateTime) -> String {
+    render(instant, true)
+}
+
+fn render(instant: OffsetDateTime, with_fraction: bool) -> String {
+    let fraction = if with_fraction {
+        fraction_text(instant.nanosecond())
+    } else {
+        String::new()
+    };
     let Some(utc) = in_utc(instant) else {
         let (h, m, _) = instant.offset().as_hms();
         return format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}{}{:02}:{:02}",
             instant.year(),
             u8::from(instant.month()),
             instant.day(),
@@ -188,7 +205,7 @@ pub fn stamp(instant: OffsetDateTime) -> String {
         );
     };
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}Z",
         utc.year(),
         u8::from(utc.month()),
         utc.day(),
@@ -196,6 +213,15 @@ pub fn stamp(instant: OffsetDateTime) -> String {
         utc.minute(),
         utc.second()
     )
+}
+
+/// `.5` for half a second, `.000000001` for one nanosecond, and nothing for
+/// a whole second: the digits of `nanos` with trailing zeros left out.
+fn fraction_text(nanos: u32) -> String {
+    if nanos == 0 {
+        return String::new();
+    }
+    format!(".{}", format!("{nanos:09}").trim_end_matches('0'))
 }
 
 /// A duration in words: `45 s`, `12 min`, `3 h 5 min`, `2 d 4 h`.
@@ -294,7 +320,7 @@ impl Pass {
                 code: RefusalCode::NotYetValid,
                 message: format!(
                     "the approval window has not opened (valid from {}, in {}); wait for it to open",
-                    stamp(a.valid_from),
+                    stamp_with_fraction(a.valid_from),
                     span_until(opens_in)
                 ),
             }),
@@ -302,7 +328,7 @@ impl Pass {
                 code: RefusalCode::Expired,
                 message: format!(
                     "the approval window has ended (valid until {}); {new_window}",
-                    stamp(a.valid_until)
+                    stamp_with_fraction(a.valid_until)
                 ),
             }),
             WindowState::Valid { remaining } if needed > Duration::ZERO && remaining <= needed => {
@@ -311,7 +337,7 @@ impl Pass {
                     message: format!(
                         "the work may take up to {} and would end at or after the window closes (valid until {}; {} remain); do less, or {new_window}",
                         span(needed),
-                        stamp(a.valid_until),
+                        stamp_with_fraction(a.valid_until),
                         span_left(remaining)
                     ),
                 })
