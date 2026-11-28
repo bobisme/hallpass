@@ -1460,53 +1460,217 @@ fn missing_ledger(
     witness_file: PathBuf,
     pass_id: &str,
 ) -> Error {
-    if let Some(live) = intact_elsewhere(ledger, w, pass_id) {
-        let live_pass = live
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".ledger"))
-            .filter(|name| !name.is_empty())
-            .map(|name| live.with_file_name(name))
-            .filter(|pass| fs::symlink_metadata(pass).is_ok_and(|m| m.file_type().is_file()));
-        return Error::LedgerElsewhere(Box::new(ElsewhereLedger {
+    match last_seen_ledger(ledger, w, pass_id) {
+        Ok(LastSeen::Intact(live)) => elsewhere(pass_path, ledger, w, witness_file, pass_id, live),
+        Err(e) => e,
+        Ok(_) => Error::LedgerMissing(Box::new(MissingLedger {
             path: ledger.to_path_buf(),
             pass: pass_path.to_path_buf(),
             pass_id: pass_id.to_owned(),
             witness: witness_file,
             seq: w.seq,
-            live,
-            live_pass,
+            last_seen: w.ledger.clone(),
             totals: w.totals.clone(),
             updated: w.updated.clone(),
-        }));
+        })),
     }
-    Error::LedgerMissing(Box::new(MissingLedger {
+}
+
+/// The [`Error::LedgerElsewhere`] refusal for a pass whose ledger at
+/// `ledger` is missing or not the history the witness recorded, while
+/// `live`, where the witness last saw the ledger, is intact.
+fn elsewhere(
+    pass_path: &Path,
+    ledger: &Path,
+    w: &Witnessed,
+    witness_file: PathBuf,
+    pass_id: &str,
+    live: LiveLedger,
+) -> Error {
+    let live_pass = live
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".ledger"))
+        .filter(|name| !name.is_empty())
+        .map(|name| live.path.with_file_name(name))
+        .filter(|pass| fs::symlink_metadata(pass).is_ok_and(|m| m.file_type().is_file()));
+    Error::LedgerElsewhere(Box::new(ElsewhereLedger {
         path: ledger.to_path_buf(),
         pass: pass_path.to_path_buf(),
         pass_id: pass_id.to_owned(),
         witness: witness_file,
-        seq: w.seq,
-        last_seen: w.ledger.clone(),
-        totals: w.totals.clone(),
+        seq: live.seq,
+        live: live.path,
+        live_pass,
+        totals: live.totals,
         updated: w.updated.clone(),
+        witness_seq: w.seq,
+        expected_exists: exists(ledger).unwrap_or(true),
     }))
 }
 
-/// The ledger of `pass_id` where the witness last saw it, when that is not
-/// `ledger` and it is intact: it opens under the rules for any ledger (not a
-/// link, a regular file, private), its whole chain verifies, it belongs to
-/// `pass_id`, and its last line is exactly the one the witness recorded.
-/// Anything else, including a ledger that has grown past the witness, is
-/// `None`: the ledger is then reported missing, as before.
-fn intact_elsewhere(ledger: &Path, w: &Witnessed, pass_id: &str) -> Option<PathBuf> {
+/// A ledger verified where the witness last saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveLedger {
+    /// Its path, as the witness recorded it.
+    pub path: PathBuf,
+    /// Its last logical sequence number: the witnessed one or later.
+    pub seq: u64,
+    /// Its verified totals now.
+    pub totals: BTreeMap<String, u64>,
+}
+
+/// What is at the path where the witness last saw the ledger, when that is
+/// not the ledger beside this pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LastSeen {
+    /// The witness last saw the ledger beside this pass, or recorded no
+    /// absolute path.
+    Here,
+    /// Nothing is there.
+    Absent,
+    /// It is intact: it opens under the rules for any ledger, its whole
+    /// chain verifies, it belongs to the pass id, and it holds the line the
+    /// witness recorded at the witnessed sequence. It may have grown past
+    /// the witness (the same test as [`WitnessStatus::Extended`]).
+    Intact(LiveLedger),
+    /// It verifies, but does not hold the line the witness recorded: another
+    /// history, or an older copy.
+    Other(PathBuf),
+    /// Something is there that hallpass read and found is not this pass's
+    /// intact ledger (damaged, for another pass id, not a regular file),
+    /// but whose history it could not compare; the reason.
+    Unchecked(PathBuf, String),
+    /// Something is there that hallpass did not read (a link, not private,
+    /// or not readable by this user): it may well be the intact ledger.
+    Unreadable {
+        /// The path.
+        path: PathBuf,
+        /// Why, in words.
+        why: String,
+        /// Its mode, when that is all that is wrong (other users have
+        /// access).
+        mode: Option<u32>,
+    },
+}
+
+/// Whether `e`, from opening a ledger to check it, came before its bytes
+/// were read: the file may still be an intact ledger.
+const fn before_reading(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Io { .. }
+            | Error::Symlink { .. }
+            | Error::Insecure { .. }
+            | Error::UntrustedOwner { .. }
+    )
+}
+
+/// The refusal of an adoption while the ledger where the witness last saw
+/// it is [`LastSeen::Unreadable`].
+fn unreadable_refusal(path: &Path, why: &str, mode: Option<u32>, pass_id: &str) -> Error {
+    if let Some(mode) = mode {
+        return Error::Insecure {
+            path: path.to_path_buf(),
+            mode,
+            who: "other users can read or change it",
+            fix: "600",
+            advice: "run the command again: the witness last saw this pass's ledger there, and hallpass checks that file before it adopts, because adopting beside an intact ledger would start a second count. Nothing was recorded",
+        };
+    }
+    Error::Io {
+        path: path.to_path_buf(),
+        message: format!(
+            "the witness last saw the ledger of pass `{pass_id}` here, but hallpass could not read this file ({}). It may be the intact ledger, and adopting beside it would start a second count, so nothing was recorded. Put the real ledger file here in place of a link, or make it readable by this user, then run the command again. If this file is not a ledger of this pass, move it away first.",
+            without_stop(why)
+        ),
+    }
+}
+
+fn without_stop(text: &str) -> &str {
+    text.strip_suffix('.').unwrap_or(text)
+}
+
+/// Classify the ledger where the witness `w` last saw it, against `ledger`,
+/// the ledger beside this pass. Read-only: it takes a shared lock on the
+/// other ledger while it reads it, and writes nothing.
+///
+/// A ledger is trusted only when it verifies: one that merely exists is
+/// [`LastSeen::Unreadable`], [`LastSeen::Unchecked`] or [`LastSeen::Other`],
+/// never [`LastSeen::Intact`].
+///
+/// # Errors
+///
+/// Only [`Error::LockTimeout`]: another process holds that ledger for
+/// longer than the lock-wait budget. A ledger being written is likely live,
+/// so this is not "could not be checked": the caller fails closed.
+pub fn last_seen_ledger(ledger: &Path, w: &Witnessed, pass_id: &str) -> Result<LastSeen, Error> {
     let seen = Path::new(&w.ledger);
     if !seen.is_absolute() || w.ledger == ledger_identity(ledger) {
-        return None;
+        return Ok(LastSeen::Here);
     }
-    let parsed = inspect_candidate(seen, Some(w.seq))
-        .and_then(|p| p.for_pass(seen, pass_id))
-        .ok()?;
-    (parsed.seq == w.seq && parsed.prefix == Some((w.seq, w.tail))).then(|| seen.to_path_buf())
+    match exists(seen) {
+        Ok(false) => return Ok(LastSeen::Absent),
+        Ok(true) => {}
+        Err(e) => {
+            return Ok(LastSeen::Unreadable {
+                path: seen.to_path_buf(),
+                why: e.to_string(),
+                mode: None,
+            });
+        }
+    }
+    Ok(
+        match inspect_candidate(seen, Some(w.seq)).and_then(|p| p.for_pass(seen, pass_id)) {
+            Ok(parsed) if parsed.prefix == Some((w.seq, w.tail)) => LastSeen::Intact(LiveLedger {
+                path: seen.to_path_buf(),
+                seq: parsed.seq,
+                totals: parsed.tally.spent,
+            }),
+            Ok(_) => LastSeen::Other(seen.to_path_buf()),
+            Err(e @ Error::LockTimeout { .. }) => return Err(e),
+            Err(e) if before_reading(&e) => LastSeen::Unreadable {
+                path: seen.to_path_buf(),
+                mode: match &e {
+                    Error::Insecure { mode, .. } => Some(*mode),
+                    _ => None,
+                },
+                why: e.to_string(),
+            },
+            Err(e) => LastSeen::Unchecked(seen.to_path_buf(), e.to_string()),
+        },
+    )
+}
+
+/// Refuse an adoption on the ledger at `ledger` (missing, or not the history
+/// the witness recorded) while the ledger where the witness last saw it is
+/// intact, or might be (hallpass could not read it): adopting would start a
+/// second count for this id beside a live one.
+fn refuse_fork(
+    pass_path: &Path,
+    ledger: &Path,
+    witness: Option<&Witnessed>,
+    state: &StateDir,
+    pass_id: &str,
+) -> Result<(), Error> {
+    let Some(w) = witness.filter(|w| w.seq > 0) else {
+        return Ok(());
+    };
+    match last_seen_ledger(ledger, w, pass_id)? {
+        LastSeen::Intact(live) => Err(elsewhere(
+            pass_path,
+            ledger,
+            w,
+            state.witness_path(pass_id).unwrap_or_default(),
+            pass_id,
+            live,
+        )),
+        LastSeen::Unreadable { path, why, mode } => {
+            Err(unreadable_refusal(&path, &why, mode, pass_id))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Warnings for a comparison that did not fail. `writing` is true when the
@@ -2125,7 +2289,7 @@ fn lock_for_writing_inner(
         let current = preview_adopt_with(pass_path, state, carry_noted).map_err(|e| match e {
             // The preview's own refusal, so that both say the same.
             Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
-            e @ Error::WitnessUnavailable { .. } => e,
+            e @ (Error::WitnessUnavailable { .. } | Error::LockTimeout { .. }) => e,
             _ => stale_token(pass_path),
         })?;
         if current.token != expected {
@@ -2143,13 +2307,9 @@ fn lock_for_writing_inner(
                 ));
             };
             // A ledger intact where the witness last saw it is not lost:
-            // adopting would start a second history for this id.
-            let witness_file = state.witness_path(&id).unwrap_or_default();
-            if let refused @ Error::LedgerElsewhere(_) =
-                missing_ledger(pass_path, &path, known, witness_file, &id)
-            {
-                return Err(refused);
-            }
+            // adopting would start a second history for this id, even
+            // when that ledger has grown past the witness.
+            refuse_fork(pass_path, &path, Some(known), state, &id)?;
             check_projected_witness_size(state, &id, &path, 1, &known.totals)?;
         } else {
             compare(pass_path, &path, None, witness.as_ref(), state, &id)?;
@@ -2779,6 +2939,12 @@ pub struct AdoptPreview {
     pub token: String,
     /// As [`AdoptOutcome::from_note`].
     pub from_note: BTreeMap<String, u64>,
+    /// A file at the other path where the witness last saw the ledger,
+    /// that hallpass read and found is not this pass's intact ledger
+    /// (damaged, for another id), and why: the witness may be behind it, so
+    /// the carried totals may be too low. `None` otherwise (a file it could
+    /// not read refuses the adoption instead).
+    pub last_seen_unchecked: Option<(PathBuf, String)>,
 }
 
 impl AdoptPreview {
@@ -2997,8 +3163,14 @@ pub fn preview_adopt_with(
         state,
         id,
     ) {
-        Err(Error::LedgerMissing(_)) => AdoptCase::LedgerMissing,
-        Err(Error::LedgerChanged { .. }) => AdoptCase::LedgerChanged,
+        Err(Error::LedgerMissing(_)) => {
+            refuse_fork(pass_path, &path, witness.as_ref(), state, id)?;
+            AdoptCase::LedgerMissing
+        }
+        Err(Error::LedgerChanged { .. }) => {
+            refuse_fork(pass_path, &path, witness.as_ref(), state, id)?;
+            AdoptCase::LedgerChanged
+        }
         Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
         Ok(_) => return Err(nothing_to_adopt(&path)),
         Err(e) => return Err(e),
@@ -3017,6 +3189,15 @@ pub fn preview_adopt_with(
     let seq = parsed.as_ref().map_or(0, |p| p.seq);
     check_projected_witness_size(state, id, &path, seq + 1, &totals)?;
     let token = adoption_token(&loaded, &path, parsed.as_ref(), witness.as_ref());
+    let last_seen_unchecked = match (&case, &witness) {
+        (AdoptCase::LedgerMissing | AdoptCase::LedgerChanged, Some(w)) => {
+            match last_seen_ledger(&path, w, id)? {
+                LastSeen::Unchecked(at, why) => Some((at, why)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     Ok(AdoptPreview {
         case,
         pass_id: id.clone(),
@@ -3027,6 +3208,7 @@ pub fn preview_adopt_with(
         previous: witness,
         token,
         from_note,
+        last_seen_unchecked,
     })
 }
 
@@ -3049,6 +3231,38 @@ fn check_projected_witness_size(
         },
     )?;
     Ok(())
+}
+
+/// The case an adoption under `locked` resolves, or why there is none. A
+/// changed ledger is refused as for a missing one (see
+/// `lock_for_writing_inner`) while the ledger the witness last saw is intact
+/// elsewhere.
+fn locked_adopt_case(
+    pass_path: &Path,
+    locked: &Locked,
+    state: &StateDir,
+    id: &str,
+) -> Result<AdoptCase, Error> {
+    if locked.created {
+        return Ok(AdoptCase::LedgerMissing);
+    }
+    let witness = locked.witness.as_ref();
+    match compare(
+        pass_path,
+        &locked.path,
+        Some(&locked.parsed),
+        witness,
+        state,
+        id,
+    ) {
+        Err(Error::LedgerChanged { .. }) => {
+            refuse_fork(pass_path, &locked.path, witness, state, id)?;
+            Ok(AdoptCase::LedgerChanged)
+        }
+        Ok((WitnessStatus::Missing, _)) => Ok(AdoptCase::NoWitness),
+        Ok(_) => Err(nothing_to_adopt(&locked.path)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Acknowledge, with a reason, a ledger that hallpass would otherwise
@@ -3131,25 +3345,7 @@ pub fn adopt_guarded_with(
     )?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
-    let case = if locked.created {
-        AdoptCase::LedgerMissing
-    } else {
-        match compare(
-            pass_path,
-            &locked.path,
-            Some(&locked.parsed),
-            locked.witness.as_ref(),
-            state,
-            &id,
-        ) {
-            Err(Error::LedgerChanged { .. }) => AdoptCase::LedgerChanged,
-            Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
-            Ok(_) => {
-                return Err(nothing_to_adopt(&locked.path));
-            }
-            Err(e) => return Err(e),
-        }
-    };
+    let case = locked_adopt_case(pass_path, &locked, state, &id)?;
     let raised = noted_totals(state, &id, locked.witness.as_ref(), carry_noted, pass_path)?;
     let from_note = raised_counters(raised.as_ref(), locked.witness.as_ref());
     let carried = carry(

@@ -412,7 +412,8 @@ impl std::fmt::Display for MissingLedger {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ElsewhereLedger {
-    /// The ledger file that would be beside this pass, and is not.
+    /// The ledger file that would be beside this pass. It is missing, or
+    /// (see `expected_exists`) it is not the history the witness recorded.
     pub path: PathBuf,
     /// The pass file.
     pub pass: PathBuf,
@@ -420,17 +421,22 @@ pub struct ElsewhereLedger {
     pub pass_id: String,
     /// The witness file.
     pub witness: PathBuf,
-    /// The last sequence number the witness recorded, and the intact
-    /// ledger's last sequence number.
+    /// The intact ledger's last logical sequence number: `witness_seq`, or
+    /// later when the ledger has grown past the witness.
     pub seq: u64,
     /// The intact ledger, where the witness last saw it.
     pub live: PathBuf,
     /// The pass file beside the intact ledger, when there is one.
     pub live_pass: Option<PathBuf>,
-    /// The totals the witness recorded.
+    /// The intact ledger's verified totals now.
     pub totals: std::collections::BTreeMap<String, u64>,
     /// When the witness was written.
     pub updated: String,
+    /// The last logical sequence number the witness recorded.
+    pub witness_seq: u64,
+    /// Whether a ledger is at `path` (one that does not hold the line the
+    /// witness recorded).
+    pub expected_exists: bool,
 }
 
 impl ElsewhereLedger {
@@ -444,18 +450,47 @@ impl ElsewhereLedger {
             self.live.display(),
         );
         let mut out = vec![
-            format!(
-                "the ledger for pass `{}` is not beside this pass file, but an intact one exists elsewhere, and hallpass will not count from zero.",
-                self.pass_id
-            ),
+            if self.expected_exists {
+                format!(
+                    "the ledger hallpass recorded for pass `{}` is not beside this pass file, but it is intact elsewhere, and hallpass will not start a second count.",
+                    self.pass_id
+                )
+            } else {
+                format!(
+                    "the ledger for pass `{}` is not beside this pass file, but an intact one exists elsewhere, and hallpass will not count from zero.",
+                    self.pass_id
+                )
+            },
             format!("This pass file: {pass}."),
-            format!("Expected ledger: {expected} (does not exist)."),
-            format!(
-                "Live ledger: {live}, intact, as last recorded on {} (last logical sequence {}, spent: {}).",
-                self.updated,
-                self.seq,
-                crate::witness::totals_text(&self.totals),
-            ),
+            if self.expected_exists {
+                format!(
+                    "Expected ledger: {expected} (it does not hold the line the witness recorded: an older copy, or another history)."
+                )
+            } else {
+                format!("Expected ledger: {expected} (does not exist).")
+            },
+            if self.seq > self.witness_seq {
+                format!(
+                    "Live ledger: {live}, intact (last logical sequence {}, spent: {}); it holds the line the witness recorded on {} at sequence {}, and {} later {}.",
+                    self.seq,
+                    crate::witness::totals_text(&self.totals),
+                    self.updated,
+                    self.witness_seq,
+                    self.seq - self.witness_seq,
+                    if self.seq - self.witness_seq == 1 {
+                        "entry"
+                    } else {
+                        "entries"
+                    },
+                )
+            } else {
+                format!(
+                    "Live ledger: {live}, intact, as last recorded on {} (last logical sequence {}, spent: {}).",
+                    self.updated,
+                    self.seq,
+                    crate::witness::totals_text(&self.totals),
+                )
+            },
         ];
         out.push(self.live_pass.as_ref().map_or_else(
             || "No pass file is beside the live ledger, so this pass file may be that pass, moved without its ledger.".to_owned(),
@@ -472,6 +507,8 @@ impl ElsewhereLedger {
         if self.live_pass.is_some() {
             out.push("If this pass file revises that approval, copy it beside the live pass file, `mv` the copy over that file and spend from it: the count carries on.".to_owned());
             out.push("If the live pass file is being retired instead, move the live ledger to the expected ledger path.".to_owned());
+        } else if self.expected_exists {
+            out.push("Move the expected ledger aside (keep it), then move the live ledger to the expected ledger path, and the count carries on.".to_owned());
         } else {
             out.push(
                 "Move the live ledger to the expected ledger path, and the count carries on."

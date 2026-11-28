@@ -476,7 +476,7 @@ path and the time. Every command that reads the ledger (`status`,
 |---|---|---|
 | missing | none, or no lines recorded | nothing spent (`fresh`) |
 | missing | records lines | **error `ledger-missing`**, naming the witnessed totals, where the ledger was last seen and when, and what to do |
-| missing | records lines, and the ledger where the witness last saw it is another file that is intact | **error `ledger-elsewhere`**, naming that ledger and the pass file beside it, and how to apply a revision |
+| missing | records lines, and the ledger where the witness last saw it is another file that is intact (it holds the witnessed line, with or without entries after it) | **error `ledger-elsewhere`**, naming that ledger, its current totals and the pass file beside it, and how to apply a revision |
 | present | none | accepted with a warning (`missing`); `spend` records a witness |
 | present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
 | present | the witnessed line is there, and `k` entries follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added entries; they count |
@@ -521,9 +521,13 @@ is never a fresh count.
 When the ledger beside the pass is missing and the witness last saw it at
 another path, hallpass opens the file there under the rules for any ledger
 (not a link, a regular file, private), verifies its whole chain, and checks
-that it belongs to the pass id and ends with exactly the line the witness
-recorded (same sequence number and hash). If all of that holds, the ledger
-is not lost, and the error is `ledger-elsewhere`. This is the usual case of
+that it belongs to the pass id and holds the line the witness recorded (same
+sequence number and hash). Entries after that line are allowed, as for
+`extended`: the witness lags the ledger after a spend that stopped before
+its witness update, or after spends from another state directory. If all of
+that holds, the ledger is not lost, and the error is `ledger-elsewhere`. The
+message gives that ledger's current sequence number and totals, not the
+witness's, and says how many entries follow the witnessed line. This is the usual case of
 an amended approval saved as a second file with the same id, or of a pass
 moved without its ledger. The message names the intact ledger and the pass
 file beside it, if there is one. To apply a revision, copy the new file into
@@ -532,9 +536,16 @@ it; the count carries on.
 If the old file is being retired, or there is none, move the ledger beside
 the new file instead. Do not adopt: adoption would start a second ledger
 for the id. If the file cannot be opened, does not verify, belongs to
-another id, or does not end with the witnessed line (also when it has grown
-past it), the error is `ledger-missing`, as for a lost ledger. Either way
-nothing is counted from that file or created.
+another id, or does not hold the witnessed line, the error is
+`ledger-missing`, as for a lost ledger. Either way nothing is counted from
+that file or created.
+
+Only a command that records moves the witness forward: a spend from the
+pass file beside the live ledger accepts the extra entries and records its
+own witness. `status`, `permits`, `ledger` and the refusals above write
+nothing, so a lagging witness stays as it is until then. That does not
+open a window: the refusal and the adoption check use the live ledger's
+own chain, whatever the witness lags.
 
 ### `adopt(pass, reason, now)`
 
@@ -582,10 +593,22 @@ ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
 the loss (the last resort when a counted last line is damaged and there is
 no backup: the new ledger carries the witness totals, but the receipts of
-the moved ledger are no longer in the chain). A missing ledger that is intact where the witness last saw it
-is not adopted either: `adopt` and `adopt --preview` both fail with
-`ledger-elsewhere` and record nothing, because the adoption would fork the
-history. There is no flag to force it. If that ledger really is to be
+the moved ledger are no longer in the chain). A ledger that is missing, or
+that does not hold the witnessed line (`ledger-changed`, such as an older
+copy), is not adopted either while the ledger where the witness last saw it,
+at another path, is intact (also when it has entries after the witness):
+`adopt` and `adopt --preview` both fail with `ledger-elsewhere` and record
+nothing, because the adoption would fork the history. When a file is at
+that path that hallpass did not read (a link, not private, or not readable
+by this user), it may still be the intact ledger, so `adopt` and `adopt
+--preview` refuse too: `insecure-permissions` with the `chmod 600` to run
+for a file others can read, else `io`, saying to put the real ledger there
+or make it readable, then run the command again. When hallpass read the
+file and found it is not this pass's intact ledger (damaged, for another
+id, not a regular file), the adoption is allowed, and `adopt --preview`
+names the file in `warnings`: the witness may be behind it, so its carried
+totals may be too low. A lock on that file held past the lock-wait budget
+is `lock-timeout`. There is no flag to force it. If that ledger really is to be
 abandoned, move it away from the path the witness names; the case is then
 `ledger-missing`. The window is not checked: an adoption permits nothing.
 
@@ -790,7 +813,7 @@ is still reported in that candidate's row.
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
 | `spend`, `adopt`, `reconcile-references`: the command runs under the test clock and the ledger holds a line written at the real time, or it runs on the real clock and the ledger holds a line written under the test clock ([Test-clock lines](#test-clock-lines)) | `ledger-clock-mix` |
 | the ledger is missing but its witness recorded lines | `ledger-missing` |
-| the ledger is missing, but the ledger the witness last saw at another path is intact (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
+| the ledger is missing (or, for `adopt`, does not hold the witnessed line), but the ledger the witness last saw at another path is intact, perhaps with entries after the witness (a second pass file with the same id, or a pass moved without its ledger) | `ledger-elsewhere` |
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`, `reconcile-references`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
 | the command used up its `--lock-timeout-ms` (or `lock_timeout`) waiting for a ledger or witness lock, before it read or recorded anything | `lock-timeout` |

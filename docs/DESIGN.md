@@ -279,8 +279,9 @@ witness catches them.
   never both be spent from. Two pass files with the same id and separate
   ledgers are noticed the same way. A second pass reusing an id without a
   ledger is `ledger-elsewhere` when the ledger where the witness last saw
-  it is intact (opened under the usual rules, fully verified, ending with
-  the witnessed line), else `ledger-missing`. The first is the common
+  it is intact (opened under the usual rules, fully verified, holding
+  the witnessed line, perhaps with entries after it when the witness
+  lags), else `ledger-missing`. The first is the common
   case of an amended approval saved as a new file: the message names the
   live ledger and its pass file, says to replace that file with the
   revision by `mv`, and `adopt` refuses, since adopting would fork the

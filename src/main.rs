@@ -2214,8 +2214,12 @@ fn carried_from_witness(p: &hallpass::AdoptPreview) -> Option<String> {
         }
         _ => return None,
     };
+    let behind = p.last_seen_unchecked.as_ref().map(|(at, why)| format!(
+        " The witness last saw the ledger at {}, and a file is there that hallpass could not check ({why}): the witness may be behind that ledger, so the count there may be higher. Check that file, and put it back if it is the ledger, before you adopt.",
+        at.display()
+    ));
     if p.carried.is_empty() {
-        return None;
+        return behind.map(|b| b.trim_start().to_owned());
     }
     let source = if p.from_note.is_empty() {
         "come from the witness alone".to_owned()
@@ -2226,8 +2230,9 @@ fn carried_from_witness(p: &hallpass::AdoptPreview) -> Option<String> {
         )
     };
     Some(format!(
-        "the carried totals ({}) {source}: {why}, so hallpass cannot check them. Compare them with your run records before you adopt. If the ledger hallpass last wrote can be found, put it back instead.",
-        hallpass::totals_text(&p.carried)
+        "the carried totals ({}) {source}: {why}, so hallpass cannot check them. Compare them with your run records before you adopt. If the ledger hallpass last wrote can be found, put it back instead.{}",
+        hallpass::totals_text(&p.carried),
+        behind.unwrap_or_default()
     ))
 }
 

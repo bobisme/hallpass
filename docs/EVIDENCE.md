@@ -442,6 +442,18 @@ the witness records shows that the witness is damaged; `warnings` says so.
 Adoption from a missing ledger carries the witness's totals, which then
 come from the witness alone: check them against your run records.
 
+Before you adopt, make sure the ledger is really lost. When the witness
+last saw the ledger at another path and the ledger there is intact,
+hallpass refuses the pass as `ledger-elsewhere` and refuses to adopt. This
+holds also when that ledger has entries after the witness (a spend that
+stopped before its witness update, or spends from another state
+directory); the message then gives that ledger's current totals. If the file
+there is a link, not private, or not readable, hallpass does not read it,
+and it refuses to adopt until you fix it (the message gives the `chmod` to
+run). If it read the file and found it damaged or for another pass,
+`adopt --preview` names it in `warnings`: the witness may be behind it, so
+check it before you adopt.
+
 ### Audit historical charges
 
 ```sh

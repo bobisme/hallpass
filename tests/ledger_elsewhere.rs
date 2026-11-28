@@ -4,8 +4,10 @@
 //! ledger beside it. When the ledger where the witness last saw it is intact,
 //! that is `ledger-elsewhere`, not a lost ledger: the message names the live
 //! ledger and its pass file, and `adopt` refuses, because adopting would fork
-//! the history. A last-seen ledger that cannot be read or verified, or that
-//! disagrees with the witness, falls back to `ledger-missing` and its advice.
+//! the history. A last-seen ledger that does not verify, or that does not
+//! hold the line the witness recorded, falls back to `ledger-missing` and its
+//! advice. One that hallpass could not read (a link, not private) is
+//! `ledger-missing` too, but is never adopted beside until it is fixed.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -426,6 +428,21 @@ fn a_last_seen_ledger_that_does_not_verify_falls_back_to_ledger_missing() {
         );
         assert!(!case.path("q.toml.ledger").exists(), "{what}");
     };
+    // A file hallpass did not read (a link, not private) may still be the
+    // intact ledger: the spend is ledger-missing, but no adoption starts a
+    // second count until the file is fixed.
+    let refused = |what: &str, wanted: &str, fix: &str| {
+        let (rc, out) = case.spend("q.toml");
+        assert_eq!((rc, error(&out).0), (1, "ledger-missing"), "{what}: {out}");
+        let (rc, preview) = case.json(&["adopt", "q.toml", "--preview"]);
+        let (code, message) = error(&preview);
+        assert_eq!((rc, code), (1, wanted), "{what}: {preview}");
+        assert!(message.contains(fix), "{what}: {message}");
+        assert!(message.contains("second count"), "{what}: {message}");
+        let (rc, adopted) = case.json(&["adopt", "q.toml", "--reason", "lost"]);
+        assert_eq!((rc, error(&adopted).0), (1, wanted), "{what}: {adopted}");
+        assert!(!case.path("q.toml.ledger").exists(), "{what}");
+    };
     let restore = || {
         let _ = fs::remove_file(&live);
         fs::write(&live, &good).expect("restore");
@@ -445,13 +462,17 @@ fn a_last_seen_ledger_that_does_not_verify_falls_back_to_ledger_missing() {
     }
 
     fs::set_permissions(&live, fs::Permissions::from_mode(0o644)).expect("chmod");
-    check("a ledger others can read");
+    refused(
+        "a ledger others can read",
+        "insecure-permissions",
+        &format!("run `chmod 600 {}`", live.display()),
+    );
     restore();
 
     let aside = case.path("aside.ledger");
     fs::rename(&live, &aside).expect("move aside");
     std::os::unix::fs::symlink(&aside, &live).expect("symlink");
-    check("a symbolic link");
+    refused("a symbolic link", "io", "in place of a link");
     fs::remove_file(&live).expect("remove link");
     fs::rename(&aside, &live).expect("move back");
     restore();
@@ -464,11 +485,8 @@ fn a_last_seen_ledger_that_does_not_verify_falls_back_to_ledger_missing() {
     restore();
 
     // A ledger that grew past the witness (a spend that stopped before its
-    // witness update) does not agree with the witness either.
-    let witness = bytes(&case.witness());
-    assert_eq!(case.spend("p.toml").0, 0);
-    fs::write(case.witness(), &witness).expect("rewind the witness");
-    check("a ledger past the witness");
+    // witness update) still holds the witnessed line: it is intact, and
+    // tests/witness_lag.rs checks that it is refused as ledger-elsewhere.
 }
 
 #[test]
