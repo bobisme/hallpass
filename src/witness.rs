@@ -330,6 +330,17 @@ impl StateDir {
         }))
     }
 
+    /// Where the witness for `pass_id` last saw its ledger (an absolute
+    /// path), or `None` when there is no witness or it cannot be read.
+    /// It reads only.
+    #[must_use]
+    pub fn last_seen_ledger(&self, pass_id: &str) -> Option<PathBuf> {
+        self.read(pass_id)
+            .ok()
+            .flatten()
+            .map(|w| PathBuf::from(w.ledger))
+    }
+
     /// A witness that cannot be trusted, and why: the same error, and the
     /// same advice, for a witness that does not parse and for one whose
     /// contents contradict the verified ledger.

@@ -1240,8 +1240,10 @@ totals, a ledger elsewhere, a cut-short last line, rehearsal and live
 lines, an in-place edit, the window, and with `--archive DIR` whether the
 archive holds this revision) and names exactly one next command with the
 real paths, or nothing to do. It uses the library's own errors and advice:
-`ledger-corrupt` with a cut-short last line that the repair preview accepts
-names `repair --drop-torn-tail --preview`, other damage and `ledger-changed`
+`ledger-corrupt` with a last line that lacks only its line end, which the
+witness recorded, names `repair --restore-final-newline --preview`; a
+cut-short last line that the repair preview accepts names
+`repair --drop-torn-tail --preview`; other damage and `ledger-changed`
 name `compare-backups`, `ledger-elsewhere` names the `mv` of the live ledger
 (or a `diff` with the live pass file when one is beside it), and
 `ledger-missing` names `adopt --preview`. It never names `adopt` while the
@@ -1249,7 +1251,22 @@ ledger may be intact elsewhere: when a file is still where the witness last
 saw the ledger, it names `compare-backups` on that file instead. Doctor
 reads only: it writes no witness, note or lock file and does not create the
 state directory. A lagging witness beside its ledger needs nothing (the
-next spend catches it up), and no witness is a finding, not a problem.
+next spend catches it up). No witness is a finding while the ledger has no
+entries; with entries, a spend with `--require-new-ref` is refused as
+`reference-inconclusive`, so doctor reports `needs-action` and names
+`adopt --preview`, for a ledger that is the complete history. A damaged
+witness beside a verifying ledger names the `mv` of the witness aside, and
+then that adoption. Doctor checks with `access(2)`, without writing, that
+a spend can write the state directory, its lock file and the ledger (or
+the directory a first spend creates the ledger in); when one cannot be
+written it reports `blocked` with the `chmod` to run, or, for a path
+another user owns, no command (for a state directory that a spend would
+create under such a directory, it says to set `XDG_STATE_HOME` instead). When every ceiling
+is reached, every spend is refused, and doctor reports `blocked` with
+`ceiling-reached`. A `ledger-changed` ledger whose witness last saw
+another ledger file for the pass id names `compare-backups` on both.
+`healthy` means that the next spend, with or without `--require-new-ref`,
+does not fail for the state of the pass, its ledger or its witness.
 
 Warnings (no witness yet, a ledger extended past its witness or moved, a
 witness that could not be checked, a debit that checked no destination, a

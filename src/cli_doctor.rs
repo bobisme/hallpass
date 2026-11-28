@@ -46,6 +46,10 @@ struct Diagnosis {
     blocked: Option<Issue>,
     action: Option<Issue>,
     findings: Vec<Finding>,
+    /// For a healthy verdict: what the ledger and witness are.
+    ledger: String,
+    /// For a healthy verdict: the counters at or over their ceiling.
+    at_ceiling: Vec<String>,
 }
 
 impl Diagnosis {
@@ -210,6 +214,8 @@ fn ledger_findings(
             "ledger-moved"
         } else {
             match &view.witness {
+                // The problem below says it.
+                WitnessStatus::Missing if last_seq(view) > 0 => continue,
                 WitnessStatus::Missing => "no-witness",
                 WitnessStatus::Extended { .. } => "witness-behind",
                 // The problem below says it.
@@ -221,6 +227,8 @@ fn ledger_findings(
     }
     if let WitnessStatus::NotChecked { reason } = &view.witness {
         d.block(witness_issue(file, loaded, view, state, reason));
+    } else {
+        write_access(d, file, loaded, view, state);
     }
     if let Err(e) = view.check_clock_kind() {
         d.block(error_issue(file, state, &e));
@@ -228,23 +236,7 @@ fn ledger_findings(
     if let Some(warning) = view.clock_warning(now) {
         d.find("clock-behind-ledger", warning);
     }
-    for (name, total) in &loaded.pass.ceilings {
-        let spent = view.tally.spent(name);
-        if spent > *total {
-            d.find(
-                "over-ceiling",
-                format!(
-                    "{name}: {spent} spent of {total}, over by {}; nothing more can be spent on it",
-                    spent - total
-                ),
-            );
-        } else if spent == *total {
-            d.find(
-                "ceiling-reached",
-                format!("{name}: {spent} spent of {total}; nothing more can be spent on it"),
-            );
-        }
-    }
+    ceiling_findings(d, file, loaded, view);
     if let Some(seq) = view.unreconciled_adoption {
         d.act(Issue {
             code: "reference-inconclusive".to_owned(),
@@ -257,6 +249,231 @@ fn ledger_findings(
                 shown(file)
             ),
         });
+    }
+    if view.witness == WitnessStatus::Missing && last_seq(view) > 0 {
+        d.act(no_witness_issue(file, loaded, view, state));
+    }
+}
+
+/// The counters at or over their ceiling: `blocked` when that is every
+/// one, since every spend is then refused, else findings.
+fn ceiling_findings(d: &mut Diagnosis, file: &Path, loaded: &LoadedPass, view: &LedgerView) {
+    let mut reached = Vec::new();
+    for (name, total) in &loaded.pass.ceilings {
+        let spent = view.tally.spent(name);
+        if spent > *total {
+            reached.push((
+                "over-ceiling",
+                format!(
+                    "{name}: {spent} spent of {total}, over by {}; nothing more can be spent on it",
+                    spent - total
+                ),
+            ));
+        } else if spent == *total {
+            reached.push((
+                "ceiling-reached",
+                format!("{name}: {spent} spent of {total}; nothing more can be spent on it"),
+            ));
+        }
+    }
+    d.at_ceiling = loaded
+        .pass
+        .ceilings
+        .iter()
+        .filter(|(name, total)| view.tally.spent(name) >= **total)
+        .map(|(name, _)| name.clone())
+        .collect();
+    d.ledger = match (&view.witness, view.exists) {
+        (_, false) => "there is no ledger yet (the first spend creates it)".to_owned(),
+        (WitnessStatus::Matches, true) => "its ledger and witness agree".to_owned(),
+        (WitnessStatus::Extended { .. }, true) => {
+            "its ledger verifies and extends the witness (the next spend catches the witness up)"
+                .to_owned()
+        }
+        _ => "its ledger verifies and has no entries yet".to_owned(),
+    };
+    if !reached.is_empty() && reached.len() == loaded.pass.ceilings.len() {
+        d.block(Issue {
+            code: hallpass::RefusalCode::CeilingReached.as_str().to_owned(),
+            lines: std::iter::once(
+                "every ceiling of the pass is reached, so every spend is refused:".to_owned(),
+            )
+            .chain(reached.into_iter().map(|(_, line)| format!("{line}.")))
+            .collect(),
+            next: None,
+            step: format!(
+                "Stop. To spend more, ask the owner for a new written approval with higher ceilings, then review it against this pass with `hallpass diff {} NEW` before it replaces this file.",
+                shown(file)
+            ),
+        });
+    } else {
+        for (code, line) in reached {
+            d.find(code, line);
+        }
+    }
+}
+
+/// The sequence number of the ledger's last logical entry (0: none).
+fn last_seq(view: &LedgerView) -> u64 {
+    view.tip.as_ref().map_or(0, |tip| tip.seq)
+}
+
+/// A ledger with entries and no witness: a plain spend goes ahead and
+/// records a witness, but a guarded spend is refused as
+/// `reference-inconclusive`, and the spend's advice is the adoption.
+fn no_witness_issue(
+    file: &Path,
+    loaded: &LoadedPass,
+    view: &LedgerView,
+    state: &StateDir,
+) -> Issue {
+    let pass = shown(file);
+    Issue {
+        code: "no-witness".to_owned(),
+        lines: vec![
+            format!(
+                "there is no witness for pass `{}`, but its ledger's last logical sequence is {}, so hallpass cannot tell whether later ledger data was lost (for example in a partial copy).",
+                loaded.pass.id,
+                last_seq(view)
+            ),
+            "A spend with --require-new-ref is refused as reference-inconclusive until an adoption records a witness.".to_owned(),
+        ],
+        next: adopt_preview(file, state),
+        step: format!(
+            "Only if this ledger is the complete history (for example it moved here with the pass): the preview shows that the adoption keeps every line and carries nothing, and prints its token; then run `hallpass adopt {pass} --reason \"...\" --token TOKEN`. Otherwise restore the complete ledger from a backup, or reconcile each caller reference with your run record."
+        ),
+    }
+}
+
+/// The adoption preview, with `--carry-noted-totals` when the library
+/// refuses it without.
+fn adopt_preview(file: &Path, state: &StateDir) -> Option<Vec<String>> {
+    let pass = shown(file);
+    let mut words = vec!["hallpass", "adopt", &pass, "--preview"];
+    if hallpass::preview_adopt_with(file, state, false).is_err()
+        && hallpass::preview_adopt_with(file, state, true).is_ok()
+    {
+        words.push("--carry-noted-totals");
+    }
+    argv(words)
+}
+
+/// Whether this user (the effective user id) owns `path`, so that it can
+/// change its mode.
+fn owned(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).is_ok_and(|meta| meta.uid() == rustix::process::geteuid().as_raw())
+}
+
+/// Whether this user may write `path` (and, for a directory, enter it), by
+/// `access(2)` with the effective ids: it writes nothing.
+fn may_write(path: &Path, dir: bool) -> bool {
+    use rustix::fs::{Access, AtFlags, CWD, accessat};
+    let mode = if dir {
+        Access::WRITE_OK | Access::EXEC_OK
+    } else {
+        Access::WRITE_OK
+    };
+    accessat(CWD, path, mode, AtFlags::EACCESS).is_ok()
+}
+
+/// What a spend writes, checked without writing: the state directory (or
+/// the directory a spend would create it in) and its lock file, then the
+/// ledger, or the pass directory that a first spend creates it in. A spend
+/// fails `witness-unavailable` for the first two and `io` for the others.
+fn write_access(
+    d: &mut Diagnosis,
+    file: &Path,
+    loaded: &LoadedPass,
+    view: &LedgerView,
+    state: &StateDir,
+) {
+    let again = format!("Then run `hallpass doctor {}` again.", shown(file));
+    let blocked = |code: &str, what: String, path: &Path, mode: &str| {
+        let lines = vec![format!(
+            "{what} is not writable by this user, so every spend fails before it records anything."
+        )];
+        if owned(path) {
+            Issue {
+                code: code.to_owned(),
+                lines,
+                next: argv(["chmod", mode, &shown(path)]),
+                step: again.clone(),
+            }
+        } else {
+            Issue {
+                code: code.to_owned(),
+                lines,
+                next: None,
+                step: format!(
+                    "Another user owns {}, so this user cannot change its mode: have its owner make it writable for this user, or restore it with this user as owner. {again}",
+                    shown(path)
+                ),
+            }
+        }
+    };
+    if let Ok(dir) = state.path() {
+        let mut existing = dir;
+        while std::fs::symlink_metadata(existing).is_err() {
+            match existing.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => existing = parent,
+                _ => break,
+            }
+        }
+        let lock = dir.join(format!("{}.lock", loaded.pass.id));
+        if !may_write(existing, true) {
+            let what = if existing == dir {
+                format!("the state directory {}", shown(dir))
+            } else {
+                format!(
+                    "the state directory {} does not exist yet, and {}, where a spend creates it,",
+                    shown(dir),
+                    shown(existing)
+                )
+            };
+            let mut issue = blocked("witness-unavailable", what, existing, "u+w");
+            if existing != dir && !owned(existing) {
+                issue.step = format!(
+                    "Do not change {}: another user owns it. Set XDG_STATE_HOME to an absolute directory this user can write (hallpass keeps its witnesses in its `hallpass` subdirectory), and use the same value for every command on this pass. {again}",
+                    shown(existing)
+                );
+            }
+            d.block(issue);
+        } else if lock.exists() && !may_write(&lock, false) {
+            d.block(blocked(
+                "witness-unavailable",
+                format!("the witness lock file {}", shown(&lock)),
+                &lock,
+                "600",
+            ));
+        }
+    }
+    if view.exists {
+        if !may_write(&view.path, false) {
+            d.block(blocked(
+                "io",
+                format!("the ledger {}", shown(&view.path)),
+                &view.path,
+                "600",
+            ));
+        }
+    } else {
+        let parent = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !may_write(parent, true) {
+            d.block(blocked(
+                "io",
+                format!(
+                    "there is no ledger yet: the first spend creates {}, but the directory {}",
+                    shown(&view.path),
+                    shown(parent)
+                ),
+                parent,
+                "u+w",
+            ));
+        }
     }
 }
 
@@ -275,7 +492,8 @@ fn witness_issue(
         (Some(w), _) if reason.contains("is damaged (") && view.exists => (
             argv(["mv", &shown(w), &aside(w)]),
             format!(
-                "The ledger beside the pass verifies, so it, not the damaged witness, holds the count: move the witness aside (keep it), and the next spend records a new one. {again}"
+                "The ledger beside the pass verifies, so it, not the damaged witness, holds the count: move the witness aside (keep it), then run `hallpass adopt {} --preview` and adopt the ledger with its token to record a new witness. Until then a spend with --require-new-ref is refused as reference-inconclusive. {again}",
+                shown(file)
             ),
         ),
         (Some(_), _) if reason.contains("is damaged (") => (
@@ -349,13 +567,7 @@ fn error_issue(file: &Path, state: &StateDir, error: &Error) -> Issue {
         } => corrupt_step(file, state, path, *last && !*complete, &mut lines),
         Error::LedgerMissing(missing) => missing_step(file, state, missing, &mut lines),
         Error::LedgerElsewhere(elsewhere) => elsewhere_step(&pass, elsewhere),
-        Error::LedgerChanged { path, .. } => (
-            argv(["hallpass", "compare-backups", &pass, &shown(path)]),
-            format!(
-                "Add each backup copy of the ledger after {}: compare-backups shows which copy holds the line the witness recorded. Restore that copy beside the pass.",
-                shown(path)
-            ),
-        ),
+        Error::LedgerChanged { path, .. } => changed_step(file, state, path),
         _ => (None, format!("Follow the advice in the message. {again}")),
     };
     Issue {
@@ -368,6 +580,45 @@ fn error_issue(file: &Path, state: &StateDir, error: &Error) -> Issue {
 
 type Step = (Option<Vec<String>>, String);
 
+/// The step for a changed ledger: `compare-backups` on it, and on the
+/// ledger where the witness last saw it when that is another file that is
+/// still there (a copy of the pass, with its ledger, spent from too).
+fn changed_step(file: &Path, state: &StateDir, ledger: &Path) -> Step {
+    let pass = shown(file);
+    let other = hallpass::load(file).ok().and_then(|loaded| {
+        state
+            .last_seen_ledger(&loaded.pass.id)
+            .filter(|seen| seen.is_absolute() && seen.is_file())
+            .filter(|seen| std::fs::canonicalize(ledger).ok().as_ref() != Some(seen))
+    });
+    other.map_or_else(
+        || {
+            (
+                argv(["hallpass", "compare-backups", &pass, &shown(ledger)]),
+                format!(
+                    "Add each backup copy of the ledger after {}: compare-backups shows which copy holds the line the witness recorded. Restore that copy beside the pass.",
+                    shown(ledger)
+                ),
+            )
+        },
+        |seen| {
+            (
+                argv([
+                    "hallpass",
+                    "compare-backups",
+                    &pass,
+                    &shown(ledger),
+                    &shown(&seen),
+                ]),
+                format!(
+                    "The witness last saw the ledger at {}, another ledger for this pass id, and spends from that copy moved the witness on. compare-backups shows which ledger holds the line the witness recorded: spend from that copy only. Give a second pass file its own id, or move this copy away. Add any backup copies after them.",
+                    shown(&seen)
+                ),
+            )
+        },
+    )
+}
+
 /// The step for a damaged ledger: the repair preview for a cut-short last
 /// line it accepts, else `compare-backups`.
 fn corrupt_step(
@@ -378,6 +629,18 @@ fn corrupt_step(
     lines: &mut Vec<String>,
 ) -> Step {
     let pass = shown(file);
+    if cut_short && hallpass::preview_restore_final_newline(file, state).is_ok() {
+        return (
+            argv([
+                "hallpass",
+                "repair",
+                &pass,
+                "--restore-final-newline",
+                "--preview",
+            ]),
+            "The last line is whole and the witness recorded it; only its line end is missing. The preview prints the token for the repair, which adds the line end and changes nothing else.".to_owned(),
+        );
+    }
     if cut_short {
         match hallpass::preview_drop_torn_tail(file, state) {
             Ok(_) => {
@@ -431,14 +694,8 @@ fn missing_step(
             ),
         );
     }
-    let mut words = vec!["hallpass", "adopt", &pass, "--preview"];
-    if hallpass::preview_adopt_with(file, state, false).is_err()
-        && hallpass::preview_adopt_with(file, state, true).is_ok()
-    {
-        words.push("--carry-noted-totals");
-    }
     (
-        argv(words),
+        adopt_preview(file, state),
         "First put the ledger back beside the pass if a copy exists (restore it from a backup). If it is really lost, the preview shows what an adoption would carry and prints its token; it records nothing.".to_owned(),
     )
 }
@@ -493,6 +750,8 @@ fn render(file: &Path, d: Diagnosis) -> Output {
         blocked,
         action,
         mut findings,
+        ledger,
+        at_ceiling,
     } = d;
     let (result, problem, issue) = match (blocked, action) {
         (Some(blocked), action) => {
@@ -533,9 +792,17 @@ fn render(file: &Path, d: Diagnosis) -> Output {
             issue.step.clone(),
         )
     } else {
+        let id = pass_id.as_deref().unwrap_or_default();
+        let head = if at_ceiling.is_empty() {
+            format!("nothing blocks a spend under pass `{id}`")
+        } else {
+            format!(
+                "nothing blocks a spend under pass `{id}` that charges only counters below their ceiling ({} reached its ceiling)",
+                at_ceiling.join(", ")
+            )
+        };
         let message = format!(
-            "nothing blocks a spend under pass `{}`: the pass validates, its window is open, and its ledger and witness agree",
-            pass_id.as_deref().unwrap_or_default()
+            "{head}: the pass validates, its window is open, {ledger}, and the state directory and the ledger (or the directory it goes in) are writable"
         );
         let _ = writeln!(text, "HEALTHY: {}.", safe_message(&message));
         (message, None, "Nothing to do.".to_owned())

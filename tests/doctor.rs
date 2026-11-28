@@ -136,7 +136,11 @@ impl Case {
         );
         assert_eq!(reply["command"], "doctor", "{reply}");
         let next = next(&reply);
-        if reply["problem"] != "ledger-missing" {
+        let no_witness = reply["result"] == "needs-action"
+            && reply["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("there is no witness"));
+        if reply["problem"] != "ledger-missing" && !no_witness {
             assert!(
                 !next.iter().any(|w| w == "adopt"),
                 "doctor named adopt for {}: {reply}",
@@ -203,6 +207,38 @@ fn codes(reply: &Value) -> Vec<String> {
         .collect()
 }
 
+/// What a healthy verdict promises: the next spend goes ahead, guarded
+/// (`--require-new-ref`) or plain.
+fn assert_next_spends_succeed(case: &Case, pass: &str, now: &str) {
+    static REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let reference = format!(
+        "next-{}",
+        REF.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let guarded = [
+        "spend",
+        pass,
+        "calls",
+        "--to",
+        TO,
+        "--caller-ref",
+        &reference,
+        "--require-new-ref",
+    ];
+    let (rc, out) = case.json_at(&guarded, now);
+    assert_eq!(
+        (rc, &out["result"]),
+        (0, &Value::from("allowed")),
+        "guarded: {out}"
+    );
+    let (rc, out) = case.json_at(&["spend", pass, "calls", "--to", TO], now);
+    assert_eq!(
+        (rc, &out["result"]),
+        (0, &Value::from("allowed")),
+        "plain: {out}"
+    );
+}
+
 /// Lose the witness update of the last spend, as a crash between the ledger
 /// append and the witness update does.
 fn spend_with_lost_witness_update(case: &Case, pass: &str) {
@@ -222,6 +258,10 @@ fn a_healthy_pass_has_nothing_to_do_and_doctor_creates_no_state_directory() {
     assert_eq!(reply["next"], Value::Null);
     assert_eq!(reply["pass_id"], ID);
     assert!(!case.path("home/state").exists(), "state directory created");
+    let message = reply["message"].as_str().expect("message");
+    assert!(message.contains("there is no ledger yet"), "{reply}");
+    assert!(!message.contains("witness agree"), "{reply}");
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
 
     let case = Case::spent(2);
     let (rc, reply) = case.doctor("c/p.toml");
@@ -239,6 +279,8 @@ fn a_healthy_pass_has_nothing_to_do_and_doctor_creates_no_state_directory() {
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(stdout.starts_with("HEALTHY: "), "{stdout}");
     assert!(stdout.contains("Next: nothing to do."), "{stdout}");
+    assert!(stdout.contains("its ledger and witness agree"), "{stdout}");
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
 }
 
 #[test]
@@ -370,6 +412,7 @@ fn a_lagging_witness_beside_its_ledger_needs_nothing() {
     assert_eq!(reply["result"], "healthy", "{reply}");
     assert_eq!(reply["next"], Value::Null);
     assert_eq!(codes(&reply), ["witness-behind"], "{reply}");
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
 }
 
 #[test]
@@ -465,6 +508,7 @@ fn an_archive_without_this_revision_needs_action() {
         (0, &Value::from("healthy")),
         "{reply}"
     );
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
 }
 
 #[test]
@@ -493,4 +537,314 @@ fn a_pass_modified_in_the_future_is_a_finding() {
         "{reply}"
     );
     assert_eq!(codes(&reply), ["pass-mtime-in-future"], "{reply}");
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
+}
+
+/// The adoption preview's token, then the adoption with it.
+fn adopt(case: &Case, pass: &str) {
+    let (rc, preview) = case.json(&["adopt", pass, "--preview"]);
+    assert_eq!(rc, 0, "{preview}");
+    let token = preview["token"].as_str().expect("token").to_owned();
+    let (rc, out) = case.json(&[
+        "adopt",
+        pass,
+        "--reason",
+        "complete history",
+        "--token",
+        &token,
+    ]);
+    assert_eq!(rc, 0, "{out}");
+}
+
+fn assert_healthy(case: &Case, pass: &str) {
+    let (rc, reply) = case.doctor(pass);
+    assert_eq!(
+        (rc, &reply["result"]),
+        (0, &Value::from("healthy")),
+        "{reply}"
+    );
+    assert_next_spends_succeed(case, pass, NOW);
+}
+
+/// A ledger with entries and no witness: a guarded spend is refused, so it
+/// is not healthy. Doctor names the adoption preview, as the spend's own
+/// advice does, and after the adoption both spends go ahead.
+#[test]
+fn a_ledger_without_a_witness_needs_the_adoption_a_guarded_spend_names() {
+    let case = Case::spent(2);
+    fs::remove_file(case.witness()).expect("lose witness");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(rc, 2, "{reply}");
+    assert_eq!(reply["result"], "needs-action", "{reply}");
+    assert_eq!(next(&reply), ["hallpass", "adopt", "c/p.toml", "--preview"]);
+    assert!(
+        reply["next_step"]
+            .as_str()
+            .is_some_and(|s| s.contains("complete history")),
+        "{reply}"
+    );
+    let (rc, out) = case.json(&[
+        "spend",
+        "c/p.toml",
+        "calls",
+        "--to",
+        TO,
+        "--caller-ref",
+        "r1",
+        "--require-new-ref",
+    ]);
+    assert_eq!(rc, 2, "{out}");
+    assert_eq!(out["refusal"]["code"], "reference-inconclusive", "{out}");
+    assert!(
+        out["refusal"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("hallpass adopt c/p.toml")),
+        "{out}"
+    );
+    adopt(&case, "c/p.toml");
+    assert_healthy(&case, "c/p.toml");
+}
+
+/// Following the damaged-witness step leads to the adoption, never to a
+/// verdict that a guarded spend then contradicts.
+#[test]
+fn moving_a_damaged_witness_aside_leads_to_the_adoption() {
+    let case = Case::spent(2);
+    fs::write(case.witness(), "{\"hallpass_witness\":1\n").expect("damage");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["problem"]),
+        (2, &Value::from("witness-unavailable")),
+        "{reply}"
+    );
+    let step = reply["next_step"].as_str().expect("step");
+    assert!(
+        step.contains("hallpass adopt c/p.toml --preview"),
+        "{reply}"
+    );
+    assert!(!step.contains("next spend records"), "{reply}");
+    let words = next(&reply);
+    assert_eq!(words[0], "mv", "{reply}");
+    fs::rename(&words[1], &words[2]).expect("move aside");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["result"]),
+        (2, &Value::from("needs-action")),
+        "{reply}"
+    );
+    assert_eq!(next(&reply)[..2], ["hallpass", "adopt"], "{reply}");
+    adopt(&case, "c/p.toml");
+    assert_healthy(&case, "c/p.toml");
+}
+
+/// A path in a case.
+type Target = fn(&Case) -> PathBuf;
+
+fn is_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+fn chmod(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// Run the `chmod` doctor named.
+fn run_chmod(case: &Case, reply: &Value) {
+    let words = next(reply);
+    assert_eq!(words[0], "chmod", "{reply}");
+    let status = Command::new("chmod")
+        .args(&words[1..])
+        .current_dir(case.dir.path())
+        .status()
+        .expect("chmod");
+    assert!(status.success(), "{reply}");
+}
+
+/// What a spend writes, unwritable: doctor names the problem code the
+/// spend fails with and the exact `chmod`, without writing anything.
+#[test]
+fn unwritable_state_ledger_and_directory_block_with_the_chmod() {
+    if is_root() {
+        eprintln!("skipped: root can write anything");
+        return;
+    }
+    // (what to make unwritable, its mode, a ledger first, the problem, the chmod)
+    let state = |c: &Case| c.state();
+    let ledger = |c: &Case| c.path("c/p.toml.ledger");
+    let lock = |c: &Case| c.state().join(format!("{ID}.lock"));
+    let dir = |c: &Case| c.path("c");
+    let cases: [(Target, u32, u64, &str, &str); 4] = [
+        (state, 0o500, 1, "witness-unavailable", "u+w"),
+        (lock, 0o400, 1, "witness-unavailable", "600"),
+        (ledger, 0o400, 1, "io", "600"),
+        (dir, 0o500, 0, "io", "u+w"),
+    ];
+    for (target, mode, spends, problem, fix) in cases {
+        let case = Case::spent(spends);
+        let path = target(&case);
+        chmod(&path, mode);
+        let (rc, out) = case.json(&["spend", "c/p.toml", "calls", "--to", TO]);
+        assert_eq!(
+            (rc, &out["error"]["code"]),
+            (1, &Value::from(problem)),
+            "{out}"
+        );
+        let (rc, reply) = case.doctor("c/p.toml");
+        assert_eq!(
+            (rc, &reply["result"], &reply["problem"]),
+            (2, &Value::from("blocked"), &Value::from(problem)),
+            "{reply}"
+        );
+        let words = next(&reply);
+        assert_eq!(words[..2], ["chmod", fix], "{reply}");
+        assert_eq!(
+            fs::canonicalize(case.dir.path().join(&words[2])).expect("named path"),
+            fs::canonicalize(&path).expect("path"),
+            "{reply}"
+        );
+        run_chmod(&case, &reply);
+        assert_healthy(&case, "c/p.toml");
+    }
+}
+
+/// Every ceiling reached: every spend is refused, so it is blocked, not
+/// healthy. One of two reached: healthy, and the message says which.
+#[test]
+fn a_reached_ceiling_is_never_called_nothing_blocks() {
+    let case = Case::new();
+    case.pass("c/p.toml", &PASS.replace("calls = 100", "calls = 1"));
+    let (rc, out) = case.json(&["spend", "c/p.toml", "calls", "--to", TO]);
+    assert_eq!(rc, 0, "{out}");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["result"], &reply["problem"]),
+        (2, &Value::from("blocked"), &Value::from("ceiling-reached")),
+        "{reply}"
+    );
+    assert_eq!(reply["next"], Value::Null);
+
+    let case = Case::new();
+    case.pass(
+        "c/p.toml",
+        &PASS.replace("calls = 100", "calls = 100\nminutes = 1"),
+    );
+    let (rc, out) = case.json(&["spend", "c/p.toml", "minutes", "--to", TO]);
+    assert_eq!(rc, 0, "{out}");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["result"]),
+        (0, &Value::from("healthy")),
+        "{reply}"
+    );
+    assert!(
+        reply["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("(minutes reached its ceiling)")),
+        "{reply}"
+    );
+    assert_eq!(codes(&reply), ["ceiling-reached"], "{reply}");
+    assert_next_spends_succeed(&case, "c/p.toml", NOW);
+}
+
+/// A copy of the pass and its ledger, spent from too: the witness last saw
+/// the copy's ledger, which is intact, so this ledger is `ledger-elsewhere`
+/// (as the spend says), and doctor names a diff with the live pass file.
+#[test]
+fn a_copy_spent_from_too_is_ledger_elsewhere_and_names_the_live_pass() {
+    let case = Case::spent(2);
+    fs::create_dir(case.path("d")).expect("d");
+    fs::copy(case.path("c/p.toml.ledger"), case.path("d/p.toml.ledger")).expect("copy");
+    case.pass("d/p.toml", PASS);
+    let (rc, out) = case.json(&["spend", "d/p.toml", "calls", "--to", TO]);
+    assert_eq!(rc, 0, "{out}");
+    let (rc, out) = case.json(&["spend", "c/p.toml", "calls", "--to", TO]);
+    assert_eq!(
+        (rc, &out["error"]["code"]),
+        (1, &Value::from("ledger-elsewhere")),
+        "{out}"
+    );
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["problem"]),
+        (2, &Value::from("ledger-elsewhere")),
+        "{reply}"
+    );
+    assert_eq!(
+        next(&reply),
+        ["hallpass", "diff", &case.real("d/p.toml"), "c/p.toml"]
+    );
+}
+
+/// A counted last line that lost only its line end: doctor names the
+/// newline repair, and after it the pass is healthy and spends go ahead.
+#[test]
+fn a_last_line_missing_only_its_newline_names_the_newline_repair() {
+    let case = Case::spent(2);
+    let ledger = case.path("c/p.toml.ledger");
+    let mut bytes = fs::read(&ledger).expect("ledger");
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    fs::write(&ledger, bytes).expect("drop newline");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["problem"]),
+        (2, &Value::from("ledger-corrupt")),
+        "{reply}"
+    );
+    assert_eq!(
+        next(&reply),
+        [
+            "hallpass",
+            "repair",
+            "c/p.toml",
+            "--restore-final-newline",
+            "--preview"
+        ]
+    );
+    let (rc, preview) = case.json(
+        &next(&reply)[1..]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(rc, 0, "{preview}");
+    let token = preview["token"].as_str().expect("token").to_owned();
+    let (rc, out) = case.json(&[
+        "repair",
+        "c/p.toml",
+        "--restore-final-newline",
+        "--token",
+        &token,
+    ]);
+    assert_eq!(rc, 0, "{out}");
+    assert_healthy(&case, "c/p.toml");
+}
+
+/// A state directory that does not exist under a directory another user
+/// owns (here `/`): doctor names no `chmod` of it, and says to set
+/// `XDG_STATE_HOME` instead.
+#[test]
+fn a_state_directory_under_another_users_directory_names_xdg_state_home() {
+    let root = Path::new("/");
+    if is_root() || rustix::fs::access(root, rustix::fs::Access::WRITE_OK).is_ok() {
+        eprintln!("skipped: / is writable");
+        return;
+    }
+    let case = Case::new();
+    let state = "/hallpass-doctor-test-absent";
+    let out = case
+        .command(&["--format", "json", "doctor", "c/p.toml"], NOW)
+        .env("XDG_STATE_HOME", state)
+        .output()
+        .expect("run");
+    let reply: Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(out.status.code(), Some(2), "{reply}");
+    assert_eq!(reply["problem"], "witness-unavailable", "{reply}");
+    assert_eq!(reply["next"], Value::Null, "{reply}");
+    assert!(
+        reply["next_step"]
+            .as_str()
+            .is_some_and(|s| s.contains("Set XDG_STATE_HOME")),
+        "{reply}"
+    );
+    assert!(!Path::new(state).exists());
 }
