@@ -39,21 +39,70 @@ pub struct Loosening {
     pub field: String,
     pub before: serde_json::Value,
     pub after: serde_json::Value,
+    /// `counter-substitution` when NEW drops this OLD ceiling and adds a
+    /// ceiling under a name OLD did not have. Absent for other loosenings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    /// For a counter substitution, the ceilings NEW adds, in name order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replaced_by: Vec<String>,
+}
+
+/// The ceilings NEW drops and the ceilings it adds under names OLD did not
+/// have, when it does both.
+///
+/// The ledger counts spend by counter name. A counter new to the pass starts
+/// with nothing spent, so work that OLD charged to a dropped counter can be
+/// charged to the new one and counted again from zero. That holds whether or
+/// not NEW requires the new counter, and whatever its amount.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CounterSubstitution {
+    /// OLD ceilings that NEW does not have, in name order.
+    pub dropped: Vec<String>,
+    /// NEW ceilings that OLD does not have, in name order.
+    pub added: Vec<String>,
+}
+
+/// The counter substitution from OLD to NEW, or None when NEW does not both
+/// drop and add a ceiling.
+#[must_use]
+pub fn counter_substitution(old: &Pass, new: &Pass) -> Option<CounterSubstitution> {
+    let only = |x: &Pass, y: &Pass| -> Vec<String> {
+        x.ceilings
+            .keys()
+            .filter(|name| !y.ceilings.contains_key(*name))
+            .cloned()
+            .collect()
+    };
+    let (dropped, added) = (only(old, new), only(new, old));
+    (!dropped.is_empty() && !added.is_empty()).then_some(CounterSubstitution { dropped, added })
 }
 
 /// A ceiling change loosens when the limit is raised, or when a new counter
-/// becomes spendable without NEW requiring every debit to charge it. A counter
-/// with no ceiling cannot be spent at all (`unknown-counter`), so removing a
-/// ceiling narrows. Any other field here is the approver, operator or reference:
-/// authority passes to someone else, or rests on a different written approval.
+/// becomes spendable and NEW does not make every debit charge both it and a
+/// counter OLD had. A counter with no ceiling cannot be spent at all
+/// (`unknown-counter`), so removing a ceiling alone narrows; removing one while
+/// adding another is a counter substitution (see [`counter_substitution`]).
+///
+/// A new counter that only NEW requires is not enough: a debit can charge it
+/// and none of OLD's counters, so it is counted from zero, outside every
+/// ceiling OLD set. When NEW also requires a counter OLD had, every debit
+/// still charges that counter and its spend so far.
+///
+/// Any other field here is the approver, operator or reference: authority
+/// passes to someone else, or rests on a different written approval.
 fn ceiling_loosens(a: &Pass, b: &Pass, field: &str) -> bool {
     let Some(name) = field.strip_prefix("ceilings.") else {
         return true;
     };
     match (a.ceilings.get(name), b.ceilings.get(name)) {
-        (None, Some(_)) => !b.required_counters.iter().any(|c| c == name),
+        (None, Some(_)) => {
+            let required = |c: &str| b.required_counters.iter().any(|r| r == c);
+            !(required(name) && a.ceilings.keys().any(|c| required(c)))
+        }
         (Some(x), Some(y)) => y > x,
-        _ => false,
+        (Some(_), None) => counter_substitution(a, b).is_some(),
+        (None, None) => false,
     }
 }
 
@@ -61,11 +110,13 @@ fn ceiling_loosens(a: &Pass, b: &Pass, field: &str) -> bool {
 ///
 /// Each is a change diff marks `[review required]`, other than the destination
 /// rules (which the endpoint proof judges): a longer
-/// window, a higher or new ceiling, a dropped requirement, an un-revoke, or a
-/// different approver, operator or approval reference. A change that only narrows is not listed.
+/// window, a higher or new ceiling, a dropped ceiling replaced by a new one (a
+/// counter substitution), a dropped requirement, an un-revoke, or a different
+/// approver, operator or approval reference. A change that only narrows is not listed.
 #[must_use]
 pub fn non_endpoint_loosenings(old: &LoadedPass, new: &LoadedPass) -> Vec<Loosening> {
     let (a, b) = (&old.pass, &new.pass);
+    let swap = counter_substitution(a, b);
     diff(old, new)
         .changes
         .into_iter()
@@ -82,10 +133,23 @@ pub fn non_endpoint_loosenings(old: &LoadedPass, new: &LoadedPass) -> Vec<Loosen
                 .any(|name| !b.required_counters.contains(name)),
             field => ceiling_loosens(a, b, field),
         })
-        .map(|c| Loosening {
-            field: c.field,
-            before: c.before,
-            after: c.after,
+        .map(|c| {
+            let dropped = c
+                .field
+                .strip_prefix("ceilings.")
+                .is_some_and(|name| !b.ceilings.contains_key(name));
+            // A dropped ceiling is listed only as part of a substitution.
+            let replaced_by = swap
+                .as_ref()
+                .filter(|_| dropped)
+                .map_or_else(Vec::new, |s| s.added.clone());
+            Loosening {
+                field: c.field,
+                before: c.before,
+                after: c.after,
+                code: dropped.then_some("counter-substitution"),
+                replaced_by,
+            }
         })
         .collect()
 }

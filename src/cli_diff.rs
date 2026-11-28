@@ -96,6 +96,30 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
     Ok(())
 }
 
+/// Warn when NEW replaces ceilings with new ones: spend on a dropped counter
+/// does not count against a counter new to the pass.
+fn flag_substitution(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) {
+    let found = hallpass::review::counter_substitution(&old.pass, &proposed.pass);
+    if let Some(s) = &found {
+        let _ = writeln!(
+            out.text,
+            "WARNING: NEW drops the ceiling on {} and adds {}. A new counter starts with nothing spent, so spend on a dropped counter does not count against it. diff --containment lists this as a counter-substitution loosening; ask the owner whether the counter was renamed, and keep its name if so.",
+            quoted_names(&s.dropped),
+            quoted_names(&s.added)
+        );
+    }
+    out.json["budget_impact"]["counter_substitution"] = json!(found);
+}
+
+/// Counter names as quoted values joined by `, `.
+fn quoted_names(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| super::quoted(n))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn amount(value: Option<u64>) -> String {
     value.map_or_else(|| "absent".to_owned(), |n| n.to_string())
 }
@@ -132,13 +156,21 @@ fn render_containment(
             .push_str("More new allowances may exist than the counterexamples listed above.\n");
     }
     for l in &report.loosenings {
-        let _ = writeln!(
+        let _ = write!(
             out.text,
             "Loosened: {}: {} -> {}",
             l.field,
             plain(&l.before),
             plain(&l.after)
         );
+        if let Some(code) = l.code {
+            let _ = write!(
+                out.text,
+                ", renamed or replaced by {} ({code}): a new counter starts with nothing spent",
+                quoted_names(&l.replaced_by)
+            );
+        }
+        out.text.push('\n');
     }
     let why = if report.result == "contained" && report.reason == "new-admits-nothing" {
         "NEW is revoked, so it admits nothing at any instant, and no other term loosens"
@@ -219,6 +251,9 @@ pub fn review_diff(args: &DiffArgs) -> Output {
     }
     if *budget_impact && let Err(error) = budget(&a, &b, &mut output) {
         return error_output("diff", Some(old), &error);
+    }
+    if *budget_impact && a.pass.id == b.pass.id {
+        flag_substitution(&a, &b, &mut output);
     }
     if let Some(instant) = review_at
         && *containment
