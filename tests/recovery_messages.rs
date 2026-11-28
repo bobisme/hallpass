@@ -119,18 +119,38 @@ fn ledger_elsewhere_prints_a_short_first_line_and_the_rest_indented() {
         .take_while(|l| *l != "Nothing was permitted.")
         .collect();
     assert!(lines.len() >= 8, "{stderr}");
-    assert!(lines[0].starts_with("hallpass spend: error: the ledger for pass"));
-    assert!(lines[0].len() < 200, "{}", lines[0]);
-    for line in &lines[1..] {
+    // A short headline with the code, the next step, then the full
+    // message indented.
+    assert!(
+        lines[0]
+            .starts_with("hallpass spend: error: ledger-elsewhere: the ledger for this pass id"),
+        "{stderr}"
+    );
+    assert!(lines[0].len() < 120, "{}", lines[0]);
+    assert!(
+        lines[1].starts_with("Next: run `hallpass doctor q.toml`"),
+        "{stderr}"
+    );
+    for line in &lines[2..] {
         assert!(line.starts_with("  "), "{line:?} in {stderr}");
     }
+    assert!(lines[2].starts_with("  the ledger for pass"), "{stderr}");
     assert!(stderr.contains("  Do not run `hallpass adopt`"), "{stderr}");
 
-    // JSON keeps one message string with the same words.
+    // JSON keeps one message string with the same words, and the headline
+    // and next step as their own fields.
     let (_, out) = case.json(&["spend", "q.toml", "calls", "--to", TO]);
     let one = message(&out);
     assert!(!one.contains('\n'), "{one}");
-    assert!(one.starts_with(lines[0].trim_start_matches("hallpass spend: error: ")));
+    assert!(one.starts_with(lines[2].trim_start()));
+    assert_eq!(
+        out["error"]["headline"].as_str(),
+        lines[0].strip_prefix("hallpass spend: error: ledger-elsewhere: ")
+    );
+    assert_eq!(
+        out["error"]["next"].as_str(),
+        lines[1].strip_prefix("Next: ")
+    );
 }
 
 #[test]

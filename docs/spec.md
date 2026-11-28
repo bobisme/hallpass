@@ -1218,6 +1218,17 @@ it was recognized (null otherwise). Help and version requests return their own c
 `result = "ok"`. Counted work requires a successful spend reply. See the
 [caller contract](INTEGRATING.md).
 
+A text error starts with a short headline:
+`hallpass COMMAND: error: CODE: WHAT IS WRONG`. When there is one next
+step, the second line is `Next: STEP`. The full message follows, indented
+by two spaces; it says the same as `error.message` in JSON. An error with
+no headline of its own (`io`, `usage`, `untrusted-owner`,
+`archive-corrupt`) puts the first line of its message after the code.
+`doctor` prints its verdict the same way: `BLOCKED: CODE: HEADLINE` (or
+`NEEDS ACTION:`), then `Next:` and the step, then `Details:` with the
+rest of the explanation, then `Also:` with the other findings. Callers
+read the JSON, not this text.
+
 | Command | Exit 0 | Exit 2 | Exit 1 |
 |---|---|---|---|
 | `help` | the command directory, or one command's page | never | unknown topic |
@@ -1373,8 +1384,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   requirements. Consult the usage forms for conditional ones.
 - **version** returns the package version in `version`.
 
-- **error** (any command): `error` `{code, message, line, recording, seq,
-  ledger, last_line}` (`line` is the 1-based ledger line for
+- **error** (any command): `error` `{code, message, headline, next, line,
+  recording, seq, ledger, last_line}` (`headline` is one short sentence that
+  says what is wrong, the first line of the text output after the code, or
+  the first line of `message` for an error with none of its own; `next` is
+  the one next step in words, or null; `line` is the 1-based ledger line for
   `ledger-corrupt`, else null; `last_line` is true when that line is the last
   in the file, so the damage may be a final line cut short, false when it is
   earlier, and null for other errors; `recording`, `seq` and `ledger` as in "Fail-closed cases", null when
@@ -1442,7 +1456,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **digest**: `digest`, `pass_id`.
 - **doctor**: `result` (`healthy`, `needs-action` or `blocked`), `file`,
   `pass_id` (null when the pass does not load), `problem` (the error or
-  refusal code a spend would fail with, or null), `message` (what is wrong,
+  refusal code a spend would fail with, or null), `headline` (one short
+  sentence: the verdict line of the text output), `message` (what is wrong,
   or that nothing is), `next` (the one command to run, as an argv array
   with real paths, or null), `next_step` (what to do, in words) and
   `findings` (list of `{code, message}`: other problems and warnings).

@@ -642,7 +642,7 @@ fn approval_id_text_names_the_option_the_field_and_the_character() {
     let shown = format!("{out}{err}");
     assert!(
         shown.contains(
-            "hallpass approval-id: error: --owner (approval.owner) contains a Unicode format character (U+200B), which can make it display as something else; write one plain line without it. --reference (approval.reference) has leading or trailing spaces; remove them. A pass with this owner and reference would not load, so no id was printed"
+            "hallpass approval-id: error: usage: --owner (approval.owner) contains a Unicode format character (U+200B), which can make it display as something else; write one plain line without it. --reference (approval.reference) has leading or trailing spaces; remove them. A pass with this owner and reference would not load, so no id was printed"
         ),
         "{shown}"
     );

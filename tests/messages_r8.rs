@@ -100,7 +100,7 @@ fn a_bad_value_uses_the_usual_error_format() {
     assert_eq!(stdout(&out), "");
     assert_eq!(
         stderr(&out),
-        "hallpass spend: error: invalid value '1.5' for '--n <N>': N must be a positive integer, not `1.5`\nNothing was permitted.\n"
+        "hallpass spend: error: usage: invalid value '1.5' for '--n <N>': N must be a positive integer, not `1.5`\nNothing was permitted.\n"
     );
 
     let out = case.run(&["--json", "spend", "p.toml", "calls", "--n", "1.5"]);

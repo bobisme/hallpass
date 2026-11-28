@@ -323,6 +323,185 @@ impl Error {
         }
     }
 
+    /// The message for text output: a short headline (one sentence, no
+    /// path), the next step when there is one, then the full message as
+    /// detail lines. An error with no headline of its own uses the first
+    /// line of its message, and the detail is the rest. The read-only form
+    /// never advises `hallpass adopt`.
+    #[must_use]
+    pub fn summary(&self, read_only: bool) -> Summary {
+        let mut detail = self.message_lines(read_only);
+        let Some((headline, next)) = self.headline(read_only) else {
+            let headline = if detail.is_empty() {
+                String::new()
+            } else {
+                detail.remove(0)
+            };
+            return Summary {
+                headline,
+                next: None,
+                detail,
+            };
+        };
+        Summary {
+            headline,
+            next,
+            detail,
+        }
+    }
+
+    /// The headline and next step, for the errors that have them.
+    #[allow(clippy::too_many_lines)] // One exhaustive table keeps every headline reviewable.
+    fn headline(&self, read_only: bool) -> Option<(String, Option<String>)> {
+        let doctor = |pass: &std::path::Path| {
+            Some(format!(
+                "run `hallpass doctor {}`, which names the safe step",
+                shell_word(&pass.display().to_string())
+            ))
+        };
+        let (headline, next): (String, Option<String>) = match self {
+            Self::LedgerClockMix {
+                path,
+                rehearsal: true,
+                ..
+            } => (
+                "the ledger holds rehearsal (test-clock) entries, and this command uses the real clock".into(),
+                doctor(&pass_of(path)),
+            ),
+            Self::LedgerClockMix { .. } => (
+                "the ledger holds live entries, and this command runs under a test clock".into(),
+                Some("unset HALLPASS_UNSAFE_TEST_CLOCK, then run the command again".into()),
+            ),
+            Self::LedgerChanged { pass, .. } => (
+                "the ledger was changed outside hallpass, so its count is not trusted".into(),
+                doctor(pass),
+            ),
+            Self::LedgerMissing(m) => (
+                "the ledger is missing, but the witness says spends were recorded".into(),
+                doctor(&m.pass),
+            ),
+            Self::LedgerElsewhere(e) => (
+                "the ledger for this pass id is intact elsewhere, not beside this pass file".into(),
+                if read_only || e.live_pass.is_some() || e.expected_exists {
+                    doctor(&e.pass)
+                } else {
+                    Some(format!(
+                        "move the live ledger here: `mv {} {}`",
+                        shell_word(&e.live.display().to_string()),
+                        shell_word(&e.path.display().to_string())
+                    ))
+                },
+            ),
+            Self::LedgerCorrupt {
+                path,
+                line,
+                last,
+                complete,
+                detail,
+            } => (
+                format!("the ledger is damaged at line {line}, so nothing more can be spent"),
+                if *last && !*complete && detail == CUT_SHORT {
+                    doctor(&pass_of(path))
+                } else {
+                    Some(format!(
+                        "restore the ledger from a backup: `hallpass compare-backups {} {} BACKUP...` shows the good copy",
+                        shell_word(&pass_of(path).display().to_string()),
+                        shell_word(&path.display().to_string())
+                    ))
+                },
+            ),
+            Self::LedgerForeign { .. } => (
+                "the ledger belongs to another pass id than the one the pass now has".into(),
+                None,
+            ),
+            Self::WitnessUnavailable { dir, detail, .. } => (
+                "the witness for this pass cannot be read or written".into(),
+                match dir {
+                    Some(dir) if !witness_advice(detail).is_empty() => Some(format!(
+                        "make the state directory {} exist and be writable by this user",
+                        shell_word(&dir.display().to_string())
+                    )),
+                    _ => None,
+                },
+            ),
+            Self::WitnessNotUpdated { .. } => (
+                "the spend was recorded, but the witness was not updated: treat it as NOT permitted".into(),
+                None,
+            ),
+            Self::LockTimeout { path } => (
+                "another process holds the lock, and the wait ran out; nothing was recorded".into(),
+                Some(format!(
+                    "run the command again, or find the process that holds the lock with `fuser {}`",
+                    shell_word(&path.display().to_string())
+                )),
+            ),
+            Self::AppendUncertain { event, .. } => (
+                format!("could not confirm the {event} in the ledger; it may have been recorded"),
+                Some("inspect the ledger before you continue; do not retry automatically".into()),
+            ),
+            Self::AppendRolledBack { event, .. } => (
+                format!("could not write the {event} to the ledger; nothing was recorded"),
+                Some(
+                    "free disk space or raise the file size limit, then run the command again"
+                        .into(),
+                ),
+            ),
+            Self::Insecure {
+                path,
+                mode,
+                who,
+                fix,
+                ..
+            } => (
+                format!("the file has mode {mode:04o}: {who}"),
+                Some(format!(
+                    "run `chmod {fix} {}`",
+                    shell_word(&path.display().to_string())
+                )),
+            ),
+            Self::SharedDirectory { path, .. } => (
+                "the pass directory is writable by any user and lacks the sticky bit".into(),
+                Some(format!(
+                    "run `chmod o-w {}`",
+                    shell_word(&path.display().to_string())
+                )),
+            ),
+            Self::Invalid { path, problems } => (
+                format!(
+                    "the pass is not valid ({} problem{})",
+                    problems.len(),
+                    if problems.len() == 1 { "" } else { "s" }
+                ),
+                Some(if invalid_advice(problems).starts_with("it changed") {
+                    "run the command again once the save has finished".to_owned()
+                } else {
+                    format!(
+                        "fix each problem below, then run `hallpass check {}`",
+                        shell_word(&path.display().to_string())
+                    )
+                }),
+            ),
+            Self::Symlink { .. } => (
+                "the path is a symbolic link, and hallpass does not follow links".into(),
+                Some("use the path of the real file".into()),
+            ),
+            Self::NotRegular { .. } => ("the path is not a regular file".into(), None),
+            Self::TooLarge { limit, .. } => (
+                format!("the file is larger than {limit} bytes, too large for a pass"),
+                Some("check that this is the pass file".into()),
+            ),
+            Self::Exists { .. } => (
+                "the file already exists, and hallpass never overwrites one".into(),
+                Some("choose another path".into()),
+            ),
+            Self::Io { .. }
+            | Self::UntrustedOwner { .. }
+            | Self::Usage(_)
+            | Self::ArchiveCorrupt(_) => return None,
+        };
+        Some((headline, next))
+    }
+
     /// A stable code for JSON output.
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -402,6 +581,40 @@ impl Error {
             path: path.to_path_buf(),
             message,
         }
+    }
+}
+
+/// An error for text output, from [`Error::summary`]: a short headline,
+/// the next step, and the full message as detail lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Summary {
+    /// One short sentence that says what is wrong, without a path.
+    pub headline: String,
+    /// The one next step (a command or an action), when there is one.
+    pub next: Option<String>,
+    /// The full message, as lines: nothing in it is dropped.
+    pub detail: Vec<String>,
+}
+
+/// The pass file of a ledger (`PASS.ledger`), or `PASS` when the name does
+/// not end in `.ledger`.
+fn pass_of(ledger: &std::path::Path) -> PathBuf {
+    let name = ledger.file_name().unwrap_or_default().to_string_lossy();
+    name.strip_suffix(".ledger")
+        .map_or_else(|| PathBuf::from("PASS"), |pass| ledger.with_file_name(pass))
+}
+
+/// A word as a shell would need it typed, for a command in a next step.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 
@@ -605,11 +818,7 @@ fn corrupt_advice(
     last: bool,
     complete: bool,
 ) -> String {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let pass = name.strip_suffix(".ledger").map_or_else(
-        || "PASS".to_owned(),
-        |pass| path.with_file_name(pass).display().to_string(),
-    );
+    let pass = pass_of(path).display().to_string();
     let backup = format!(
         "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {pass} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals, but the receipts in the moved ledger are not in the new chain."
     );
@@ -657,6 +866,67 @@ mod tests {
     /// one is joined into a sentence (bn-110).
     #[test]
     fn no_message_has_a_doubled_stop() {
+        for error in samples() {
+            for text in [error.to_string(), error.read_only_message()] {
+                assert!(!text.contains(".. ") && !text.ends_with(".."), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn headlines_are_short_and_keep_the_whole_message() {
+        let mut own = std::collections::BTreeSet::new();
+        for error in samples() {
+            for read_only in [false, true] {
+                let summary = error.summary(read_only);
+                let lines = error.message_lines(read_only);
+                assert!(!summary.headline.contains('\n'), "{}", summary.headline);
+                if summary.detail.len() == lines.len() {
+                    // A headline of its own: short, with no path, and the
+                    // whole message after it.
+                    own.insert(error.code());
+                    assert_eq!(summary.detail, lines);
+                    assert!(summary.headline.len() < 100, "{}", summary.headline);
+                    assert!(!summary.headline.contains("p.toml"), "{}", summary.headline);
+                } else {
+                    assert_eq!(summary.headline, lines[0]);
+                    assert_eq!(summary.detail, lines[1..]);
+                }
+                if let Some(next) = &summary.next {
+                    assert!(next.len() < 140, "{next}");
+                    assert!(!next.contains("adopt"), "{next}");
+                }
+            }
+        }
+        for code in [
+            "ledger-clock-mix",
+            "ledger-changed",
+            "ledger-missing",
+            "ledger-elsewhere",
+            "ledger-corrupt",
+            "witness-unavailable",
+            "lock-timeout",
+            "insecure-permissions",
+            "shared-directory",
+            "invalid-pass",
+            "symlink",
+            "exists",
+        ] {
+            assert!(own.contains(code), "{code} has no headline");
+        }
+    }
+
+    #[test]
+    fn a_next_command_quotes_a_path_for_the_shell() {
+        let error = Error::LockTimeout {
+            path: "my dir/p.toml.ledger".into(),
+        };
+        let next = error.summary(false).next.unwrap_or_default();
+        assert!(next.ends_with("`fuser 'my dir/p.toml.ledger'`"), "{next}");
+    }
+
+    #[allow(clippy::too_many_lines)] // One error of each kind and shape.
+    fn samples() -> Vec<Error> {
         let path = std::path::PathBuf::from("p.toml");
         let symlink = Error::Symlink { path: path.clone() }.to_string();
         let details = [
@@ -726,15 +996,59 @@ mod tests {
             Error::LockTimeout { path: path.clone() },
             Error::Exists { path: path.clone() },
             Error::LedgerForeign {
-                path,
+                path: path.clone(),
                 ledger_id: "a".into(),
                 pass_id: "b".into(),
             },
+            Error::Insecure {
+                path: path.clone(),
+                mode: 0o644,
+                who: "other users can read or change it",
+                fix: "600",
+                advice: "run the command again",
+            },
+            Error::Invalid {
+                path: path.clone(),
+                problems: Vec::new(),
+            },
+            Error::LedgerClockMix {
+                path: "p.toml.ledger".into(),
+                seq: 1,
+                rehearsal: true,
+            },
+            Error::LedgerClockMix {
+                path: "p.toml.ledger".into(),
+                seq: 1,
+                rehearsal: false,
+            },
+            Error::LedgerMissing(Box::new(MissingLedger {
+                path: "p.toml.ledger".into(),
+                pass: path.clone(),
+                pass_id: "a".into(),
+                witness: "w".into(),
+                seq: 1,
+                last_seen: "/x/p.toml.ledger".into(),
+                totals: std::collections::BTreeMap::new(),
+                updated: "now".into(),
+            })),
         ]);
-        for error in messages {
-            for text in [error.to_string(), error.read_only_message()] {
-                assert!(!text.contains(".. ") && !text.ends_with(".."), "{text}");
-            }
+        for (live_pass, expected_exists) in
+            [(None, false), (None, true), (Some(path.clone()), false)]
+        {
+            messages.push(Error::LedgerElsewhere(Box::new(ElsewhereLedger {
+                path: "p.toml.ledger".into(),
+                pass: path.clone(),
+                pass_id: "a".into(),
+                witness: "w".into(),
+                seq: 1,
+                live: "/x/p.toml.ledger".into(),
+                live_pass,
+                totals: std::collections::BTreeMap::new(),
+                updated: "now".into(),
+                witness_seq: 1,
+                expected_exists,
+            })));
         }
+        messages
     }
 }

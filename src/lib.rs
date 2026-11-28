@@ -76,6 +76,7 @@ pub use decision::{
     Decision, Refusal, RefusalCode, WindowState, span, span_left, span_until, stamp,
     stamp_with_fraction, whole_seconds_up,
 };
+pub use error::Summary;
 pub use error::{ElsewhereLedger, Error, MissingLedger};
 pub use files::{
     Digest, LoadedPass, LockWait, MAX_PASS_BYTES, check_stream_write, future_mtime_warning, load,

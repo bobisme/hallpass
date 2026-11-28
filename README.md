@@ -154,7 +154,9 @@ preview adoption and review the totals before recording recovery. Set
 
 ```text
 $ hallpass status engagement.pass.toml
-hallpass status: error: the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says its last logical ledger sequence was 1 (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
+hallpass status: error: ledger-missing: the ledger is missing, but the witness says spends were recorded
+Next: run `hallpass doctor engagement.pass.toml`, which names the safe step
+  the ledger engagement.pass.toml.ledger for pass `example-2026-11` is missing, but the witness ~/.local/state/hallpass/example-2026-11.witness says its last logical ledger sequence was 1 (spent: calls 1); the ledger was last seen at … Put the ledger back beside the pass …; if it is really lost, run `hallpass adopt engagement.pass.toml --reason "..."` …
 
 $ hallpass adopt engagement.pass.toml --preview --json
 …

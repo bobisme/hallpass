@@ -27,6 +27,8 @@ const NAME: &str = "doctor";
 /// One problem: its code, what is wrong (in lines), and the next step.
 struct Issue {
     code: String,
+    /// A short first line; without one, the first of `lines` is it.
+    headline: Option<String>,
     lines: Vec<String>,
     next: Option<Vec<String>>,
     step: String,
@@ -162,6 +164,7 @@ fn diagnose(
         };
         d.block(Issue {
             code: refusal.code.as_str().to_owned(),
+            headline: None,
             lines: vec![format!("{}.", refusal.message)],
             next: None,
             step,
@@ -173,6 +176,7 @@ fn diagnose(
     match archived {
         Some((dir, hallpass::Provenance::Missing)) => d.act(Issue {
             code: "not-archived".to_owned(),
+            headline: Some("the archive does not hold this revision of the pass".to_owned()),
             lines: vec![format!(
                 "the archive {} does not hold this revision of the pass ({}), so an audit cannot replay its decisions.",
                 shown(dir),
@@ -209,6 +213,7 @@ fn lock_issue(file: &Path, path: &Path) -> Issue {
     );
     Issue {
         code: "lock-timeout".to_owned(),
+        headline: None,
         lines: vec![format!(
             "timed out waiting for the lock on {}: {who}. Doctor changed nothing.",
             shown(path)
@@ -271,6 +276,7 @@ fn ledger_findings(
     if let Some(seq) = view.unreconciled_adoption {
         d.act(Issue {
             code: "reference-inconclusive".to_owned(),
+            headline: Some(format!("adoption {seq} may have lost caller references, so a guarded spend is refused")),
             lines: vec![format!(
                 "adoption {seq} may have lost lines, and so caller references: a spend with --require-new-ref is refused as reference-inconclusive until the references that may be in those lines are reconciled."
             )],
@@ -326,6 +332,7 @@ fn ceiling_findings(d: &mut Diagnosis, file: &Path, loaded: &LoadedPass, view: &
     if !reached.is_empty() && reached.len() == loaded.pass.ceilings.len() {
         d.block(Issue {
             code: hallpass::RefusalCode::CeilingReached.as_str().to_owned(),
+            headline: Some("every ceiling of the pass is reached, so every spend is refused".to_owned()),
             lines: std::iter::once(
                 "every ceiling of the pass is reached, so every spend is refused:".to_owned(),
             )
@@ -361,6 +368,7 @@ fn no_witness_issue(
     let pass = shown(file);
     Issue {
         code: "no-witness".to_owned(),
+        headline: Some("there is no witness for this pass, but its ledger has entries".to_owned()),
         lines: vec![
             format!(
                 "there is no witness for pass `{}`, but its ledger's last logical sequence is {}, so hallpass cannot tell whether later ledger data was lost (for example in a partial copy).",
@@ -408,6 +416,10 @@ fn may_write(path: &Path, dir: bool) -> bool {
     accessat(CWD, path, mode, AtFlags::EACCESS).is_ok()
 }
 
+/// The headline for a file or directory that a spend writes and this user
+/// cannot.
+const UNWRITABLE: &str = "this user cannot write what a spend writes, so every spend fails";
+
 /// What a spend writes, checked without writing: the state directory (or
 /// the directory a spend would create it in) and its lock file, then the
 /// ledger, or the pass directory that a first spend creates it in. A spend
@@ -427,6 +439,7 @@ fn write_access(
         if owned(path) {
             Issue {
                 code: code.to_owned(),
+                headline: Some(UNWRITABLE.to_owned()),
                 lines,
                 next: argv(["chmod", mode, &shown(path)]),
                 step: again.clone(),
@@ -434,6 +447,7 @@ fn write_access(
         } else {
             Issue {
                 code: code.to_owned(),
+                headline: Some(UNWRITABLE.to_owned()),
                 lines,
                 next: None,
                 step: format!(
@@ -542,6 +556,7 @@ fn witness_issue(
     };
     Issue {
         code: "witness-unavailable".to_owned(),
+        headline: Some("the witness cannot be checked, so a spend is refused".to_owned()),
         lines: vec![format!(
             "the witness cannot be used, so a spend is refused: {reason}"
         )],
@@ -572,11 +587,11 @@ fn error_issue(file: &Path, state: &StateDir, error: &Error) -> Issue {
     let again = format!("Then run `hallpass doctor {pass}` again.");
     // A damaged ledger's message ends in a last resort that adopts; doctor
     // names the step itself, so it shows the form without it.
-    let mut lines = if matches!(error, Error::LedgerCorrupt { .. }) {
-        error.message_lines(true)
-    } else {
-        error.message_lines(false)
-    };
+    let read_only = matches!(error, Error::LedgerCorrupt { .. });
+    let mut lines = error.message_lines(read_only);
+    // An error with a headline of its own keeps every line as detail.
+    let summary = error.summary(read_only);
+    let headline = (summary.detail.len() == lines.len()).then_some(summary.headline);
     let (next, step) = match error {
         Error::Insecure { path, fix, .. } => (argv(["chmod", fix, &shown(path)]), again),
         Error::SharedDirectory { path, .. } => (
@@ -603,6 +618,7 @@ fn error_issue(file: &Path, state: &StateDir, error: &Error) -> Issue {
     };
     Issue {
         code: error.code().to_owned(),
+        headline,
         lines,
         next,
         step,
@@ -793,6 +809,17 @@ fn command_line(words: &[String]) -> String {
         .join(" ")
 }
 
+/// The `Next:` lines of a problem: the command and the step under it, or
+/// the step alone.
+fn next_lines(text: &mut String, next: Option<&[String]>, step: &str) {
+    if let Some(words) = next {
+        let _ = writeln!(text, "Next: {}", safe_message(&command_line(words)));
+        let _ = writeln!(text, "  {}", safe_message(step));
+    } else {
+        let _ = writeln!(text, "Next: no command. {}", safe_message(step));
+    }
+}
+
 fn render(file: &Path, d: Diagnosis) -> Output {
     let Diagnosis {
         pass_id,
@@ -819,23 +846,30 @@ fn render(file: &Path, d: Diagnosis) -> Output {
         (None, None) => ("healthy", None, None),
     };
     let mut text = String::new();
-    let (message, next, step) = if let Some(issue) = &issue {
+    let (headline, message, next, step) = if let Some(issue) = &issue {
         let label = if result == "blocked" {
             "BLOCKED"
         } else {
             "NEEDS ACTION"
         };
+        // The headline, then `Next:`, then the explanation.
         let mut lines = issue.lines.iter();
-        let _ = writeln!(
-            text,
-            "{label}: {}: {}",
-            issue.code,
-            safe_message(lines.next().map_or("", String::as_str))
-        );
-        for line in lines {
-            let _ = writeln!(text, "  {}", safe_message(line));
+        let headline = issue
+            .headline
+            .as_deref()
+            .or_else(|| lines.next().map(String::as_str))
+            .unwrap_or_default();
+        let _ = writeln!(text, "{label}: {}: {}", issue.code, safe_message(headline));
+        next_lines(&mut text, issue.next.as_deref(), &issue.step);
+        let rest: Vec<&String> = lines.collect();
+        if !rest.is_empty() {
+            text.push_str("Details:\n");
+            for line in rest {
+                let _ = writeln!(text, "  {}", safe_message(line));
+            }
         }
         (
+            headline.to_owned(),
             issue.lines.join(" "),
             issue.next.clone(),
             issue.step.clone(),
@@ -854,18 +888,9 @@ fn render(file: &Path, d: Diagnosis) -> Output {
             "{head}: the pass validates, its window is open, {ledger}, and the state directory and the ledger (or the directory it goes in) are writable"
         );
         let _ = writeln!(text, "HEALTHY: {}.", safe_message(&message));
-        (message, None, "Nothing to do.".to_owned())
+        text.push_str("Next: nothing to do.\n");
+        (head, message, None, "Nothing to do.".to_owned())
     };
-    match &next {
-        Some(words) => {
-            let _ = writeln!(text, "Next: {}", safe_message(&command_line(words)));
-            let _ = writeln!(text, "  {}", safe_message(&step));
-        }
-        None if issue.is_some() => {
-            let _ = writeln!(text, "Next: no command. {}", safe_message(&step));
-        }
-        None => text.push_str("Next: nothing to do.\n"),
-    }
     if !findings.is_empty() {
         text.push_str("Also:\n");
         for f in &findings {
@@ -884,6 +909,7 @@ fn render(file: &Path, d: Diagnosis) -> Output {
             "file": shown(file),
             "pass_id": pass_id,
             "problem": problem,
+            "headline": headline,
             "message": message,
             "next": next,
             "next_step": step,

@@ -74,7 +74,8 @@ record the flag with the request when your wrapper checks the reply.
 
 Every `refusal.message` and `error.message` ends with what to do next. The
 `refusal.code` and `error.code` values are stable; the message texts are
-for people and may change.
+for people and may change. `error.headline` is one short sentence for a
+status line, and `error.next` is the one next step in words, or null.
 
 ## A worked example
 

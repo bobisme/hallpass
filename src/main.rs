@@ -663,15 +663,21 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
     } else {
         error.read_only_message()
     };
-    // A message in several lines shows the first after the prefix and the
-    // rest indented; each line is made safe on its own, so nothing in a
-    // path can add a line.
+    // The code and a short headline after the prefix, the next step, then
+    // the full message indented; each line is made safe on its own, so
+    // nothing in a path can add a line.
     let read_only = !matches!(command, "spend" | "adopt" | "status");
-    let mut lines = error.message_lines(read_only).into_iter();
-    let first = lines.next().unwrap_or_default();
-    let mut text = format!("hallpass {command}: error: {}\n", safe_message(&first));
-    for line in lines {
-        let _ = writeln!(text, "  {}", safe_message(&line));
+    let summary = error.summary(read_only);
+    let mut text = format!(
+        "hallpass {command}: error: {}: {}\n",
+        error.code(),
+        safe_message(&summary.headline)
+    );
+    if let Some(next) = &summary.next {
+        let _ = writeln!(text, "Next: {}", safe_message(next));
+    }
+    for line in &summary.detail {
+        let _ = writeln!(text, "  {}", safe_message(line));
     }
     for p in problems {
         let _ = writeln!(text, "  - {}", safe_message(&p.to_string()));
@@ -705,6 +711,8 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
                 "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}|Error::AppendRolledBack{path,..}=>Some(path), _=>None },
                 "message": message,
+                "headline": summary.headline,
+                "next": summary.next,
                 "line": match error {
                     Error::LedgerCorrupt { line, .. } => Some(*line),
                     _ => None,
