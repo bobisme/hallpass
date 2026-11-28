@@ -130,8 +130,11 @@ impl Shift {
             self.path("lost.ledger"),
         )
         .expect("lose the ledger");
+        let pass = self.pass_arg();
+        let (_, preview) = self.hallpass(&["adopt", &pass, "--preview"]);
+        let token = preview["token"].as_str().expect("token").to_owned();
         let (code, adopted) =
-            self.hallpass(&["adopt", &self.pass_arg(), "--reason", "ledger lost"]);
+            self.hallpass(&["adopt", &pass, "--reason", "ledger lost", "--token", &token]);
         assert_eq!(code, Some(0), "{adopted}");
     }
 }

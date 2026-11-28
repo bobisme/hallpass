@@ -326,7 +326,8 @@ witness catches them.
   and `adopt` checks the ledger against the copy and carries what it
   records beyond the ledger. The copy is not synced: it only adds a
   refusal, and a missing or damaged copy gives the arrival above.
-- **Adoption** (`hallpass adopt FILE --reason TEXT`) is the one way past
+- **Adoption** (`hallpass adopt FILE --reason TEXT`, with `--token` from
+  `--preview` when it carries totals or may lose lines) is the one way past
   `ledger-missing` and `ledger-changed`. It writes an `adopt` line into the
   chain with the reason, the pass digest and the witness's previous record,
   so the event is in the record itself. It **carries** the witnessed

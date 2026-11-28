@@ -2420,6 +2420,70 @@ fn inconclusive_references(applies: bool, when: &str) -> Vec<String> {
         .collect()
 }
 
+/// An adoption that carries an amount or may lose lines (the kind that makes
+/// guarded spends `reference-inconclusive`) is recorded only with the token
+/// of a preview the caller reviewed. A plain adoption, with nothing carried
+/// and nothing lost, needs none. `None` when no token is needed or the
+/// preview itself fails (the adoption then reports that same error).
+fn lossy_without_token(
+    file: &Path,
+    state: &StateDir,
+    (carry_noted, rehearsal, checkpoint): (bool, &hallpass::RehearsalTotals, Option<&Path>),
+) -> Option<Error> {
+    let preview = checkpoint
+        .map_or_else(
+            || hallpass::preview_adopt_rehearsal(file, state, carry_noted, rehearsal.clone()),
+            |cp| {
+                hallpass::preview_adopt_checkpoint(file, state, carry_noted, rehearsal.clone(), cp)
+            },
+        )
+        .ok()?;
+    if !preview.makes_references_inconclusive() {
+        return None;
+    }
+    let mut command = format!(
+        "hallpass adopt {} --preview",
+        shell_arg(&file.display().to_string())
+    );
+    if carry_noted {
+        command.push_str(" --carry-noted-totals");
+    }
+    match rehearsal {
+        hallpass::RehearsalTotals::Carry => command.push_str(" --carry-rehearsal"),
+        hallpass::RehearsalTotals::Drop(proof) => {
+            command.push_str(" --drop-rehearsal ");
+            command.push_str(&shell_arg(&proof.display().to_string()));
+        }
+        _ => {}
+    }
+    if let Some(cp) = checkpoint {
+        command.push_str(" --checkpoint ");
+        command.push_str(&shell_arg(&cp.display().to_string()));
+    }
+    let what = if preview.carried.is_empty() {
+        "may lose ledger lines that hallpass recorded"
+    } else {
+        "carries totals from the witness and may lose ledger lines that hallpass recorded"
+    };
+    Some(Error::Usage(format!(
+        "this adoption {what}, so it needs the token of a preview you reviewed (carry: {}); nothing was recorded. Run `{command}`, check what it carries, then run this command again with `--token` and the token it prints",
+        hallpass::totals_text(&preview.carried)
+    )))
+}
+
+/// A shell-safe spelling of one argument, in single quotes when needed.
+fn shell_arg(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:@%+,".contains(&b))
+    {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
 fn adopt(
     file: &Path,
     reason: &str,
@@ -2428,6 +2492,13 @@ fn adopt(
     clock: &Clock,
 ) -> Output {
     let state = StateDir::from_env();
+    if token.is_none()
+        && hallpass::check_adoption_reason(reason).is_ok()
+        && let Some(refusal) =
+            lossy_without_token(file, &state, (carry_noted, &rehearsal, checkpoint))
+    {
+        return error_output("adopt", Some(file), &refusal);
+    }
     let adopted = match checkpoint {
         Some(cp) => hallpass::adopt_guarded_checkpoint(
             file,

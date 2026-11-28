@@ -171,6 +171,13 @@ impl Case {
         )
     }
 
+    /// Adopt as the README does: preview, then record with its token.
+    fn adopt_reviewed(&self, pass: &str, reason: &str) -> (i32, Value) {
+        let (_, preview) = self.json(&["adopt", pass, "--preview"]);
+        let token = preview["token"].as_str().expect("token").to_owned();
+        self.json(&["adopt", pass, "--reason", reason, "--token", &token])
+    }
+
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let (code, out, _) = self.run_in("state", "json", args);
         let value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
@@ -182,7 +189,7 @@ impl Case {
     fn lose_and_adopt(&self, pass: &str) {
         assert_eq!(self.json(&["spend", pass, "calls"]).0, 0);
         fs::rename(format!("{pass}.ledger"), self.path("lost.ledger")).expect("lose the ledger");
-        assert_eq!(self.json(&["adopt", pass, "--reason", "lost"]).0, 0);
+        assert_eq!(self.adopt_reviewed(pass, "lost").0, 0);
     }
 
     /// `reconcile-references` for adoption 1 with `references` and `reason`.

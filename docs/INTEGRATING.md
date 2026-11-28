@@ -612,7 +612,9 @@ jq -s -e 'map(select(.result == "allowed")) |
 
 # Deliberately restore the header-only copy to exercise adoption.
 cp "$work/initial.ledger" "$pass.ledger"
-"$hallpass_bin" adopt "$pass" --reason "restored example ledger"
+# The adoption carries the witness's totals, so it needs the token of a preview.
+token=$("$hallpass_bin" --format json adopt "$pass" --preview | jq -er .token)
+"$hallpass_bin" adopt "$pass" --reason "restored example ledger" --token "$token"
 "$hallpass_bin" ledger "$pass" --counter requests
 ~~~
 

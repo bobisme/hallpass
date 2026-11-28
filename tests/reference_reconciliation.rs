@@ -110,7 +110,9 @@ impl Engagement {
     }
 
     fn adopt(&self) -> Value {
-        self.json("adopt", &["--reason", "ledger lost"], 0)
+        let preview = self.json("adopt", &["--preview"], 0);
+        let token = preview["token"].as_str().expect("token").to_owned();
+        self.json("adopt", &["--reason", "ledger lost", "--token", &token], 0)
     }
 
     /// Write the reference list `name` for this pass.

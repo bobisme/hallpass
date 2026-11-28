@@ -589,7 +589,8 @@ own chain, whatever the witness lags.
 ### `adopt(pass, reason, now)`
 
 `hallpass adopt FILE --reason TEXT` acknowledges a ledger that would
-otherwise be refused or warned about, and records the acknowledgment in
+otherwise be refused or warned about (an adoption that carries an amount or
+may lose lines also needs `--token`, see below), and records the acknowledgment in
 the ledger as a line in the hash chain (`event: "adopt"`, the reason, the
 pass digest, the witness's previous record, and `carried`):
 
@@ -675,7 +676,13 @@ opaque token. It checks observable ledger, directory and witness write access
 without creating files; later permission changes and I/O failures can still prevent
 application. `adopt --reason TEXT --token TOKEN` rechecks that snapshot under
 the writer's witness and ledger locks; a stale token is an error (exit 1) and
-requires a new preview. An adoption already appended before a subsequent witness
+requires a new preview. An adoption that carries an amount from the witness
+or a checkpoint, or records a previous witness of at least one line (the
+adoptions that make guarded spends `reference-inconclusive`), is refused
+without `--token`, with a `usage` error that names the preview command and
+records nothing. A plain adoption, with nothing carried and nothing lost (a
+ledger that moved with its pass and has no witness), needs no token. The
+library's `adopt_guarded*` functions keep the optional token. An adoption already appended before a subsequent witness
 write failure still counts; inspect the ledger before retrying.
 
 The guard coordinates hallpass writers through their locks. Programs that edit
@@ -872,12 +879,12 @@ is still reported in that candidate's row.
 | Case | Code |
 |---|---|
 | the pass or ledger file is missing, unreadable, or fails to write | `io` |
-| the pass or ledger path, or any other file a command reads, is a symbolic link (also if swapped in while opening) | `symlink` |
+| the pass or ledger path, or any other file a command reads except a trusted signers file (`--allowed-signers`), is a symbolic link (also if swapped in while opening) | `symlink` |
 | the path of a file a command reads is not a regular file: a FIFO, a device, a socket or a directory (also if swapped in while opening; the open never waits for a FIFO's writer) | `not-regular-file` |
 | the pass is larger than 1 MiB | `too-large` |
 | `spend` (not `--dry-run`), `adopt` (not `--preview`) or `reconcile-references`, when the directory that holds the pass can be written by others and lacks the sticky bit | `shared-directory` |
-| the pass, or a trusted signers file (`--allowed-signers`), is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
-| the pass, or a trusted signers file, belongs to a user other than the effective user or root | `untrusted-owner` |
+| the pass, or a trusted signers file (`--allowed-signers`), is writable by group or others; the ledger has any group or other bit; a directory above the file that a trusted signers link resolves to is writable by group or others without the sticky bit | `insecure-permissions` |
+| the pass, or a trusted signers file (or a directory above the file that its link resolves to), belongs to a user other than the effective user or root | `untrusted-owner` |
 | the pass does not validate (every problem listed), changed while it was read, or does not end with a newline | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
@@ -1168,6 +1175,15 @@ file's rule wherever hallpass reads it (`verify-approval` and the audits'
 `--allowed-signers`): owned by the effective user or root, and writable by
 neither group nor others. Otherwise the command stops with
 `untrusted-owner` or `insecure-permissions` and the `chmod 600` to run.
+
+The trusted signers file is read only, so it may be a symbolic link, as a
+Kubernetes `ConfigMap` or `Secret` mount or a link under `/etc` is. hallpass
+resolves the link, applies the rule to the file it reaches, and requires each
+directory above that file to be owned by the effective user or root and not
+writable by group or others (a directory with the sticky bit is allowed).
+Messages name the resolved path. A link whose target fails the rule is
+refused as a file that fails it would be. A path that is not a link is
+checked as before, and no other input may be a link.
 
 hallpass trusts the `ssh-keygen` it runs: it is the absolute path in
 `HALLPASS_SSH_KEYGEN` when that is set, else `ssh-keygen` on `PATH`. A

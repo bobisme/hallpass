@@ -97,6 +97,13 @@ impl Case {
         (code, out)
     }
 
+    /// Adopt as the README does: preview, then record with its token.
+    fn adopt_reviewed(&self, pass: &str, reason: &str) -> (i32, Value) {
+        let (_, preview) = self.json(&["adopt", pass, "--preview"]);
+        let token = preview["token"].as_str().expect("token").to_owned();
+        self.json(&["adopt", pass, "--reason", reason, "--token", &token])
+    }
+
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let (code, out, _) = self.run_in("state", "json", args);
         let value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
@@ -250,7 +257,16 @@ fn reconcile_and_reference_reconciliation_text_quote_references_once() {
 
     // Lose the ledger, adopt, and reconcile the references it may have held.
     fs::rename(format!("{pass}.ledger"), case.path("lost.ledger")).expect("lose the ledger");
-    let (code, out) = case.text(&["adopt", &pass, "--reason", r#"lost "by" \ mistake"#]);
+    let (_, preview) = case.json(&["adopt", &pass, "--preview"]);
+    let token = preview["token"].as_str().expect("token").to_owned();
+    let (code, out) = case.text(&[
+        "adopt",
+        &pass,
+        "--reason",
+        r#"lost "by" \ mistake"#,
+        "--token",
+        &token,
+    ]);
     assert_eq!(code, 0, "{out}");
     let (value, rest) = quoted_after(&out, "with the reason ");
     assert_eq!(value, r#"lost "by" \ mistake"#);
@@ -365,7 +381,7 @@ fn a_new_reference_list_refuses_what_a_new_reference_refuses() {
     let (code, _) = case.json(&["spend", &pass, "calls"]);
     assert_eq!(code, 0);
     fs::rename(format!("{pass}.ledger"), case.path("lost.ledger")).expect("lose the ledger");
-    assert_eq!(case.json(&["adopt", &pass, "--reason", "lost"]).0, 0);
+    assert_eq!(case.adopt_reviewed(&pass, "lost").0, 0);
     for (bad, part) in [
         (
             "ref\u{200b}1",
@@ -581,7 +597,7 @@ fn a_reference_reconciliation_written_earlier_with_format_characters_still_reads
     let pass = case.pass();
     assert_eq!(case.json(&["spend", &pass, "calls"]).0, 0);
     fs::rename(format!("{pass}.ledger"), case.path("lost.ledger")).expect("lose the ledger");
-    assert_eq!(case.json(&["adopt", &pass, "--reason", "lost"]).0, 0);
+    assert_eq!(case.adopt_reviewed(&pass, "lost").0, 0);
     let list = case.file(
         "refs.json",
         &json!({"version": 1, "pass_id": "text-1", "references": ["REF"]}).to_string(),

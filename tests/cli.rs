@@ -123,6 +123,13 @@ fn code(output: &Output) -> i32 {
 }
 
 /// Run with `--format json`; return the exit code and the parsed object.
+/// Adopt as the README does: preview first, then record with its token.
+fn adopt_reviewed(file: &str, reason: &str, now: Option<&str>) -> (i32, Value) {
+    let (_, preview) = json(&["adopt", file, "--preview"], now);
+    let token = preview["token"].as_str().expect("token").to_owned();
+    json(&["adopt", file, "--reason", reason, "--token", &token], now)
+}
+
 fn json(args: &[&str], now: Option<&str>) -> (i32, Value) {
     let mut all = vec!["--format", "json"];
     all.extend_from_slice(args);
@@ -1158,13 +1165,9 @@ fn deleting_the_ledger_does_not_reset_the_count() {
         1,
         "--reason is required"
     );
-    let (rc, out) = json(
-        &[
-            "adopt",
-            s(&file),
-            "--reason",
-            "ledger lost when the laptop was reimaged",
-        ],
+    let (rc, out) = adopt_reviewed(
+        s(&file),
+        "ledger lost when the laptop was reimaged",
         Some(NOW),
     );
     assert_eq!(rc, 0, "{out}");
@@ -2075,10 +2078,7 @@ fn atomic_charges_race_filter_and_carry_forward() {
     assert_ne!(filtered["digest"], committed["digest"]);
 
     fs::write(&ledger, older).expect("rewind");
-    let (status, _) = json(
-        &["adopt", file, "--reason", "restored initial ledger"],
-        Some(NOW),
-    );
+    let (status, _) = adopt_reviewed(file, "restored initial ledger", Some(NOW));
     assert_eq!(status, 0);
     for (counter, spent) in [("requests", 1), ("bytes", 100)] {
         let (status, filtered) = json(&["ledger", file, "--counter", counter], None);
@@ -2237,11 +2237,7 @@ fn status_warns_on_strict_clock_rollback_for_each_event_kind() {
     assert!(!warns(&status("2026-11-20T09:10:00Z")));
     fs::write(&ledger, older).expect("restore");
     assert_eq!(
-        json(
-            &["adopt", s(&file), "--reason", "restore"],
-            Some("2026-11-20T09:20:00Z")
-        )
-        .0,
+        adopt_reviewed(s(&file), "restore", Some("2026-11-20T09:20:00Z")).0,
         0
     );
     assert!(warns(&status("2026-11-20T09:19:59Z")));

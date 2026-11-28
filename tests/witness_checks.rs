@@ -263,7 +263,15 @@ fn forked() -> Case {
     for w in out["warnings"].as_array().expect("warnings") {
         assert!(w.as_str().is_some_and(|w| w.ends_with('.')), "{w}");
     }
-    let (rc, out) = case.json(&["adopt", "p.toml", "--reason", "restored from backup at2"]);
+    let token = out["token"].as_str().expect("token").to_owned();
+    let (rc, out) = case.json(&[
+        "adopt",
+        "p.toml",
+        "--reason",
+        "restored from backup at2",
+        "--token",
+        &token,
+    ]);
     assert_eq!(rc, 0, "{out}");
     case.spends(1);
     case
@@ -441,7 +449,7 @@ fn damage_seen_before_the_ledger_is_lost_stops_the_adoption() {
     assert_eq!(status["ledger"]["witness"], "not-checked", "{status}");
     fs::rename(case.ledger(), case.path("lost.ledger")).expect("lose ledger");
 
-    let refused = "is damaged: a command found that it records spent: calls 1 at sequence 3, while the verified ledger had spent: calls 3 there, and an adoption would carry those totals. Put the ledger back beside the pass, or a backup that holds sequence 3. If no copy is left, run `hallpass adopt p.toml --reason \"...\" --carry-noted-totals`: it carries, per counter, the higher of the two totals.";
+    let refused = "is damaged: a command found that it records spent: calls 1 at sequence 3, while the verified ledger had spent: calls 3 there, and an adoption would carry those totals. Put the ledger back beside the pass, or a backup that holds sequence 3. If no copy is left, run `hallpass adopt p.toml --preview --carry-noted-totals`, review it, then `hallpass adopt p.toml --reason \"...\" --carry-noted-totals --token TOKEN`: it carries, per counter, the higher of the two totals.";
     let (rc, out) = case.json(&["adopt", "p.toml", "--preview"]);
     assert_eq!((rc, error_code(&out)), (1, "witness-unavailable"), "{out}");
     let message = out["error"]["message"].as_str().expect("message");
@@ -514,12 +522,15 @@ fn noted_totals_never_lower_a_count() {
     assert_eq!(out["carried"], serde_json::json!({"calls": 5}), "{out}");
     // The witness's own total is the higher: nothing came from the note.
     assert_eq!(out["from_note"], serde_json::json!({}), "{out}");
+    let token = out["token"].as_str().expect("token").to_owned();
     let shown = case.run(&[
         "adopt",
         "p.toml",
         "--reason",
         "lost",
         "--carry-noted-totals",
+        "--token",
+        &token,
     ]);
     let stdout = String::from_utf8_lossy(&shown.stdout);
     assert!(
@@ -559,12 +570,16 @@ fn the_adopted_line_names_the_counters_carried_from_the_note() {
     let (_, status) = case.json(&["status", "p.toml"]);
     assert_eq!(status["ledger"]["witness"], "not-checked", "{status}");
     fs::rename(case.ledger(), case.path("lost.ledger")).expect("lose ledger");
+    let (_, preview) = case.json(&["adopt", "p.toml", "--preview", "--carry-noted-totals"]);
+    let token = preview["token"].as_str().expect("token").to_owned();
     let shown = case.run(&[
         "adopt",
         "p.toml",
         "--reason",
         "lost",
         "--carry-noted-totals",
+        "--token",
+        &token,
     ]);
     let stdout = String::from_utf8_lossy(&shown.stdout);
     assert!(

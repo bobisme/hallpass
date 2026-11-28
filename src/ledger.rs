@@ -1318,6 +1318,15 @@ fn check_reason(reason: &str) -> Result<(), String> {
     check_new_note(reason).map_err(|m| m.replace("the note", "the reason"))
 }
 
+/// Check an adoption reason as `adopt` does before it records anything, so
+/// a caller can refuse a bad reason before any other refusal.
+///
+/// # Errors
+/// [`Error::Usage`] when the reason is empty or not a plain note.
+pub fn check_adoption_reason(reason: &str) -> Result<(), Error> {
+    check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))
+}
+
 /// Check a recorded adoption or reconciliation reason: nonblank, printable,
 /// at most [`MAX_NOTE`] characters, without a line separator or
 /// bidirectional control. This is the rule reasons were written under
@@ -3566,12 +3575,11 @@ fn noted_totals(
         return Err(state.noted_as_damaged(
             id,
             &format!(
-                "a command found that it records spent: {} at sequence {}, while the verified ledger had spent: {} there, and an adoption would carry those totals. Put the ledger back beside the pass, or a backup that holds sequence {}. If no copy is left, run `hallpass adopt {} --reason \"...\" --carry-noted-totals`: it carries, per counter, the higher of the two totals",
+                "a command found that it records spent: {1} at sequence {2}, while the verified ledger had spent: {3} there, and an adoption would carry those totals. Put the ledger back beside the pass, or a backup that holds sequence {2}. If no copy is left, run `hallpass adopt {0} --preview --carry-noted-totals`, review it, then `hallpass adopt {0} --reason \"...\" --carry-noted-totals --token TOKEN`: it carries, per counter, the higher of the two totals",
+                pass_path.display(),
                 totals_text(&note.recorded),
                 note.seq,
-                totals_text(&note.verified),
-                note.seq,
-                pass_path.display()
+                totals_text(&note.verified)
             ),
         ));
     }

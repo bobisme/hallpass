@@ -124,7 +124,8 @@ tail the witness recorded.
 If the witness counted the damaged last line, the repair always refuses,
 because removing the line would lower the count. With no backup, the last
 resort is to move the ledger aside (keep it, it holds the receipts) and run
-`hallpass adopt engagement.toml --reason "..."`. The pass is then
+`hallpass adopt engagement.toml --preview`, then `hallpass adopt
+engagement.toml --reason "..." --token TOKEN`. The pass is then
 `ledger-missing`, and the adoption starts a new ledger that carries the
 witness totals. The receipts in the moved ledger are not in the new chain. See
 [Dropping a cut-short last line](spec.md#dropping-a-cut-short-last-line).
@@ -205,6 +206,13 @@ hallpass --json audit-receipts engagement.toml approval-archive \
   --allowed-signers trusted_signers --principal owner@example.org > audit.json
 jq -e '.result == "complete"' audit.json
 ```
+
+`--allowed-signers` may name a symbolic link, such as a Kubernetes
+`ConfigMap` or `Secret` mount or a link under `/etc`. hallpass resolves the
+link and checks the file it reaches (owned by you or root, not writable by
+group or others) and each directory above that file (owned by you or root,
+not writable by group or others unless it is sticky). A message names the
+resolved path, and a target that fails a check is refused.
 
 The two options answer different questions. The trusted signers file decides
 *whose* keys count. `--principal` decides *who* must have approved. A signers

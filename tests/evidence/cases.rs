@@ -141,7 +141,19 @@ fn exact_reference_across_revisions_ambiguous_lost_and_fresh_are_distinct() {
         "pass.ledger",
         std::str::from_utf8(&before).expect("ledger text"),
     );
-    checked(&["adopt", file, "--reason", "restored two older debits"], 0);
+    let preview = checked(&["adopt", file, "--preview"], 0);
+    let token = preview["token"].as_str().expect("token").to_owned();
+    checked(
+        &[
+            "adopt",
+            file,
+            "--reason",
+            "restored two older debits",
+            "--token",
+            &token,
+        ],
+        0,
+    );
     let carried = checked(&find, 2);
     assert_eq!(carried["adoption_count"], 1);
     assert!(carried["warnings"].to_string().contains("Carried"));

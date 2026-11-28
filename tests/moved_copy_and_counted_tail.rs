@@ -139,10 +139,19 @@ fn a_damaged_counted_last_line_names_the_last_resort() {
     assert!(m.contains("hallpass adopt"), "{m}");
     // The path works: moved aside, adopt carries the witness totals.
     fs::rename(d.join("p.toml.ledger"), d.join("p.toml.ledger.damaged")).expect("move");
+    let (_, preview) = run(&d, &state, &["adopt", "p.toml", "--preview"]);
+    let token = preview["token"].as_str().expect("token").to_owned();
     let (rc, v) = run(
         &d,
         &state,
-        &["adopt", "p.toml", "--reason", "damaged counted last line"],
+        &[
+            "adopt",
+            "p.toml",
+            "--reason",
+            "damaged counted last line",
+            "--token",
+            &token,
+        ],
     );
     assert_eq!(rc, 0, "{v}");
     let (rc, v) = run(&d, &state, &["spend", "p.toml", "calls"]);

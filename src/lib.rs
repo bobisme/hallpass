@@ -85,6 +85,7 @@ pub use files::{
     load_with_bytes, lock_holder_pid, open_input, open_trusted_signers,
     refuse_world_writable_directory, shared_directory_warning, with_lock_wait,
 };
+pub use ledger::check_adoption_reason;
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
     CheckpointExport, CheckpointStatus, DebitCharge, DebitReceipt, LedgerDebit, LedgerEntry,

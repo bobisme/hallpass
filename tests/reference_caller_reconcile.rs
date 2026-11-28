@@ -151,7 +151,10 @@ fn the_reference_caller_reconciles_its_journals_and_sends_again() {
         shift.path("lost.ledger"),
     )
     .expect("lose the ledger");
-    let (code, adopted) = shift.hallpass(&["adopt", &pass, "--reason", "ledger lost"]);
+    let (_, preview) = shift.hallpass(&["adopt", &pass, "--preview"]);
+    let token = preview["token"].as_str().expect("token").to_owned();
+    let (code, adopted) =
+        shift.hallpass(&["adopt", &pass, "--reason", "ledger lost", "--token", &token]);
     assert_eq!(code, Some(0), "{adopted}");
     assert_eq!(adopted["carried"], json!({"calls": 3}));
 

@@ -187,6 +187,18 @@ impl Env {
         self.run(&args, None)
     }
 
+    /// Adopt as the README does: preview with the same flags, then record
+    /// with the token it printed.
+    fn adopt_reviewed(&self, reason: &str, extra: &[&str], clock: Option<&str>) -> (i32, Value) {
+        let mut preview = vec!["adopt", "p.toml", "--preview"];
+        preview.extend_from_slice(extra);
+        let (_, shown) = self.run(&preview, clock);
+        let token = shown["token"].as_str().expect("token").to_owned();
+        let mut args = vec!["adopt", "p.toml", "--reason", reason, "--token", &token];
+        args.extend_from_slice(extra);
+        self.run(&args, clock)
+    }
+
     fn preview(&self, extra: &[&str]) -> (i32, Value) {
         let mut args = vec!["adopt", "p.toml", "--preview"];
         args.extend_from_slice(extra);
@@ -371,12 +383,15 @@ fn carry_rehearsal_counts_the_units_and_names_them() {
         json!({"units": {"requests": 3}, "carried": true, "proof": null}),
         "{preview}"
     );
+    let token = preview["token"].as_str().expect("token").to_owned();
     let text = env.text(&[
         "adopt",
         "p.toml",
         "--reason",
         "keep them",
         "--carry-rehearsal",
+        "--token",
+        &token,
     ]);
     assert!(
         text.contains(
@@ -403,10 +418,7 @@ fn a_witness_that_counts_live_units_is_never_dropped() {
     assert_eq!(code, 0, "{live}");
     fs::remove_file(env.ledger()).expect("lose");
     let clock = rehearsal_clock();
-    let (code, adopted) = env.run(
-        &["adopt", "p.toml", "--reason", "lost before the rehearsal"],
-        Some(&clock),
-    );
+    let (code, adopted) = env.adopt_reviewed("lost before the rehearsal", &[], Some(&clock));
     assert_eq!(code, 0, "{adopted}");
     assert_eq!(adopted["carried"], json!({"requests": 1}), "{adopted}");
     let (code, reply) = env.run(
@@ -441,10 +453,7 @@ fn a_rehearsal_adopting_its_own_units_carries_them_as_before() {
     env.rehearse();
     env.move_aside();
     let clock = rehearsal_clock();
-    let (code, adopted) = env.run(
-        &["adopt", "p.toml", "--reason", "rehearsal ledger lost"],
-        Some(&clock),
-    );
+    let (code, adopted) = env.adopt_reviewed("rehearsal ledger lost", &[], Some(&clock));
     assert_eq!(code, 0, "{adopted}");
     assert_eq!(adopted["carried"], json!({"requests": 3}), "{adopted}");
     assert_eq!(adopted["rehearsal"], Value::Null, "{adopted}");

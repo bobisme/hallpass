@@ -223,8 +223,10 @@ What it guards against:
   ledger's last witnessed sequence, hash and totals. A ledger lost in a copy or a `git clean`, a pass
   moved without its ledger, an older copy put back, or an edited last line
   is refused until it is restored or adopted with
-  `hallpass adopt FILE --reason TEXT`, which is recorded in the ledger and
-  keeps the count.
+  `hallpass adopt FILE --preview` and then `hallpass adopt FILE --reason TEXT
+  --token TOKEN`, which is recorded in the ledger and keeps the count. An
+  adoption that carries totals or may lose lines is refused without the
+  token.
 - **File permissions and links**: the final path component for the pass or
   ledger must be a regular file. Keep their parent directories trusted.
   The pass must belong to the effective user or root and disallow group

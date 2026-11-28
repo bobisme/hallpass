@@ -84,6 +84,13 @@ impl Case {
         )
     }
 
+    /// Adopt as the README does: preview, then record with its token.
+    fn adopt_reviewed(&self, pass: &str, reason: &str) -> (i32, Value) {
+        let (_, preview) = self.json(&["adopt", pass, "--preview"]);
+        let token = preview["token"].as_str().expect("token").to_owned();
+        self.json(&["adopt", pass, "--reason", reason, "--token", &token])
+    }
+
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let (code, out) = self.run("state", "json", args);
         let value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
@@ -127,7 +134,7 @@ fn a_reference_list_with_a_look_alike_is_refused() {
     let pass = case.file("p.toml", PASS);
     assert_eq!(case.json(&["spend", &pass, "calls"]).0, 0);
     fs::rename(format!("{pass}.ledger"), case.path("lost.ledger")).expect("lose");
-    assert_eq!(case.json(&["adopt", &pass, "--reason", "lost"]).0, 0);
+    assert_eq!(case.adopt_reviewed(&pass, "lost").0, 0);
     for (class, text) in LOOKALIKES {
         let list = case.file(
             "refs.json",

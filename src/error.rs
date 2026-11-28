@@ -151,7 +151,7 @@ pub enum Error {
     LedgerElsewhere(Box<ElsewhereLedger>),
     /// The ledger does not contain the line the witness recorded.
     #[error(
-        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {} --reason \"...\"`, which records the adoption in the ledger and never lowers a count below what the witness recorded.",
+        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {2} --preview`, review what it carries, then `hallpass adopt {2} --reason \"...\" --token TOKEN`, which records the adoption in the ledger and never lowers a count below what the witness recorded.",
         path.display(),
         witness.display(),
         pass.display()
@@ -684,7 +684,7 @@ impl std::fmt::Display for MissingLedger {
                 )
             } else {
                 format!(
-                    "if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals",
+                    "if it is really lost, run `hallpass adopt {0} --preview`, review what it carries, then `hallpass adopt {0} --reason \"...\" --token TOKEN`, which starts a new ledger that carries those totals",
                     self.pass.display()
                 )
             }
@@ -863,7 +863,7 @@ fn corrupt_advice(
 ) -> String {
     let pass = pass_of(path).display().to_string();
     let backup = format!(
-        "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {pass} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals, but the receipts in the moved ledger are not in the new chain."
+        "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {pass} --preview`, then `hallpass adopt {pass} --reason \"...\" --token TOKEN`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals, but the receipts in the moved ledger are not in the new chain."
     );
     let backup = backup.as_str();
     if complete {

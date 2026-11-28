@@ -81,11 +81,21 @@ impl Engagement {
         cmd
     }
 
+    /// Adopt as the README does: preview, then record with the token.
     fn adopt(&self, reason: &str) -> Value {
+        let preview = reply(
+            &self
+                .command("adopt")
+                .arg("--preview")
+                .output()
+                .expect("preview"),
+            0,
+        );
+        let token = preview["token"].as_str().expect("token").to_owned();
         reply(
             &self
                 .command("adopt")
-                .args(["--reason", reason])
+                .args(["--reason", reason, "--token", &token])
                 .output()
                 .expect("adopt"),
             0,

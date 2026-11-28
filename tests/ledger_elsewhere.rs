@@ -321,7 +321,7 @@ fn a_really_lost_ledger_keeps_the_adopt_advice_and_warns_about_references() {
         assert!(message.contains("is missing"), "{message}");
         assert!(
             message.contains(&format!(
-                "if it is really lost, run `hallpass adopt {pass} --reason"
+                "if it is really lost, run `hallpass adopt {pass} --preview`, review what it carries, then `hallpass adopt {pass} --reason"
             )),
             "{message}"
         );

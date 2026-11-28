@@ -710,16 +710,34 @@ fn check_owner_mode(
     Ok(())
 }
 
-/// Open a trusted signers file (`--allowed-signers`) as a pass is opened.
+/// Open a trusted signers file (`--allowed-signers`).
 ///
-/// That is never through a link, only a regular file, and under the pass
-/// file's owner and mode rule. Whoever can write this file can add a key for
-/// the owner's principal and sign a widened pass.
+/// It is a regular file under the pass file's owner and mode rule. Whoever
+/// can write this file can add a key for the owner's principal and sign a
+/// widened pass.
+///
+/// The file is read only, so the path may be a symbolic link (a Kubernetes
+/// `ConfigMap` or `Secret` mount, or a link under `/etc`). The link is
+/// resolved first. The rule then applies to the file it reaches, and each
+/// directory on the resolved path must be owned by the effective user or
+/// root and not writable by group or others, unless it has the sticky bit.
+/// Errors name the resolved path. A path that is not a link is checked as
+/// before.
 ///
 /// # Errors
-/// [`Error::Symlink`], [`Error::NotRegular`], [`Error::UntrustedOwner`],
-/// [`Error::Insecure`] and [`Error::Io`].
+/// [`Error::Symlink`] (a link that cannot be resolved to a file),
+/// [`Error::NotRegular`], [`Error::UntrustedOwner`], [`Error::Insecure`]
+/// and [`Error::Io`].
 pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
+    let linked = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let resolved;
+    let path = if linked {
+        resolved = fs::canonicalize(path).map_err(|e| Error::io(path, &e))?;
+        check_resolved_directories(&resolved)?;
+        resolved.as_path()
+    } else {
+        path
+    };
     let file = open_input(path)?;
     let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
     check_owner_mode(
@@ -729,6 +747,35 @@ pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
         "check that every line in it names a key you trust, because a key added there can sign a pass",
     )?;
     Ok(file)
+}
+
+/// Each directory above the file a trusted signers link resolved to must be
+/// owned by the effective user or root, and not writable by group or others
+/// (a sticky directory is allowed): otherwise another user could rename the
+/// real file away and put theirs in its place.
+fn check_resolved_directories(resolved: &Path) -> Result<(), Error> {
+    let effective = rustix::process::geteuid().as_raw();
+    for dir in resolved.ancestors().skip(1) {
+        let meta = fs::metadata(dir).map_err(|e| Error::io(dir, &e))?;
+        if meta.uid() != effective && meta.uid() != 0 {
+            return Err(Error::UntrustedOwner {
+                path: dir.to_path_buf(),
+                owner: meta.uid(),
+                effective,
+            });
+        }
+        let mode = meta.mode();
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            return Err(Error::Insecure {
+                path: dir.to_path_buf(),
+                mode: mode & 0o7777,
+                who: "other users can rename the trusted signers file, which a link resolved to, and put their own in its place",
+                fix: "go-w",
+                advice: "check that the trusted signers file in it is the one you trust",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// How long a pass file must have gone unchanged before hallpass uses what
