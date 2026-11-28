@@ -11,6 +11,7 @@ The hallpass ledger is the authority for debits. The journal is the authority
 for what this caller did. Python 3 standard library only. See README.md.
 """
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -62,12 +63,14 @@ def append(journal, **record):
     """Append one record and force it to disk before the caller acts on it."""
     record = {"at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **record}
     new = not os.path.exists(journal)
-    fd = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    fd = os.open(journal, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # one writer at a time, so the tail check below is true
+        drop_torn_tail(fd, journal)
         os.write(fd, (json.dumps(record) + "\n").encode())
         os.fsync(fd)
     finally:
-        os.close(fd)
+        os.close(fd)  # closing the descriptor also releases the lock
     if new:  # make the new directory entry durable too
         fd = os.open(os.path.dirname(os.path.abspath(journal)), os.O_RDONLY)
         try:
@@ -76,24 +79,66 @@ def append(journal, **record):
             os.close(fd)
 
 
+def drop_torn_tail(fd, journal):
+    """A crash can cut the last record off before its newline. The caller writes a
+    record and forces it to disk before it acts on it, so it never acted on a
+    record that has no newline: nothing depends on those bytes. Appending after
+    them would fuse the next record into one unreadable line, so cut them off
+    first, say so, and show what was cut. The file is not kept: the cut bytes
+    are in this message, and `handoff` and the ledger hold the facts."""
+    size = os.fstat(fd).st_size
+    if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+        return
+    data = os.pread(fd, size, 0)
+    keep = data.rfind(b"\n") + 1  # 0 when the file is only a fragment
+    print(f"caller: {journal} ended in an unfinished record ({size - keep} bytes, after a crash while "
+          f"writing); the caller never acted on it, so it is removed before the next record: "
+          f"{data[keep:].decode(errors='replace')!r}", file=sys.stderr)
+    os.ftruncate(fd, keep)
+    os.fsync(fd)
+
+
 def read_journal(journal):
     """Every complete record. A crash can cut off the last line before its
     newline. The caller acts only on records already on disk, so it never
-    acted on that one, and it is ignored."""
+    acted on that one, and it is ignored (the next `append` removes it).
+    Any other line that is not a JSON object is damage: refuse, with the line."""
     try:
         data = Path(journal).read_bytes()
     except FileNotFoundError:
         return []
-    return [json.loads(line) for line in data.split(b"\n")[:-1]]
+    records = []
+    for number, line in enumerate(data.split(b"\n")[:-1], 1):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            record = None
+        if not isinstance(record, dict):
+            fail(f"{journal} line {number} is not a journal record. The journal is damaged "
+                 f"and is not read further; keep a copy, then fix or remove that line "
+                 f"(each line is one JSON object), and run the command again")
+        records.append(record)
+    return records
 
 
-def units(records, pass_file):
+def pass_key(pass_file):
+    """The pass path as the journal records it: resolved, so that `e.pass.toml`,
+    `./e.pass.toml` and the absolute path read the same. It is for the reader of
+    the journal. Records are matched to a pass by its ID, which hallpass reports."""
+    return os.path.realpath(pass_file)
+
+
+def is_pass(record, pass_id):
+    return record.get("pass_id") == pass_id
+
+
+def units(records, pass_id):
     """The records of each caller reference for this pass, in journal order."""
     out = {}
     for record in records:
         if "ref" in record:
             out.setdefault(record["ref"], []).append(record)
-    return {ref: rs for ref, rs in out.items() if rs[0]["pass"] == pass_file}
+    return {ref: rs for ref, rs in out.items() if is_pass(rs[0], pass_id)}
 
 
 def target(text):
@@ -120,6 +165,18 @@ def canonical(a):
             or not all(isinstance(e, dict) and isinstance(e.get("target"), str)
                        and (e.get("name") is None or isinstance(e["name"], str)) for e in echoed)):
         fail(f"hallpass would not take these targets: {message(reply)}")
+    clock = reply.get("test_clock")
+    if a.rehearsal and clock is not True:
+        fail("--rehearsal needs a hallpass that honours HALLPASS_UNSAFE_TEST_CLOCK, and this one "
+             "uses the real clock (a release build ignores it), so a spend would be live; nothing "
+             "was journaled. Use a debug build or one built with the test-clock feature, set the "
+             "variable, or run without --rehearsal")
+    if not a.rehearsal and clock is not False:
+        fail("hallpass reports a test clock, but this is not a rehearsal; nothing was journaled. "
+             "Unset HALLPASS_UNSAFE_TEST_CLOCK in the hallpass environment, or run with --rehearsal")
+    if not isinstance(reply.get("pass_id"), str):
+        fail(f"hallpass did not say the pass ID: {message(reply)}")
+    a.pass_id = reply["pass_id"]
     return [{"target": e["target"], "name": e.get("name")} for e in echoed]
 
 
@@ -194,7 +251,7 @@ def pin(a):
     if code != 0 or current.get("digest") != archived["digest"]:
         fail("the pass changed while it was archived; review it again")
     extra = {"signed_by": a.require_signature} if signed is not None else {}
-    append(a.journal, event="pin", **{"pass": a.pass_file}, pass_id=current["pass_id"], digest=current["digest"],
+    append(a.journal, event="pin", **{"pass": pass_key(a.pass_file)}, pass_id=current["pass_id"], digest=current["digest"],
            **extra)
     how = f" signed by {a.require_signature}" if signed is not None else ""
     print(f"pinned {current['pass_id']} {current['digest']}{how}")
@@ -228,7 +285,7 @@ def run(a):
     if a.ref in {r.get("ref") for r in records}:
         fail(f"{a.ref} is already in {a.journal}; give every unit a new reference")
     a.to = canonical(a)  # one spelling for the intent, the spend, the reply check and the manifest
-    pins = [r for r in records if r["event"] == "pin" and r["pass"] == a.pass_file]
+    pins = [r for r in records if r["event"] == "pin" and is_pass(r, a.pass_id)]
     if not pins:
         fail(f"no pin for {a.pass_file}; review the pass, then run `pin`")
     pinned = pins[-1]
@@ -237,7 +294,7 @@ def run(a):
         "mode": "charges", "charges": a.charge, "targets": a.to,
         "record_targets": True, "caller_ref": a.ref, "note": None,
     }
-    append(a.journal, ref=a.ref, event="intent", **{"pass": a.pass_file}, pass_id=pinned["pass_id"],
+    append(a.journal, ref=a.ref, event="intent", **{"pass": pass_key(a.pass_file)}, pass_id=pinned["pass_id"],
            digest=pinned["digest"], targets=a.to, charges=a.charge, rehearsal=a.rehearsal)
 
     args = ["spend", "--digest", pinned["digest"], "--duration", str(a.duration),
@@ -251,8 +308,13 @@ def run(a):
         os._exit(3)  # the reply is lost: the journal holds only the intent
     reply = decode(out)
 
+    live_in_rehearsal = []
+
     def dispatch():  # inspect_reply calls this only for a verified debit
         append(a.journal, ref=a.ref, event="spend", outcome="debited", seq=reply["seq"])
+        if a.rehearsal and reply.get("test_clock") is not True:
+            live_in_rehearsal.append(reply["seq"])  # the preflight should have caught this
+            return
         append(a.journal, ref=a.ref, event="callback-start")
         send_unit(a.outbox, a.ref, a.to, a.charge)
         if INTERRUPT == "after-callback":
@@ -263,6 +325,11 @@ def run(a):
         print(f"hallpass warning: {message}", file=sys.stderr)
 
     action = check.inspect_reply(code, production_view(out) if a.rehearsal else out, expected, dispatch, warn)
+    if live_in_rehearsal:
+        print(f"{a.ref}: refused to send: this is a rehearsal but the debit (seq {live_in_rehearsal[0]}) is "
+              f"live, because this hallpass ignores HALLPASS_UNSAFE_TEST_CLOCK (a release build). The "
+              f"callback did not run. Run `handoff`; the debit stands and cannot be undone", file=sys.stderr)
+        return 1
     if action == "proceed":
         print(f"{a.ref}: debit seq {reply['seq']} verified, unit sent, completion recorded")
         return 0
@@ -318,12 +385,13 @@ def handoff(a):
     record is an ATTENTION item. --since SEQ looks only at debits from SEQ on."""
     if a.ref_prefix == "":
         fail("--ref-prefix must not be empty: it would claim every reference")
-    mine = units(read_journal(a.journal), a.pass_file)
+    records = read_journal(a.journal)
     since = ["--since", str(a.since)] if a.since else []
     code, out = hallpass("ledger", *since, "--", a.pass_file)
     ledger = decode(out)
     if code != 0 or ledger.get("verified") is not True:
         fail(f"the ledger could not be verified: {message(ledger)}")
+    mine = units(records, ledger["pass_id"])
     rows = {}
     if mine:
         manifest = {"version": 1, "pass_id": ledger["pass_id"], "units": [
@@ -370,7 +438,15 @@ def handoff(a):
     widths = [max(len(line[i]) for line in lines) for i in range(3)] if lines else []
     for line in lines:
         print("  ".join(cell.ljust(w) for cell, w in zip(line, widths)) + "  " + line[3])
-    pins = [r for r in read_journal(a.journal) if r["event"] == "pin" and r["pass"] == a.pass_file]
+    # Records are matched by pass ID, so a moved or respelled path is still judged.
+    # Say when they name another file: the pass may have moved, or this may be a second copy.
+    elsewhere = sorted({r["pass"] for r in records if is_pass(r, ledger["pass_id"])
+                        and isinstance(r.get("pass"), str) and pass_key(r["pass"]) != pass_key(a.pass_file)})
+    for path in elsewhere:
+        print(f"Note: the journal has records for pass {ledger['pass_id']} written under {path!r}, not "
+              f"{pass_key(a.pass_file)!r}. They are judged here by the pass ID. If the pass did not move "
+              f"with its ledger, this is a second copy: stop and find out which file is the pass.")
+    pins = [r for r in records if r["event"] == "pin" and is_pass(r, ledger["pass_id"])]
     if pins:
         code, out = hallpass("digest", "--", a.pass_file)
         current = decode(out)
@@ -413,7 +489,7 @@ def reconcile_references(a):
     for journal in [a.journal, *a.also]:
         if not os.path.exists(journal):
             fail(f"no journal at {journal}")
-        for ref in units(read_journal(journal), a.pass_file):
+        for ref in units(read_journal(journal), ledger["pass_id"]):
             if ref not in references:
                 references.append(ref)
     listing = {"version": 1, "pass_id": ledger["pass_id"], "references": references}
@@ -426,7 +502,8 @@ def reconcile_references(a):
     reply = decode(out)
     if code != 0 or reply.get("result") != "ok" or not isinstance(reply.get("seq"), int):
         fail(f"reconcile-references failed: {message(reply)}")
-    append(a.journal, event="reconcile-references", **{"pass": a.pass_file}, adoption=adoption,
+    append(a.journal, event="reconcile-references", **{"pass": pass_key(a.pass_file)},
+           pass_id=ledger["pass_id"], adoption=adoption,
            seq=reply["seq"], references=len(references))
     print(f"reconciled {len(references)} references for the adoption at seq {adoption}: ledger seq {reply['seq']}")
     return 0

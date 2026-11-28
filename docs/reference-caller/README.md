@@ -31,8 +31,14 @@ caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [
 | `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
 | `reconcile-references` | After an adoption that may have lost lines, records every reference in the journals with `hallpass reconcile-references`, so that guarded spends resume: see below. | 0 recorded, or nothing to reconcile; 1 error |
 
-Use the same `PASS` spelling for every command: the journal and the spend
-reply compare it as written.
+The journal records each pass by its ID, its digest and its resolved path.
+`run`, `handoff` and `reconcile-references` match records to the pass by the ID
+that hallpass reports, so `e.pass.toml`, `./e.pass.toml` and the absolute path
+are one pass, and so is a pass that moved with its journal and ledger. If
+records name another file than the one given, `handoff` prints a `Note:` line
+with the old path: after a move that is expected; otherwise it may be a second
+copy of the pass, so find out which file is the pass. The spend reply still
+compares the file as written, so use one spelling within a run.
 
 ## Pinning a signed revision
 
@@ -90,7 +96,15 @@ used once, whatever its outcome. Then it:
 
 Each record is a JSON line, appended and synced to disk before the next step.
 A crash can cut off the last line. The caller ignores a last line without a
-newline: it never acted on a record that was not on disk.
+newline: it never acted on a record that was not on disk. The next record is
+appended under a lock on the journal. If the file does not end in a newline,
+the fragment is cut off first, and the caller prints the cut bytes on stderr.
+It is cut rather than ended with a newline so that the journal holds no
+unreadable line: nothing depends on the fragment, and every later `run` and
+`handoff` stays possible. Any other line that is not a JSON object is damage.
+The caller refuses to read the journal, names the line, and says to keep a
+copy and fix or remove that line; it does not print a traceback. The minimal
+caller keeps no journal, so it has nothing to tear.
 
 ## After an interruption
 
@@ -192,6 +206,14 @@ A live caller removes `HALLPASS_UNSAFE_TEST_CLOCK` from the environment of
 every hallpass command. With `--rehearsal`, `run` keeps it and accepts a
 reply with `test_clock: true`; `inspect_reply` checks the rest of the reply
 as usual. Use `--rehearsal` only with a debug build in a practice directory.
+
+A release build ignores the variable and spends live. `--rehearsal` refuses
+that case. Before it journals anything, `run` checks that the `permits` reply
+says `test_clock: true`, and it stops with a message that names the release
+build. If a spend reply still says `false` in a rehearsal, `run` journals the
+debit but does not run the callback, says the debit is live, and exits 1;
+`handoff` then shows it as debited and never sent. Without `--rehearsal`, a
+reply with `test_clock: true` is refused in the same way.
 
 `REFERENCE_CALLER_INTERRUPT=after-spend` makes `run` exit with status 3
 after hallpass replies and before the reply is journaled.

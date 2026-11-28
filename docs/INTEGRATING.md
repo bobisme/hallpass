@@ -281,6 +281,12 @@ what a real disk gives. All the numbers, with the setup, are in
   (`ledger-clock-mix`), and audits never call a marked ledger `complete`.
   A Rust caller that passes its own clock marks its lines with
   `hallpass::with_test_clock`.
+  A caller in rehearsal mode needs the opposite: it accepts `true` and
+  refuses `false`, before it runs the work. A release build ignores the
+  variable, so a rehearsal against it would debit live. Such a build says
+  so in `warnings` ("is set but ignored") on every command, and its
+  `permits` reply says `"test_clock": false`. Check that before the first
+  spend. The reference and minimal callers do.
 - **Show `warnings`** to the operator. They are not refusals, but they say
   things such as "the ledger was moved", "the witness could not be
   checked" or "no destination was checked".

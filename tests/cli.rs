@@ -1444,7 +1444,11 @@ fn release_build_ignores_the_test_clock() {
     assert_eq!(code(&output), 2, "{out}");
     assert_eq!(out["test_clock"], false);
     assert_eq!(out["refusal"]["code"], "expired");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("is set but ignored"));
+    // The notice is in the JSON warnings, and not only on stderr.
+    assert!(
+        out["warnings"].to_string().contains("is set but ignored"),
+        "{out}"
+    );
     let (_, out) = json(&["ledger", s(&file)], None);
     assert_eq!(out["entries"].as_array().map(Vec::len), Some(0), "{out}");
 }

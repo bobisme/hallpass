@@ -494,6 +494,18 @@ impl Clock {
     }
 }
 
+/// Set when the test clock variable is present in a build that ignores it.
+/// A caller in rehearsal mode reads this in `warnings`, as well as on stderr.
+fn ignored_clock_warning() -> Option<String> {
+    (!cfg!(any(debug_assertions, feature = "test-clock"))
+        && std::env::var_os(TEST_CLOCK_VAR).is_some())
+    .then(|| {
+        format!(
+            "{TEST_CLOCK_VAR} is set but ignored: this build uses the real clock only, so its decisions and debits are live, not rehearsed; use a debug build or one with the test-clock feature to rehearse, or unset it"
+        )
+    })
+}
+
 fn clock() -> Result<Clock, Error> {
     let real = Clock {
         now: OffsetDateTime::now_utc(),
@@ -503,9 +515,7 @@ fn clock() -> Result<Clock, Error> {
         return Ok(real);
     };
     if !cfg!(any(debug_assertions, feature = "test-clock")) {
-        eprintln!(
-            "hallpass: {TEST_CLOCK_VAR} is set but ignored: this build uses the real clock only"
-        );
+        // The notice is a warning on every command: see `ignored_clock_warning`.
         return Ok(real);
     }
     let text = value.to_string_lossy();
@@ -2634,7 +2644,7 @@ struct Invocation {
     /// A `HALLPASS_FORMAT` value that is not a format.
     env_error: Option<String>,
     /// Set when the ignored `FORMAT` variable is present.
-    env_warning: Option<String>,
+    env_warning: Vec<String>,
     /// `--json` together with `--format` set to something else.
     flag_conflict: Option<String>,
 }
@@ -2678,7 +2688,7 @@ impl Invocation {
         // Feed the environment default to the same value parser as an explicit
         // flag, only when neither spelling appeared on the command line.
         let mut env_error = None;
-        let mut env_warning = None;
+        let mut env_warning = Vec::new();
         if requested_format.is_none()
             && let Some(value) = std::env::var_os(FORMAT_VAR)
         {
@@ -2699,10 +2709,11 @@ impl Invocation {
             }
         }
         if std::env::var_os("FORMAT").is_some() && std::env::var_os(FORMAT_VAR).is_none() {
-            env_warning = Some(format!(
+            env_warning.push(format!(
                 "the FORMAT environment variable is ignored; set {FORMAT_VAR} to choose the output format"
             ));
         }
+        env_warning.extend(ignored_clock_warning());
         let flag_conflict = other_format.filter(|_| json_flag).map(|format| {
             format!(
                 "`{format}` conflicts with `--json`, which means `--format json`; use one of them"
@@ -2829,7 +2840,7 @@ fn main() -> ExitCode {
                 }
             });
             let mut output = run(&cli, format);
-            if let Some(warning) = &input.env_warning {
+            for warning in &input.env_warning {
                 add_warning(&mut output, warning);
             }
             if let Some(warning) = StateDir::ignored_env_warning() {
@@ -2844,7 +2855,7 @@ fn main() -> ExitCode {
             let first = rendered.lines().next().unwrap_or_default();
             let message = first.strip_prefix("error: ").unwrap_or(first);
             let mut out = parse_error(topic.as_deref(), message);
-            if let Some(warning) = &input.env_warning {
+            for warning in &input.env_warning {
                 add_warning(&mut out, warning);
             }
             emit(
@@ -2866,7 +2877,7 @@ fn main() -> ExitCode {
                     _ => {
                         let mut out =
                             parse_error(topic.as_deref(), e.render().to_string().trim_end());
-                        if let Some(warning) = &input.env_warning {
+                        for warning in &input.env_warning {
                             add_warning(&mut out, warning);
                         }
                         out
@@ -2874,7 +2885,7 @@ fn main() -> ExitCode {
                 };
                 emit(out, Format::Json)
             } else {
-                if let Some(warning) = &input.env_warning {
+                for warning in &input.env_warning {
                     eprintln!("hallpass: warning: {}", safe_message(warning));
                 }
                 let code = if e.use_stderr() { ERROR } else { OK };
