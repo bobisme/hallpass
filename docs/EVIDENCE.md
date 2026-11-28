@@ -1,5 +1,14 @@
 # Reading accounting evidence
 
+Before any recovery below, run `hallpass doctor PASS`. It reads only. It
+says whether anything blocks a spend, names the one next command (for
+example `hallpass repair PASS --drop-torn-tail --preview`,
+`hallpass compare-backups PASS LEDGER` or `hallpass adopt PASS --preview`)
+with the real paths, and lists other findings. In JSON, read `result`,
+`problem`, `next` (an argv array) and `findings`. It never names `adopt`
+while the ledger may be intact elsewhere. Run the named command, then
+doctor again, until `result` is `healthy`.
+
 These commands read local files under shared ledger locks. They produce historical evidence. Sending a unit of work still requires the caller's normal authorization and accounting decision. The audits release the lock before they verify signatures, so a spend never waits for `ssh-keygen`.
 
 ## Reconcile a lost spend response
@@ -63,6 +72,8 @@ to decide whether the external action occurred. Calls that omit the guard
 can reuse references for correlation.
 
 ## Recover from a failed write
+
+`hallpass doctor PASS` tells the cases below apart and names the step.
 
 A spend whose ledger write fails (a full disk, a file size limit) is rolled
 back under the lock: the ledger is cut back to its length before the write.

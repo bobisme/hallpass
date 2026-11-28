@@ -23,7 +23,7 @@ fn guide(name: &str) -> Guide {
                 "hallpass --format json check engagement.pass.toml",
                 "hallpass --format json status engagement.pass.toml",
             ],
-            "Start with an owner's written approval in a TOML pass. Use init for a blank template. Run check, review status, and retain the reviewed digest. Use permits for a read-only decision or spend --to to check and debit together. In JSON, inspect command, result and the exit code.",
+            "Start with an owner's written approval in a TOML pass. Use init for a blank template. Run check, review status, and retain the reviewed digest. Use permits for a read-only decision or spend --to to check and debit together. If anything goes wrong, run doctor for the one next step. In JSON, inspect command, result and the exit code.",
         ),
         "help" => (
             &["hallpass help", "hallpass help permits --format json"],
@@ -54,6 +54,13 @@ fn guide(name: &str) -> Guide {
         "status" => (
             &["hallpass --format json status engagement.pass.toml"],
             "Review the owner, literal destinations, window, ceilings and warnings. Capture digest for the next permits or spend request. A valid window alone grants no target or debit.",
+        ),
+        "doctor" => (
+            &[
+                "hallpass doctor engagement.pass.toml",
+                "hallpass --format json doctor engagement.pass.toml --archive approvals",
+            ],
+            "Run this first when anything goes wrong, and before recovering. Read result (healthy, needs-action or blocked), problem (the error or refusal code a spend would fail with, or null), next (the one command to run, as an argv array with real paths, or null), next_step (what to do, in words) and findings (other {code, message} rows). Run next, then doctor again, until result is healthy. Doctor never writes: next can be a preview, chmod or mv, and a recovery that records still needs its own reviewed token. It never names adopt while the ledger may be intact elsewhere. Healthy exits 0, needs-action and blocked exit 2, and a pass path or archive directory it cannot read exits 1.",
         ),
         "permits" => (
             &[

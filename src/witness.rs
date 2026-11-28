@@ -51,6 +51,8 @@ const MAX_WITNESS_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateDir {
     path: Result<PathBuf, String>,
+    /// Set by [`StateDir::read_only`]: nothing is created or written.
+    read_only: bool,
 }
 
 impl StateDir {
@@ -59,7 +61,18 @@ impl StateDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: Ok(path.into()),
+            read_only: false,
         }
+    }
+
+    /// The same directory, for a command that must not write anything
+    /// (`hallpass doctor`): it reads witnesses and notes as before, but never
+    /// writes a note, and refuses to create the directory, take the witness
+    /// lock or write a witness.
+    #[must_use]
+    pub const fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 
     /// The state directory named by the environment (`XDG_STATE_HOME`, else
@@ -68,6 +81,7 @@ impl StateDir {
     pub fn from_env() -> Self {
         Self {
             path: resolve(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME")),
+            read_only: false,
         }
     }
 
@@ -123,6 +137,12 @@ impl StateDir {
         let dir = self
             .path()
             .map_err(|e| self.unavailable(pass_id, e.to_owned()))?;
+        if self.read_only {
+            return Err(self.unavailable(
+                pass_id,
+                "this command only reads, so it does not write the state directory".to_owned(),
+            ));
+        }
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -569,6 +589,9 @@ impl StateDir {
     /// Replace a note, best effort: no lock, no sync, and any failure is
     /// ignored (the note only improves a message).
     fn write_note<T: Serialize>(&self, pass_id: &str, kind: &str, note: &T) {
+        if self.read_only {
+            return;
+        }
         let Some(dir) = self.existing_dir(pass_id) else {
             return;
         };
@@ -787,6 +810,7 @@ mod tests {
         assert!(resolve(os("rel"), os("also-rel")).is_err());
         let none = StateDir {
             path: resolve(None, None),
+            read_only: false,
         };
         assert!(matches!(
             none.lock("x", crate::files::LockBudget::default()),

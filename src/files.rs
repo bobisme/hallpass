@@ -599,9 +599,14 @@ pub fn shared_directory_warning(pass: &Path) -> Option<String> {
 }
 
 /// Refuse to append when any user can rename or delete files in the
-/// directory that holds the pass: no write bit for others without the sticky
+/// directory that holds the pass.
+///
+/// That is a write bit for others without the sticky
 /// bit. Another user could put the operator's own older revision of the pass
 /// over the current one, which the owner and mode checks accept.
+///
+/// # Errors
+/// [`Error::SharedDirectory`].
 pub fn refuse_world_writable_directory(pass: &Path) -> Result<(), Error> {
     let dir = match pass.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,

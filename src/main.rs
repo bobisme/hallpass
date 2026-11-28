@@ -5,6 +5,7 @@
 //! standard output.
 
 mod cli_debit;
+mod cli_doctor;
 mod cli_evidence;
 mod cli_help;
 mod cli_repair;
@@ -153,6 +154,21 @@ enum Command {
         /// A note recorded with the entry.
         #[arg(long)]
         note: Option<String>,
+    },
+    /// Diagnose a pass, its ledger and its witness, and name the one next step. Reads only.
+    ///
+    /// Runs the checks the other commands run and prints a verdict
+    /// (healthy, needs action or blocked), exactly one next command with
+    /// the real paths, or nothing to do, and other findings. It never
+    /// writes or creates anything.
+    Doctor {
+        /// The pass file.
+        file: PathBuf,
+        /// Also check that this archive directory holds this revision of the pass.
+        #[arg(long, value_name = "DIR")]
+        archive: Option<PathBuf>,
+        #[command(flatten)]
+        lock: LockArgs,
     },
     /// Print the digest of the pass (SHA-256 of its bytes).
     Digest {
@@ -439,6 +455,7 @@ impl Command {
             Self::Status { .. } => "status",
             Self::Permits { .. } => "permits",
             Self::Spend { .. } => "spend",
+            Self::Doctor { .. } => "doctor",
             Self::Digest { .. } => "digest",
             Self::Ledger { .. } => "ledger",
             Self::Adopt { .. } => "adopt",
@@ -468,6 +485,7 @@ impl Command {
             Self::Rehearse { lock, .. }
             | Self::Capacity { lock, .. }
             | Self::Status { lock, .. }
+            | Self::Doctor { lock, .. }
             | Self::Permits { lock, .. }
             | Self::Ledger { lock, .. }
             | Self::Adopt { lock, .. }
@@ -584,6 +602,7 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "capacity",
     "permits",
     "digest",
+    "doctor",
     "ledger",
     "archive",
     "retrieve",
@@ -2555,6 +2574,7 @@ fn verify_checkpoint(ledger: &Path, checkpoint: &Path) -> Output {
 /// `tests/doc_lists.rs` checks: keep each name on a line of its own.
 const CLOCK_COMMANDS: &[&str] = &[
     "status",
+    "doctor",
     "check",
     "permits",
     "spend",
@@ -2637,6 +2657,9 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             },
             &clock,
         ),
+        Command::Doctor { file, archive, .. } => {
+            cli_doctor::doctor(file, archive.as_deref(), &clock)
+        }
         Command::Digest { file } => digest(file),
         Command::Ledger {
             file,

@@ -61,6 +61,19 @@ pub(super) fn check_view(view: &LedgerView) -> Result<(), Error> {
     check_seqs(&view.path, view.test_clock_from, view.real_clock_from)
 }
 
+impl LedgerView {
+    /// [`Error::LedgerClockMix`] when a write on this thread, in or out of
+    /// [`with_test_clock`], would mix test-clock and real-clock lines in this
+    /// ledger, as a spend, an adoption or a reconciliation would refuse it.
+    /// Reads only.
+    ///
+    /// # Errors
+    /// [`Error::LedgerClockMix`].
+    pub fn check_clock_kind(&self) -> Result<(), Error> {
+        check_view(self)
+    }
+}
+
 /// `test` and `real`: the first test-clock and real-clock entry, if any.
 fn check_seqs(path: &Path, test: Option<u64>, real: Option<u64>) -> Result<(), Error> {
     let conflict = if TEST_CLOCK.get() {

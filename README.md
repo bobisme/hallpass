@@ -53,6 +53,7 @@ JSON callers should check the returned `command`, `result` and exit code.
 | Reconcile a lost spend reply or a full run of expected debits | `receipt`, `reconcile` |
 | Audit recorded charges and destination receipts against archived approvals | `audit-charges`, `audit-receipts` |
 | Identify the newest verified copy on each backup branch | `compare-backups --ancestry` |
+| Find out what is wrong and the one command that fixes it | `doctor` |
 
 ## Two-minute example
 
@@ -61,6 +62,10 @@ hallpass init engagement.pass.toml      # commented template, mode 0600, approve
 $EDITOR engagement.pass.toml            # copy in the owner's written approval
 hallpass check engagement.pass.toml     # lists every problem, with what to do
 ```
+
+If anything goes wrong, run `hallpass doctor engagement.pass.toml`. It
+checks the pass, its ledger and its witness, changes nothing, and names the
+one command to run next (with the real paths), or says nothing needs doing.
 
 A historical example using a documentation address. For a live engagement, enter the window from the owner's written approval.
 
@@ -142,7 +147,8 @@ directory, `chmod 600` it, and `mv` it over the old file, so that no command
 reads a half-saved pass. See [Changing a pass](docs/PASS-FORMAT.md#changing-a-pass).
 
 If the ledger goes missing after the local witness recorded a debit, hallpass
-reports the missing history. Restore the ledger if available. If it was lost,
+reports the missing history. `hallpass doctor engagement.pass.toml` says
+which recovery applies. Restore the ledger if available. If it was lost,
 preview adoption and review the totals before recording recovery. Set
 `reviewed_token` to the `token` from that preview.
 

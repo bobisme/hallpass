@@ -406,7 +406,7 @@ The error code stays `ledger-corrupt`.
 
 Every command that takes the ledger lock accepts `--lock-timeout-ms N`:
 `spend` (with `--dry-run` too), `adopt` (with `--preview` too), `repair`,
-`reconcile-references`, `permits`, `status`, `ledger`, `capacity`,
+`reconcile-references`, `permits`, `status`, `doctor`, `ledger`, `capacity`,
 `rehearse`, `receipt`, `audit-receipts`, `audit-charges`, `reconcile`,
 `compare-backups`, `checkpoint`, `verify-checkpoint`, and `diff` with
 `--budget-impact`. A read takes a shared lock on the ledger, so it waits only
@@ -1186,6 +1186,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `init` | template written (mode 0600; it does not validate until filled in) | never | file exists, write failed |
 | `check` | the pass validates (warnings can still be present) | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
+| `doctor` | `healthy`: nothing blocks a spend and nothing needs doing | `needs-action` or `blocked`, with the one next command | a pass path that cannot be read or is not a regular file, an unusable archive directory, `lock-timeout` |
 | `permits` | allowed | refused, also `pass-changed` with `--digest` | invalid pass or target, ledger error (as `status`) |
 | `spend` | recorded (with `--to`: and the destination is permitted); with `--dry-run`, `would-allow` | refused by the digest, the window, the reference guard, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `capacity` | budget count, including zero | invalid unit policy | usage, pass or accounting error |
@@ -1212,6 +1213,23 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `approval-id` | the ID is printed | never | bad arguments, including an owner or reference that a pass could not hold (the text rules of PASS-FORMAT.md) |
 
 `check` does not judge the window; `status` does.
+
+`doctor` runs the checks the other commands run (the pass and its file
+mode, the directory that holds it, the ledger chain, the witness and its
+totals, a ledger elsewhere, a cut-short last line, rehearsal and live
+lines, an in-place edit, the window, and with `--archive DIR` whether the
+archive holds this revision) and names exactly one next command with the
+real paths, or nothing to do. It uses the library's own errors and advice:
+`ledger-corrupt` with a cut-short last line that the repair preview accepts
+names `repair --drop-torn-tail --preview`, other damage and `ledger-changed`
+name `compare-backups`, `ledger-elsewhere` names the `mv` of the live ledger
+(or a `diff` with the live pass file when one is beside it), and
+`ledger-missing` names `adopt --preview`. It never names `adopt` while the
+ledger may be intact elsewhere: when a file is still where the witness last
+saw the ledger, it names `compare-backups` on that file instead. Doctor
+reads only: it writes no witness, note or lock file and does not create the
+state directory. A lagging witness beside its ledger needs nothing (the
+next spend catches it up), and no witness is a finding, not a problem.
 
 Warnings (no witness yet, a ledger extended past its witness or moved, a
 witness that could not be checked, a debit that checked no destination, a
@@ -1366,6 +1384,12 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `duration`, `charges`, `targets`, `status`, `balances`, `labels` and
   `refusal`) and `stopped_at` (the refused step, or null).
 - **digest**: `digest`, `pass_id`.
+- **doctor**: `result` (`healthy`, `needs-action` or `blocked`), `file`,
+  `pass_id` (null when the pass does not load), `problem` (the error or
+  refusal code a spend would fail with, or null), `message` (what is wrong,
+  or that nothing is), `next` (the one command to run, as an argv array
+  with real paths, or null), `next_step` (what to do, in words) and
+  `findings` (list of `{code, message}`: other problems and warnings).
 - **ledger**: `ledger` (its path), `exists`, `pass_id`, `digest` (of the
   pass now), `counter` (the `--counter` filter or null), `verified` (always
   `true` on success: a chain that does not verify is an error), `shown`
@@ -1503,7 +1527,7 @@ included). The whole-second rule above is about window times only.
 ### Test clock
 
 `HALLPASS_UNSAFE_TEST_CLOCK=<RFC 3339>` replaces "now" for `status`,
-`check`, `permits`, `spend`, `capacity`, `adopt`, `reconcile-references` and
+`doctor`, `check`, `permits`, `spend`, `capacity`, `adopt`, `reconcile-references` and
 `lint`, the commands that read the clock, only in debug builds and builds
 with the `test-clock` feature. When used, a warning goes to standard
 error and `test_clock` is `true`. Release builds ignore it and say so on

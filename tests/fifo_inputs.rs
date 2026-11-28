@@ -53,6 +53,7 @@ const INVOCATIONS: &[&[&str]] = &[
     &["rehearse", "@p.toml", "@scenario.toml"],
     &["capacity", "@p.toml", "calls"],
     &["status", "@p.toml"],
+    &["doctor", "@p.toml"],
     &["permits", "@p.toml", "--to", TARGET],
     &["spend", "@p.toml", "calls", "--to", TARGET, "--dry-run"],
     &[
