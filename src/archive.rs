@@ -30,7 +30,31 @@ pub const APPROVAL_NAMESPACE: &str = "hallpass-approval-v1";
 /// The largest detached signature or signature record the archive keeps.
 pub const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
 
-const RECORD_VERSION: u32 = 1;
+/// The version of a record that names the signing key. A version 1 record,
+/// written by an older hallpass or when ssh-keygen did not name the key, has
+/// no `key`, and still reads.
+const RECORD_VERSION: u32 = 2;
+
+/// The version of a record without a `key`.
+const RECORD_VERSION_WITHOUT_KEY: u32 = 1;
+
+/// Whether `key` looks like an OpenSSH key fingerprint, such as
+/// `SHA256:` and 43 base64 characters: a hash name, a colon and base64.
+#[must_use]
+pub fn is_key_fingerprint(key: &str) -> bool {
+    let Some((hash, value)) = key.split_once(':') else {
+        return false;
+    };
+    key.len() <= 128
+        && !hash.is_empty()
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
 
 fn directory(dir: &Path) -> Result<fs::File, Error> {
     let meta = fs::symlink_metadata(dir).map_err(|e| Error::io(dir, &e))?;
@@ -261,6 +285,12 @@ pub struct SignedApproval {
     /// The digest of the detached signature, kept as `DIGEST.sig`.
     #[serde(serialize_with = "digest_text")]
     pub signature: Digest,
+    /// The fingerprint of the key that made the signature, such as
+    /// `SHA256:...`, as ssh-keygen reported it when the signature verified.
+    /// None in a version 1 record, which an older hallpass wrote: the key is
+    /// unknown. Like the rest of the record, it is only what the archive
+    /// says: the audits report the key from their own verification.
+    pub key: Option<String>,
 }
 
 /// The on-disk form of [`SignedApproval`], one JSON line.
@@ -273,6 +303,9 @@ struct RecordFile {
     principal: String,
     allowed_signers: String,
     signature: String,
+    /// Version 2 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 /// How the archived bytes of one pass digest got there.
@@ -375,11 +408,21 @@ pub fn read_revision(dir: &Path, digest: Digest) -> Result<Option<ArchivedRevisi
         text.parse::<Digest>()
             .map_err(|_| damaged_record(&path, &format!("`{name}` is not a digest")))
     };
-    if record.version != RECORD_VERSION {
-        return Err(damaged_record(
-            &path,
-            &format!("unknown version {}", record.version),
-        ));
+    match (record.version, &record.key) {
+        (RECORD_VERSION, Some(key)) if is_key_fingerprint(key) => (),
+        (RECORD_VERSION, _) => {
+            return Err(damaged_record(
+                &path,
+                "a version 2 record needs `key`, a key fingerprint",
+            ));
+        }
+        (RECORD_VERSION_WITHOUT_KEY, None) => (),
+        (RECORD_VERSION_WITHOUT_KEY, Some(_)) => {
+            return Err(damaged_record(&path, "a version 1 record has no `key`"));
+        }
+        (version, _) => {
+            return Err(damaged_record(&path, &format!("unknown version {version}")));
+        }
     }
     if digest_field(&record.digest, "digest")? != digest {
         return Err(damaged_record(&path, "it names another digest"));
@@ -395,6 +438,7 @@ pub fn read_revision(dir: &Path, digest: Digest) -> Result<Option<ArchivedRevisi
         signature: digest_field(&record.signature, "signature")?,
         principal: record.principal,
         namespace: record.namespace,
+        key: record.key,
     };
     let signature = read_private(&signature_path(dir, digest), MAX_SIGNATURE_BYTES, advice)?;
     if Digest::of(&signature) != approval.signature {
@@ -437,6 +481,8 @@ impl ArchivedSignature {
 /// verified over exactly those bytes, as `verify-approval --archive` does. A
 /// record is never replaced, so the first verified signature of a digest stays.
 ///
+/// The record does not name the signing key; [`archive_signer_record`] does.
+///
 /// # Errors
 /// If the bytes are not archived, an input is unusable, the archive is
 /// insecure or damaged, or an earlier run left a different signature without
@@ -448,6 +494,29 @@ pub fn archive_verified_signature(
     principal: &str,
     allowed_signers: Digest,
 ) -> Result<ArchivedSignature, Error> {
+    archive_signer_record(dir, digest, signature, principal, allowed_signers, None)
+}
+
+/// As [`archive_verified_signature`], and record `key`, the fingerprint of
+/// the key that ssh-keygen said made the signature, when it named one. A
+/// record with a key is version 2; one without is version 1.
+///
+/// # Errors
+/// As [`archive_verified_signature`], and when `key` is not a key
+/// fingerprint.
+pub fn archive_signer_record(
+    dir: &Path,
+    digest: Digest,
+    signature: &[u8],
+    principal: &str,
+    allowed_signers: Digest,
+    key: Option<&str>,
+) -> Result<ArchivedSignature, Error> {
+    if key.is_some_and(|key| !is_key_fingerprint(key)) {
+        return Err(Error::Usage(
+            "the signing key must be a key fingerprint such as SHA256:...".into(),
+        ));
+    }
     if !valid_principal(principal) {
         return Err(Error::Usage(
             "provide a nonblank single-line signer principal".into(),
@@ -464,9 +533,18 @@ pub fn archive_verified_signature(
         namespace: APPROVAL_NAMESPACE.to_owned(),
         allowed_signers,
         signature: Digest::of(signature),
+        key: key.map(str::to_owned),
     };
+    // A record without a key, by an older hallpass, of this same signature
+    // is this verification: the signature names its key.
     let kept = |existing: SignedApproval| {
-        if existing == approval {
+        if existing == approval
+            || (existing.key.is_none()
+                && SignedApproval {
+                    key: None,
+                    ..approval.clone()
+                } == existing)
+        {
             ArchivedSignature::Recorded(existing)
         } else {
             ArchivedSignature::KeptEarlier(existing)
@@ -492,12 +570,17 @@ pub fn archive_verified_signature(
         )));
     }
     let mut line = serde_json::to_vec(&RecordFile {
-        version: RECORD_VERSION,
+        version: if approval.key.is_some() {
+            RECORD_VERSION
+        } else {
+            RECORD_VERSION_WITHOUT_KEY
+        },
         digest: digest.to_string(),
         namespace: approval.namespace.clone(),
         principal: approval.principal.clone(),
         allowed_signers: approval.allowed_signers.to_string(),
         signature: approval.signature.to_string(),
+        key: approval.key.clone(),
     })
     .map_err(|e| Error::Usage(format!("cannot encode the signature record: {e}")))?;
     line.push(b'\n');

@@ -93,8 +93,19 @@ fn endpoint_text(row: &evidence::AuditEndpoint, pinned: bool) -> String {
     let verdict = match (&row.matched_label, row.refusal_code) {
         // Only a revision that a signature verified for a principal the
         // auditor named approved can confirm.
-        (Some(label), _) if *label == row.recorded.label && row.provenance == SIGNED && pinned => {
+        (Some(label), _)
+            if *label == row.recorded.label
+                && row.provenance == SIGNED
+                && pinned
+                && !row.signer_matched_by_pattern =>
+        {
             format!("recorded label {} confirmed", safe(label))
+        }
+        (Some(label), _) if *label == row.recorded.label && row.provenance == SIGNED && pinned => {
+            format!(
+                "recorded label {} matches the archived revision, whose signature verified only through a pattern principal in the trusted signers file",
+                safe(label)
+            )
         }
         (Some(label), _) if *label == row.recorded.label => format!(
             "recorded label {} matches the archived revision, {}",
@@ -147,6 +158,9 @@ fn gap_meaning(reason: &str) -> &'static str {
         "signer-not-pinned" => {
             "decided under a revision whose signature verified for the principal its record names, and whoever writes the archive chose that principal; the trusted signers file decides whose keys count, and --principal decides who must have approved, so name the owner with --principal"
         }
+        "signer-matched-by-pattern" => {
+            "decided under a revision whose signature verified for a principal named with --principal, but the trusted signers file holds its key for that principal only on a line whose principals use a pattern (`*`, `?` or `!`), so it does not say that the key is theirs; give each owner key a line that names its principal, or pass --allow-pattern-principals to accept pattern lines"
+        }
         "archive-missing" => {
             "the revision is not in the archive; archive each revision before spending under it"
         }
@@ -194,6 +208,10 @@ fn gaps_text(
             let why = row.principal.as_ref().map_or(why, |principal| {
                 format!(". Verified for principal {}", quoted(principal))
             });
+            let why = match &row.signer_key {
+                Some(key) => format!("{why} by key {key}"),
+                None => why,
+            };
             let _ = writeln!(
                 text,
                 "  {} {} line(s). Sequences {:?}{}{why}",
@@ -277,8 +295,18 @@ fn revisions_text(
                     .map_or_else(String::new, |t| format!(" as of {}", text_time(t)));
                 match (row.provenance, row.reason) {
                     (SIGNED, _) => format!(
-                        "signature re-verified for principal {}{at} with the trusted signers you supplied",
-                        quoted(row.verified_for.as_ref().unwrap_or(&a.principal))
+                        "signature re-verified for principal {}{at} with the trusted signers you supplied, by {}{}",
+                        quoted(row.verified_for.as_ref().unwrap_or(&a.principal)),
+                        match (&row.signer_key, row.principal_match) {
+                            (Some(key), Some("certificate")) => format!("certificate key {key}"),
+                            (Some(key), _) => format!("key {key}"),
+                            (None, _) => "a key that ssh-keygen did not name".to_owned(),
+                        },
+                        if row.principal_match == Some("pattern") {
+                            ", only through a pattern principal"
+                        } else {
+                            ""
+                        }
                     ),
                     ("signature-rejected", Some(code)) => format!(
                         "recorded signature failed re-verification for {}{at} ({code}): {}",
@@ -286,9 +314,13 @@ fn revisions_text(
                         audit_advice(code)
                     ),
                     _ => format!(
-                        "signature record present (not re-verified) for principal {}, recorded with trusted signers {}",
+                        "signature record present (not re-verified) for principal {}, recorded with trusted signers {} and {}",
                         quoted(&a.principal),
-                        a.allowed_signers
+                        a.allowed_signers,
+                        a.key.as_ref().map_or_else(
+                            || "an unknown key".to_owned(),
+                            |key| format!("key {}", safe(key))
+                        )
                     ),
                 }
             },

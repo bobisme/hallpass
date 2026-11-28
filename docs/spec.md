@@ -1090,6 +1090,23 @@ without `hallpass-approval-v1` gives `key-not-permitted-for-namespace`. With `--
 verified bytes, the signature and a record of the verification are retained
 (see "Archives and evidence").
 
+A verified result also names the key that made the signature: `key`, its
+fingerprint as `ssh-keygen` printed it (`Good "hallpass-approval-v1"
+signature for PRINCIPAL with TYPE key SHA256:...`), or null when it printed
+none. `principal_match` says how the trust file matched the principal:
+`named` when a line that holds the key names it without a pattern (alone, or
+in a list of names), `pattern` when only a line whose principals use `*`,
+`?` or `!` does, and `certificate` for a certificate trusted through a
+`cert-authority` line, whose certificate `ssh-keygen` checked names the
+principal. A `pattern` line trusts its key for everyone it matches, so it
+does not say that the key is the principal's: the result is still
+`verified`, with a warning, unless `--allow-pattern-principals` is given.
+To tell the two apart when the trust file has a pattern line, hallpass
+verifies a plain key again with only the lines that name their principals.
+`--signer-key SHA256:...` requires the signature to be made with that key:
+another key is `unverified` with reason `signer-key-mismatch` and the key
+that made it, and nothing is archived.
+
 The trusted signers file decides whose keys count, so it follows the pass
 file's rule wherever hallpass reads it (`verify-approval` and the audits'
 `--allowed-signers`): owned by the effective user or root, and writable by
@@ -1154,7 +1171,11 @@ mode, 0664 under the common `umask 002`, which `diff` and `archive` refuse
 because the group could change it.
 `verify-approval --archive DIR` retains them too, after the owner's signature
 verified, and keeps the signature (`DIGEST.sig`) and a record of the
-verification (`DIGEST.approval`) beside them. Each archived digest therefore
+verification (`DIGEST.approval`) beside them. The record is one JSON line
+with `version`, `digest`, `namespace`, `principal`, `allowed_signers`,
+`signature` and, in `version` 2, `key`, the fingerprint of the key that made
+the signature. A `version` 1 record has no `key`; it still reads, with the
+key unknown. Each archived digest therefore
 has a provenance: `signature-recorded`, `unsigned` (archived without a
 signature record, as by `archive` or an older version) or `missing`. Archive
 files are created once and never replaced, so `archive` never upgrades or
@@ -1506,7 +1527,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `references` (the list recorded).
 - **archive**: `digest`, `provenance` (`signature-recorded` or
   `unsigned`) and `approval` (the kept signature record `{principal,
-  namespace, allowed_signers, signature}`, or null). **retrieve**: `digest`
+  namespace, allowed_signers, signature, key}`, or null; `key` is null in a
+  record that an older hallpass wrote). **retrieve**: `digest`
   and `bytes` (the exact pass text); with `--output FILE`, `digest`, `output`
   (the path), `mode` (`0600`) and `length` (bytes written) instead of `bytes`.
 - **receipt**, **audit-receipts**, **audit-charges**, **reconcile**,
@@ -1530,7 +1552,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `foreign` or `mismatch`), `added` (entries after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
-  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time`, `key-not-permitted-for-namespace` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
+  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time`, `key-not-permitted-for-namespace` or `unknown`, read from ssh-keygen's output, or `signer-key-mismatch`; the result and exit code do not change), `key` (the fingerprint of the key that made the signature, or null when ssh-keygen did not name it or the signature did not verify), `principal_match` when verified (`named`, `pattern` or `certificate`), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
   (`signature-recorded` when verified with `--archive`, `signature-not-stored`
   when an earlier, different record was kept and this signature was not
   stored, else null) and

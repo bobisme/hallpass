@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{OK, Output, REFUSED, error_output, quoted, safe};
-use hallpass::evidence::{AsOf, Recheck, Reverify, SignatureToCheck};
+use hallpass::evidence::{AsOf, PrincipalMatch, Recheck, Reverify, SignatureToCheck, Signer};
 use hallpass::time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use hallpass::{APPROVAL_NAMESPACE as NAMESPACE, ArchivedSignature, Digest, Error};
 use serde_json::json;
@@ -69,7 +69,7 @@ impl Inputs {
         bytes: &[u8],
         principal: &str,
         at: Option<OffsetDateTime>,
-    ) -> Result<Result<(), Why>, Error> {
+    ) -> Result<Result<Signer, Why>, Error> {
         Verifier::new(&self.trust)?.verify(bytes, &self.signature, principal, at)
     }
 }
@@ -79,15 +79,17 @@ fn retain(
     bytes: &[u8],
     inputs: &Inputs,
     principal: &str,
+    key: Option<&str>,
     directory: &Path,
 ) -> Result<(Digest, ArchivedSignature), Error> {
     let digest = hallpass::archive_pass_bytes(bytes, directory)?;
-    let record = hallpass::archive_verified_signature(
+    let record = hallpass::archive_signer_record(
         directory,
         digest,
         &inputs.signature,
         principal,
         Digest::of(&inputs.trust),
+        key,
     )?;
     Ok((digest, record))
 }
@@ -185,31 +187,106 @@ impl Drop for Scratch {
     }
 }
 
+/// Whether a line of a trusted signers file gives its key to principals by
+/// a pattern: its principals field has a `*`, `?` or `!`. A field that
+/// cannot be read counts as a pattern, so that it is never taken for a
+/// name. Blank lines and comments do not.
+fn uses_pattern(line: &[u8]) -> bool {
+    let text = line.trim_ascii_start();
+    if text.is_empty() || text.starts_with(b"#") {
+        return false;
+    }
+    let principals = if let Some(quoted) = text.strip_prefix(b"\"") {
+        match quoted.iter().position(|&b| b == b'"') {
+            Some(end) => &quoted[..end],
+            None => return true,
+        }
+    } else {
+        let end = text
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(text.len());
+        &text[..end]
+    };
+    principals.iter().any(|b| matches!(b, b'*' | b'?' | b'!'))
+}
+
+/// The lines of a trusted signers file that name their principals, without
+/// a pattern: None when every line does.
+fn named_lines(trust: &[u8]) -> Option<Vec<u8>> {
+    let mut named = Vec::with_capacity(trust.len());
+    let mut dropped = false;
+    for line in trust.split_inclusive(|&b| b == b'\n') {
+        if uses_pattern(line) {
+            dropped = true;
+        } else {
+            named.extend_from_slice(line);
+        }
+    }
+    dropped.then_some(named)
+}
+
 /// `ssh-keygen -Y verify` with a trusted signers file given as bytes.
 struct Verifier {
     scratch: Scratch,
     trust: PathBuf,
+    /// The lines of the trust file that name their principals, when some
+    /// line uses a pattern.
+    named: Option<PathBuf>,
 }
 
 impl Verifier {
     fn new(trust: &[u8]) -> Result<Self, Error> {
         let scratch = Scratch::new()?;
+        let named = named_lines(trust)
+            .map(|named| scratch.write("named_signers", &named))
+            .transpose()?;
         let trust = scratch.write("allowed_signers", trust)?;
-        Ok(Self { scratch, trust })
+        Ok(Self {
+            scratch,
+            trust,
+            named,
+        })
     }
 
     /// Verify `signature` over `bytes` for `principal`, as of `at` or else
-    /// now. ssh-keygen reads `bytes` on its standard input and a copy of
-    /// `signature` from the private directory.
+    /// now, and say which key made it and how the trust file matched the
+    /// principal. ssh-keygen reads `bytes` on its standard input and a copy
+    /// of `signature` from the private directory.
+    ///
+    /// When the trust file has a pattern line, a plain key that verifies is
+    /// verified again with only the lines that name their principals: it
+    /// is `named` when one of those still trusts it for the principal, else
+    /// `pattern`. ssh-keygen decides both times, so its own rules for
+    /// options, windows and namespaces apply.
     fn verify(
         &self,
         bytes: &[u8],
         signature: &[u8],
         principal: &str,
         at: Option<OffsetDateTime>,
-    ) -> Result<Result<(), Why>, Error> {
+    ) -> Result<Result<Signer, Why>, Error> {
         let signature = self.scratch.write("signature", signature)?;
-        let verdict = verified(bytes, &signature, &self.trust, principal, at);
+        let verdict = (|| {
+            let accepted = match verified(bytes, &signature, &self.trust, principal, at)? {
+                Ok(accepted) => accepted,
+                Err(why) => return Ok(Err(why)),
+            };
+            let principal_match = if accepted.certificate {
+                PrincipalMatch::Certificate
+            } else if let Some(named) = &self.named {
+                match run_verifier(bytes, &signature, named, principal, at)? {
+                    Ok(_) => PrincipalMatch::Named,
+                    Err(_) => PrincipalMatch::Pattern,
+                }
+            } else {
+                PrincipalMatch::Named
+            };
+            Ok(Ok(Signer {
+                key: accepted.key,
+                principal_match,
+            }))
+        })();
         let _ = std::fs::remove_file(&signature);
         verdict
     }
@@ -248,10 +325,14 @@ enum Why {
     NotValidAtTime,
     KeyNotForNamespace,
     Unknown,
+    /// The signature verified, but `--signer-key` names another key.
+    SignerKeyMismatch,
+    /// The audit verified the signature, but its record names another key.
+    RecordedKeyMismatch,
 }
 
 impl Why {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Namespace,
         Self::Tampered,
         Self::Malformed,
@@ -260,6 +341,8 @@ impl Why {
         Self::NotValidAtTime,
         Self::KeyNotForNamespace,
         Self::Unknown,
+        Self::SignerKeyMismatch,
+        Self::RecordedKeyMismatch,
     ];
 
     const fn code(self) -> &'static str {
@@ -272,6 +355,8 @@ impl Why {
             Self::NotValidAtTime => "key-not-valid-at-time",
             Self::KeyNotForNamespace => "key-not-permitted-for-namespace",
             Self::Unknown => "unknown",
+            Self::SignerKeyMismatch => "signer-key-mismatch",
+            Self::RecordedKeyMismatch => "recorded-key-mismatch",
         }
     }
 
@@ -300,6 +385,12 @@ impl Why {
             }
             Self::Unknown => {
                 "check the signed bytes, signature namespace, expected principal and trusted signers"
+            }
+            Self::SignerKeyMismatch => {
+                "the signature verified, but it was not made with the key that --signer-key names; check that the owner signed with the key you expect, or correct --signer-key"
+            }
+            Self::RecordedKeyMismatch => {
+                "the signature verified, but its record names another key than the one that made it, so the record was not written by verify-approval; move DIGEST.sig and DIGEST.approval aside and run verify-approval --archive again"
             }
         }
     }
@@ -330,6 +421,10 @@ impl Why {
             Self::Unknown => {
                 "check the archived bytes, the archived signature and the trusted signers file you supplied"
             }
+            Self::SignerKeyMismatch => "the recorded signature was not made with the key required",
+            Self::RecordedKeyMismatch => {
+                "the recorded signature verified, but its record names another key than the one that made it, so verify-approval did not write that record; move DIGEST.sig and DIGEST.approval aside (a record is never replaced) and run verify-approval --archive again"
+            }
         }
     }
 }
@@ -356,6 +451,20 @@ pub struct SignatureArgs {
     /// Verify each signature as of `first-use` (the default: the time of the first ledger line decided under its revision) or `now`.
     #[arg(long, requires = "allowed_signers", value_enum, value_name = "WHEN")]
     signatures_as_of: Option<SignaturesAsOf>,
+    /// Accept a signature whose key the trusted signers file holds for the principal only through a pattern (`*`, `?` or `!` in a principals field). Without it, such a revision is a signer-matched-by-pattern gap and the audit is never complete.
+    #[arg(long, requires = "allowed_signers")]
+    allow_pattern_principals: bool,
+}
+
+/// `verify-approval`'s `--signer-key` and `--allow-pattern-principals`.
+#[derive(clap::Args)]
+pub struct SignerKeyArgs {
+    /// Require the signature to be made with this key, given as its fingerprint (`ssh-keygen -l -f KEY.pub`), such as SHA256:...
+    #[arg(long, value_name = "FINGERPRINT")]
+    signer_key: Option<String>,
+    /// Do not warn when the trusted signers file holds the key for the principal only through a pattern (`*`, `?` or `!` in a principals field).
+    #[arg(long)]
+    allow_pattern_principals: bool,
 }
 
 /// The values of `--signatures-as-of`.
@@ -415,12 +524,13 @@ impl SignatureArgs {
                 signed.principal,
                 Some(signed.as_of),
             )?;
-            Ok(verdict.map_or_else(|why| Recheck::Rejected(why.code()), |()| Recheck::Verified))
+            Ok(verdict.map_or_else(|why| Recheck::Rejected(why.code()), Recheck::Signed))
         };
         audit(Some(Reverify {
             allowed_signers: Digest::of(&trust),
             principals: &principals,
             as_of,
+            allow_pattern_principals: self.allow_pattern_principals,
             check: &mut check,
         }))
     }
@@ -543,15 +653,61 @@ fn verifier_name() -> (PathBuf, String) {
     )
 }
 
+/// What ssh-keygen said when it accepted a signature.
+struct Accepted {
+    /// The fingerprint of the key that made it, from its `Good "NAMESPACE"
+    /// signature for PRINCIPAL with TYPE key FINGERPRINT` line. None when
+    /// it printed no such line.
+    key: Option<String>,
+    /// The key type ends in `-CERT`: a certificate.
+    certificate: bool,
+}
+
+/// Read ssh-keygen's success line.
+fn accepted(stdout: &str) -> Accepted {
+    let line = stdout.lines().find(|line| line.starts_with("Good \""));
+    let parts = line.and_then(|line| {
+        let (before, key) = line.trim_end().rsplit_once(" key ")?;
+        let (_, kind) = before.rsplit_once(" with ")?;
+        hallpass::is_key_fingerprint(key).then(|| (key.to_owned(), kind.ends_with("-CERT")))
+    });
+    parts.map_or(
+        Accepted {
+            key: None,
+            certificate: false,
+        },
+        |(key, certificate)| Accepted {
+            key: Some(key),
+            certificate,
+        },
+    )
+}
+
 /// Run ssh-keygen over `bytes`, with the signature and trusted signers files
-/// that a [`Verifier`] wrote.
+/// that a [`Verifier`] wrote, and say why it failed when it did.
 fn verified(
     bytes: &[u8],
     signature: &Path,
     trust: &Path,
     principal: &str,
     at: Option<OffsetDateTime>,
-) -> Result<Result<(), Why>, Error> {
+) -> Result<Result<Accepted, Why>, Error> {
+    Ok(
+        run_verifier(bytes, signature, trust, principal, at)?.map_err(|stderr| {
+            let at = at.map(verify_time_option).transpose().ok().flatten();
+            classify(&stderr, signature, trust, principal, at.as_deref())
+        }),
+    )
+}
+
+/// Run ssh-keygen over `bytes`: what it accepted, or its complaint.
+fn run_verifier(
+    bytes: &[u8],
+    signature: &Path,
+    trust: &Path,
+    principal: &str,
+    at: Option<OffsetDateTime>,
+) -> Result<Result<Accepted, String>, Error> {
     check_principal(principal)?;
     let at = at.map(verify_time_option).transpose()?;
     let mut verifier = ssh_keygen()?;
@@ -564,12 +720,22 @@ fn verified(
         .arg(signature)
         .args(&at)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = verifier.spawn().map_err(|e| Error::Io {
         path: program.clone(),
         message: format!("cannot run OpenSSH ssh-keygen ({e}). Install OpenSSH with SSH signature support and {check}"),
     })?;
+    // Read the success line on a thread of its own, keeping the first 16
+    // KiB and draining the rest, so that neither pipe can fill and block.
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut raw = Vec::new();
+            let _ = (&mut pipe).take(16 * 1024).read_to_end(&mut raw);
+            let _ = io::copy(&mut pipe, &mut io::sink());
+            String::from_utf8_lossy(&raw).into_owned()
+        })
+    });
     let write = child
         .stdin
         .take()
@@ -587,6 +753,9 @@ fn verified(
         path: program.clone(),
         message: e.to_string(),
     })?;
+    let stdout = stdout
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
     if let Err(e) = write
         && (status.success() || e.kind() != io::ErrorKind::BrokenPipe)
     {
@@ -625,15 +794,9 @@ fn verified(
         });
     }
     if status.success() {
-        Ok(Ok(()))
+        Ok(Ok(accepted(&stdout)))
     } else {
-        Ok(Err(classify(
-            &stderr,
-            signature,
-            trust,
-            principal,
-            at.as_deref(),
-        )))
+        Ok(Err(stderr))
     }
 }
 
@@ -647,6 +810,85 @@ fn parse_at(at: &str) -> Result<OffsetDateTime, Error> {
     })
 }
 
+/// What a refused `verify-approval` reports besides the reason.
+struct Unverified<'a> {
+    path: &'a Path,
+    principal: &'a str,
+    archive: Option<&'a Path>,
+    as_of: &'a str,
+    verify_time: Option<&'a str>,
+}
+
+impl Unverified<'_> {
+    /// The reply for `why`, naming the key that made the signature when it
+    /// verified but was not the key required.
+    fn output(&self, why: Why, signed_by: Option<&str>) -> Output {
+        let Self {
+            path,
+            principal,
+            archive,
+            as_of,
+            verify_time,
+        } = *self;
+        Output {
+            code: REFUSED,
+            text: format!(
+                "Unverified signature for {}{as_of}: {}{}.\n",
+                quoted(principal),
+                why.advice(),
+                signed_by.map_or_else(String::new, |key| format!(" (it was made with key {key})"))
+            ),
+            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"key":signed_by,"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),
+        }
+    }
+}
+
+/// The verdict, refused with `signer-key-mismatch` when `required` names
+/// another key than the one that made the signature. A refusal carries the
+/// key that made it, when that is why.
+fn require_key(
+    verdict: Result<Signer, Why>,
+    required: Option<&str>,
+) -> Result<Signer, (Why, Option<String>)> {
+    let signer = verdict.map_err(|why| (why, None))?;
+    match required {
+        Some(required) if signer.key.as_deref() != Some(required) => {
+            Err((Why::SignerKeyMismatch, signer.key))
+        }
+        _ => Ok(signer),
+    }
+}
+
+/// `--signer-key`: a key fingerprint.
+fn parse_signer_key(key: &str) -> Result<&str, Error> {
+    if hallpass::is_key_fingerprint(key) {
+        Ok(key)
+    } else {
+        Err(Error::Usage(format!(
+            "--signer-key is {}, not a key fingerprint; supply one as `ssh-keygen -l -f KEY.pub` prints it, such as SHA256: and 43 base64 characters",
+            quoted(key)
+        )))
+    }
+}
+
+/// How the signing key is named in text.
+fn key_text(signer: &Signer) -> String {
+    match (&signer.key, signer.principal_match) {
+        (Some(key), PrincipalMatch::Certificate) => format!("certificate key {key}"),
+        (Some(key), _) => format!("key {key}"),
+        (None, _) => "a key that ssh-keygen did not name".to_owned(),
+    }
+}
+
+/// The warning for a key that a pattern principal trusts.
+fn pattern_warning(signer: &Signer, principal: &str) -> String {
+    format!(
+        "the trusted signers file holds {} for {} only on a line whose principals use a pattern (`*`, `?` or `!`), not on a line that names that principal, so it does not say that this key is theirs; check that the key is the owner's, give the owner's key a line that names the principal, or require it with --signer-key (--allow-pattern-principals accepts pattern lines without this warning)",
+        key_text(signer),
+        quoted(principal)
+    )
+}
+
 pub fn verify_approval(
     path: &Path,
     signature: &Path,
@@ -654,9 +896,14 @@ pub fn verify_approval(
     principal: &str,
     archive: Option<&Path>,
     at: Option<&str>,
+    key: &SignerKeyArgs,
 ) -> Output {
     let at = match at.map(parse_at).transpose() {
         Ok(at) => at,
+        Err(e) => return error_output("verify-approval", Some(path), &e),
+    };
+    let required = match key.signer_key.as_deref().map(parse_signer_key).transpose() {
+        Ok(required) => required,
         Err(e) => return error_output("verify-approval", Some(path), &e),
     };
     let (loaded, bytes) = match hallpass::load_with_bytes(path) {
@@ -672,13 +919,18 @@ pub fn verify_approval(
     // Null: as of now, by ssh-keygen's own clock.
     let verify_time = at.map(hallpass::rfc3339);
     let as_of = at.map_or_else(String::new, |at| format!(" as of {}", hallpass::stamp(at)));
-    match inputs.verify(&bytes, principal, at) {
-        Ok(Ok(())) => {
+    match inputs
+        .verify(&bytes, principal, at)
+        .map(|verdict| require_key(verdict, required))
+    {
+        Ok(Ok(signer)) => {
             let (digest, record) = match archive {
-                Some(directory) => match retain(&bytes, &inputs, principal, directory) {
-                    Ok((digest, record)) => (digest, Some(record)),
-                    Err(e) => return error_output("verify-approval", Some(path), &e),
-                },
+                Some(directory) => {
+                    match retain(&bytes, &inputs, principal, signer.key.as_deref(), directory) {
+                        Ok((digest, record)) => (digest, Some(record)),
+                        Err(e) => return error_output("verify-approval", Some(path), &e),
+                    }
+                }
                 None => (loaded.digest, None),
             };
             let mut warnings = Vec::new();
@@ -687,6 +939,9 @@ pub fn verify_approval(
                     "the archive already held a different signature record for these bytes (principal {}); it was kept, and this signature was not stored",
                     quoted(&kept.principal)
                 ));
+            }
+            if signer.principal_match == PrincipalMatch::Pattern && !key.allow_pattern_principals {
+                warnings.push(pattern_warning(&signer, principal));
             }
             let approval = record.as_ref().map(ArchivedSignature::approval);
             // Only a kept record of ANOTHER principal fails: a re-signing by the
@@ -729,23 +984,79 @@ pub fn verify_approval(
                 // A signature the archive did not keep must fail a step that archives approvals.
                 code: if kept.is_some() { REFUSED } else { OK },
                 text: format!(
-                    "Verified signature from {}{as_of} over pass {} ({}).{retained} Supply this digest for the live policy check.\n",
+                    "Verified signature from {}{as_of} over pass {} ({}), made with {}.{retained} Supply this digest for the live policy check.\n",
                     quoted(principal),
                     loaded.pass.id,
                     digest,
+                    key_text(&signer),
                 ),
-                json: json!({"command":"verify-approval","result":"verified","principal":principal,"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":provenance,"approval":approval,"warnings":warnings}),
+                json: json!({"command":"verify-approval","result":"verified","principal":principal,"key":signer.key,"principal_match":signer.principal_match.as_str(),"pass_id":loaded.pass.id,"digest":digest.to_string(),"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":provenance,"approval":approval,"warnings":warnings}),
             }
         }
-        Ok(Err(why)) => Output {
-            code: REFUSED,
-            text: format!(
-                "Unverified signature for {}{as_of}: {}.\n",
-                quoted(principal),
-                why.advice()
-            ),
-            json: json!({"command":"verify-approval","result":"unverified","reason":why.code(),"next_step":why.advice(),"expected_principal":principal,"namespace":NAMESPACE,"verify_time":verify_time,"file":path.display().to_string(),"archive":archive.map(|dir|dir.display().to_string()),"provenance":null,"approval":null}),
-        },
+        Ok(Err((why, signed_by))) => Unverified {
+            path,
+            principal,
+            archive,
+            as_of: &as_of,
+            verify_time: verify_time.as_deref(),
+        }
+        .output(why, signed_by.as_deref()),
         Err(e) => error_output("verify-approval", Some(path), &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pattern_lines_are_told_from_named_ones() {
+        for line in [
+            "*@example.org ssh-ed25519 AAAA\n",
+            "a@example.org,b?@example.org ssh-ed25519 AAAA\n",
+            "  !x@example.org,* ssh-ed25519 AAAA\n",
+            "\"*@example.org\" ssh-ed25519 AAAA\n",
+            "\"unterminated ssh-ed25519 AAAA\n",
+        ] {
+            assert!(uses_pattern(line.as_bytes()), "{line}");
+        }
+        for line in [
+            "owner@example.org ssh-ed25519 AAAA\n",
+            "owner@example.org,intern@example.org namespaces=\"a*\" ssh-ed25519 AAAA\n",
+            "\"owner@example.org\" ssh-ed25519 AAAA\n",
+            "# *@example.org ssh-ed25519 AAAA\n",
+            "\n",
+        ] {
+            assert!(!uses_pattern(line.as_bytes()), "{line}");
+        }
+        assert_eq!(named_lines(b"a ssh-ed25519 K\n"), None);
+        assert_eq!(
+            named_lines(b"a ssh-ed25519 K\n* ssh-ed25519 L\nb ssh-ed25519 M"),
+            Some(b"a ssh-ed25519 K\nb ssh-ed25519 M".to_vec())
+        );
+    }
+
+    #[test]
+    fn the_success_line_names_the_key() {
+        let key = "SHA256:Cz8Qe+x0llFEqx5jtCxBf/ZxDvIn1rGPqI692Gcm2NQ";
+        let plain = accepted(&format!(
+            "Good \"hallpass-approval-v1\" signature for owner@example.org with ED25519 key {key}\n"
+        ));
+        assert_eq!(plain.key.as_deref(), Some(key));
+        assert!(!plain.certificate);
+        let cert = accepted(&format!(
+            "Good \"hallpass-approval-v1\" signature for a with key b with ED25519-CERT key {key}\n"
+        ));
+        assert_eq!(cert.key.as_deref(), Some(key));
+        assert!(cert.certificate);
+        for odd in [
+            "",
+            "Good signature\n",
+            "Good \"x\" signature for a with ED25519 key not a key\n",
+        ] {
+            let none = accepted(odd);
+            assert_eq!(none.key, None, "{odd}");
+            assert!(!none.certificate);
+        }
     }
 }

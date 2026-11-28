@@ -152,7 +152,7 @@ For each debit that retained targets, the audit reads the archived bytes for its
 
 | Result | Exit | Meaning |
 | --- | --- | --- |
-| `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and this audit verified again, with `--allowed-signers`, a signature over every revision the ledger used, for a principal named with `--principal`. |
+| `complete` | 0 | At least one endpoint was corroborated, all available evidence was replayable without mismatch, and this audit verified again, with `--allowed-signers`, a signature over every revision the ledger used, for a principal named with `--principal`, by a key that the trusted signers file names for that principal or a certificate (not only through a pattern, unless `--allow-pattern-principals`). |
 | `incomplete` | 2 | No corroborated endpoints, or evidence gaps and no policy mismatch. A revision without a signature this audit verified is a gap, and so is a line written under the test clock. |
 | `mismatch` | 2 | At least one refusal or changed matched label. Other gaps are still listed. |
 | `error` | 1 | Unusable input, such as a corrupt ledger, a digest-invalid archive entry, a damaged signature record or an unreadable `--allowed-signers` file, or an `ssh-keygen` that cannot run when a recorded signature needs verifying. |
@@ -203,21 +203,25 @@ The `gaps` object groups affected lines by reason. Counts include every endpoint
 | `signature-not-reverified` | A spend or debit line decided under a revision with a signature record that this audit did not verify, because it ran without `--allowed-signers`. | Run the audit with `--allowed-signers` and your own trusted signers file. |
 | `signature-rejected` | A spend or debit line decided under a revision whose recorded signature `ssh-keygen -Y verify` rejected with the `--allowed-signers` file, for every `--principal` given. | Check the `reason`. Supply the right trusted signers file or principal. If the archived signature is wrong, or the record names another principal (`wrong-principal`), move `DIGEST.sig` and `DIGEST.approval` aside (a record is never replaced), have the owner sign that revision, and record it with `verify-approval --archive`. |
 | `signer-not-pinned` | A spend or debit line decided under a revision whose recorded signature verified, but for the principal its record names, because the audit ran without `--principal`. | Run the audit with `--principal` and the owner's principal. |
+| `signer-matched-by-pattern` | A spend or debit line decided under a revision whose recorded signature verified for a principal named with `--principal`, but the trusted signers file holds its key for that principal only on a line whose principals use a pattern (`*`, `?` or `!`). | Give each owner key a line that names its principal. If pattern lines are what you intend, run the audit with `--allow-pattern-principals`. |
 | `adoption-carry` | An adoption that carried totals. Carried totals are not original debits. | Nothing: restore the original ledger if you have it. |
 | `test-clock-entry` | Any line written under the test clock (`HALLPASS_UNSAFE_TEST_CLOCK` in a debug build): it carries `"test_clock":true`. It is a rehearsal, and its time is not the real time. | Record live work with a release build, in a ledger of its own. |
 | `entry-in-future` | Any line whose time is more than 5 minutes later than the audit's own clock (the real time where the audit runs); smaller skew between hosts is allowed. The clock that recorded it was set ahead, or the audit's clock is behind. | Check both clocks. Do not take the recorded time as when the work happened. |
 
 `targets-unrecorded` replaces the `legacy-spend` reason that earlier versions
-gave a scalar spend line. The six gaps about a revision, `archive-missing`,
+gave a scalar spend line. The seven gaps about a revision, `archive-missing`,
 `revision-unparsable`, `approval-unverified`, `signature-not-reverified`,
-`signature-rejected` and `signer-not-pinned`, also name the revision:
+`signature-rejected`, `signer-not-pinned` and `signer-matched-by-pattern`,
+also name the revision:
 `digests` lists each digest with its own `count`, first 64 `sequences` and
 `truncated`, in order of first use, up to 64 digests (`digests_truncated`
 marks more). A `signature-rejected` entry also has `reason`, the code
 `verify-approval` uses: `wrong-namespace`,
 `bytes-do-not-match`, `malformed-signature`, `untrusted-key`,
 `wrong-principal`, `key-not-valid-at-time`, `key-not-permitted-for-namespace`
-or `unknown`, read from `ssh-keygen`'s output.
+or `unknown`, read from `ssh-keygen`'s output, or `recorded-key-mismatch`:
+the signature verified, but the record names another key than the one that
+made it, so `verify-approval` did not write that record.
 `key-not-permitted-for-namespace` means that the key is in the trusted
 signers file for that principal, but its `namespaces=` option leaves out
 `hallpass-approval-v1`. `key-not-valid-at-time` means that the key is in the
@@ -227,6 +231,8 @@ of. It is never reported as `untrusted-key`. With several `--principal`
 values, the reason is that of the first one tried: the record's principal
 when it is among them. A `signer-not-pinned` entry also has `principal`, the
 principal its record names, which the signature verified for. A
+`signer-matched-by-pattern` entry has `principal`, the principal it verified
+for, and `signer_key`, the key that made the signature. A
 `revision-unparsable` entry also has `problems`, the first 4 problems that
 this hallpass finds in the archived bytes, each `{field, message}` as `check`
 gives them but without the advice to edit the file, and `problem_count`, how
@@ -272,6 +278,26 @@ An audit has two modes, and they prove different things.
   `signatures.allowed_signers` and the principals in
   `signatures.principals`. A revision it rejects is `signature-rejected`,
   with a `reason`.
+- **Which key signed.** A line of FILE can give its key to principals by a
+  pattern, such as `*@example.org`, so a signature can verify for the owner's
+  principal with another person's key. Each `signature-verified` revision
+  therefore reports `signer_key`, the fingerprint of the key that made the
+  signature, as `ssh-keygen` printed it when it verified the signature in
+  this audit, and `principal_match`, how FILE matched the principal:
+  `named` when a line that holds the key names the principal without a
+  pattern (alone, or in a list of names), `pattern` when only a line whose
+  principals use `*`, `?` or `!` does, and `certificate` when the key is a
+  certificate trusted through a `cert-authority` line. A `pattern` revision
+  is a `signer-matched-by-pattern` gap, because such a line does not say
+  that the key is the owner's, so the audit is not `complete`; with
+  `--allow-pattern-principals` it is accepted. A `certificate` is accepted:
+  `ssh-keygen` checked that the certificate names the principal, so the
+  authority vouched for the key. To tell `named` from `pattern`, the audit
+  verifies a plain key again with only the lines of FILE that name their
+  principals, when FILE has a pattern line. The key in the record is not
+  trusted: anyone who can write the archive can write it. A record that
+  names another key than the one that made the signature is
+  `signature-rejected` with reason `recorded-key-mismatch`.
 - **With `--allowed-signers FILE` alone** the audit verifies each signature
   for the principal its record names. A revision it accepts is
   `signature-verified`, which shows whose key signed it. But whoever wrote
@@ -281,7 +307,8 @@ An audit has two modes, and they prove different things.
 Text output says an endpoint is `confirmed` when the revision its debit was
 decided under allows it at the recorded instant, by the destination label the
 debit recorded, and that revision is `signature-verified` for a principal you
-named with `--principal`. Confirmed proves that the recorded endpoint was in
+named with `--principal`, and not only through a pattern principal (a
+`signer-matched-by-pattern` gap). Confirmed proves that the recorded endpoint was in
 the scope of exact pass bytes that a key in your trusted signers file signed
 for that principal. It does not prove that traffic went there or only there,
 or that the work ran. An endpoint under any other revision is never
@@ -353,8 +380,12 @@ private copies of those bytes, so what it records is what was verified. It
 keeps two files beside the bytes: `DIGEST.sig`, the signature, and
 `DIGEST.approval`, one JSON line with `version`, `digest`, `namespace`,
 `principal`, `allowed_signers` (the digest of the trusted signers file it
-verified against) and `signature` (the digest of `DIGEST.sig`). Every archive
-file is created once and never replaced. Each digest has one provenance:
+verified against), `signature` (the digest of `DIGEST.sig`) and `key` (the
+fingerprint of the key that made the signature, such as `SHA256:...`, as
+`ssh-keygen` printed it). That is `version` 2. A `version` 1 record has no
+`key`: an older hallpass wrote it, or `ssh-keygen` did not name the key. It
+still reads, and its key is unknown (`key` is null in `approval`). Every
+archive file is created once and never replaced. Each digest has one provenance:
 
 | `provenance` | Meaning |
 | --- | --- |
@@ -381,7 +412,9 @@ approvals fails. To record the new signature, move `DIGEST.sig` and
 Archives written by earlier versions hold no records, so every digest in them
 reads `unsigned` until `verify-approval --archive` records its signature. A
 record that does not parse, names another digest, or does not match its
-`.sig` file is an error (exit 1).
+`.sig` file is an error (exit 1), and so is a version 2 record without a
+`key` or a version 1 record with one. An older hallpass reads a version 2
+record as damaged.
 
 Both audits list the digests the ledger's spend and debit lines used, in
 `revisions`, in order of first use. Each entry has `digest`, `first_seq` and
@@ -390,7 +423,9 @@ lines used it), `provenance`, `approval` (the record, or null), `reason` (for
 `signature-rejected`, else null), `verify_time` (the instant its signature
 was verified as of, or null when this audit did not verify it) and
 `verified_for` (the principal it verified for, for `signature-verified`,
-else null). `count` is the number of distinct digests and `unverified` how
+else null), `signer_key` (the key that made the signature, from this audit's
+verification, for `signature-verified`, else null) and `principal_match`
+(`named`, `pattern` or `certificate`, for `signature-verified`, else null). `count` is the number of distinct digests and `unverified` how
 many are not `signature-verified`. The first 64 are listed and `truncated`
 marks more. Text output prints them after the gaps. Its first line counts
 the revisions without a verified signature. Without `--principal` but with

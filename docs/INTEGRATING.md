@@ -860,7 +860,12 @@ destination. Pin that digest for the live check. If someone edits the working
 pass later, retrieve the originally verified bytes with
 `hallpass --format text retrieve approval-archive "$digest"`. Beside the bytes,
 the archive keeps the signature that verified (`DIGEST.sig`) and a record of
-the principal, namespace and trusted signers file digest (`DIGEST.approval`).
+the principal, namespace, trusted signers file digest and signing key's
+fingerprint (`DIGEST.approval`). The response names that key as `key`. When
+the trusted signers file holds the key for the principal only on a line
+whose principals use a pattern, such as `*@example.org`, `principal_match` is
+`pattern` and a warning says so; pass `--signer-key SHA256:...` to require
+the owner's key.
 The response gives that record as `approval`, with `provenance` set to
 `signature-recorded`. `audit-receipts` and `audit-charges` read these records
 to tell revisions with a signature from revisions stored by plain `archive`,

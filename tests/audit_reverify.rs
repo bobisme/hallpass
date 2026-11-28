@@ -786,6 +786,7 @@ fn each_digest_is_verified_once_for_the_principal_required() {
                 allowed_signers: Digest::of(b"auditor"),
                 principals: required,
                 as_of: AsOf::FirstUse,
+                allow_pattern_principals: false,
                 check: &mut check,
             }))
             .expect("audit");
@@ -830,6 +831,7 @@ fn a_rejection_is_a_gap_and_a_verifier_error_ends_the_audit() {
             allowed_signers: Digest::of(b"auditor"),
             principals: &[OWNER],
             as_of: AsOf::FirstUse,
+            allow_pattern_principals: false,
             check: &mut check,
         }))
         .expect("audit");
@@ -848,6 +850,7 @@ fn a_rejection_is_a_gap_and_a_verifier_error_ends_the_audit() {
             allowed_signers: Digest::of(b"auditor"),
             principals: &[OWNER],
             as_of: AsOf::FirstUse,
+            allow_pattern_principals: false,
             check: &mut failing,
         }))
         .expect_err("a verifier error is never a pass");
@@ -873,6 +876,7 @@ fn a_signature_replaced_while_it_is_verified_does_not_change_the_result() {
             allowed_signers: Digest::of(b"auditor"),
             principals: &[OWNER],
             as_of: AsOf::FirstUse,
+            allow_pattern_principals: false,
             check: &mut swap,
         }))
         .expect("audit");

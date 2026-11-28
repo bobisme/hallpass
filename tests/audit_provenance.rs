@@ -676,7 +676,7 @@ fn archive_missing_gaps_name_each_digest_with_its_sequences() {
         let rows = &audit["revisions"]["details"];
         assert_eq!(
             rows[0],
-            json!({"digest": a, "first_seq": 1, "last_seq": 4, "first_time": NOW, "lines": 3, "provenance": "missing", "approval": null, "reason": null, "verify_time": null, "verified_for": null}),
+            json!({"digest": a, "first_seq": 1, "last_seq": 4, "first_time": NOW, "lines": 3, "provenance": "missing", "approval": null, "reason": null, "verify_time": null, "verified_for": null, "signer_key": null, "principal_match": null}),
             "{command}"
         );
         assert_eq!(rows[1]["provenance"], "missing");

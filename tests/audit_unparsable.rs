@@ -306,6 +306,7 @@ fn reverify(
         allowed_signers: trust,
         principals: &[OWNER],
         as_of: AsOf::FirstUse,
+        allow_pattern_principals: false,
         check,
     })
 }

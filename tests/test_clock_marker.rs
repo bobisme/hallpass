@@ -201,6 +201,7 @@ impl Env {
                 allowed_signers: Digest::of(b"trusted signers"),
                 principals: &[OWNER],
                 as_of: AsOf::FirstUse,
+                allow_pattern_principals: false,
                 check: &mut check,
             }),
         )
@@ -213,6 +214,7 @@ impl Env {
                 allowed_signers: Digest::of(b"trusted signers"),
                 principals: &[OWNER],
                 as_of: AsOf::FirstUse,
+                allow_pattern_principals: false,
                 check: &mut check,
             }),
         )

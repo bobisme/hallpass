@@ -67,6 +67,8 @@ pub use address::{
     AddressError, Ipv6Transition, Network, Protocol, Target, embedded_ipv4, ipv6_transition,
     parse_address, parse_network,
 };
+pub use archive::archive_signer_record;
+pub use archive::is_key_fingerprint;
 pub use archive::{
     APPROVAL_NAMESPACE, ArchivedSignature, MAX_SIGNATURE_BYTES, Provenance, SignedApproval,
     archive_pass, archive_pass_bytes, archive_provenance, archive_verified_signature,

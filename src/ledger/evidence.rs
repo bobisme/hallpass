@@ -218,6 +218,11 @@ pub struct AuditEndpoint {
     /// The provenance of the revision it was replayed against, as in
     /// [`RevisionUse::provenance`]: never `missing`.
     pub provenance: &'static str,
+    /// The revision's signature verified for a principal named only
+    /// through a pattern principal: a `signer-matched-by-pattern` gap. Text
+    /// output never says such an endpoint is confirmed.
+    #[serde(skip)]
+    pub signer_matched_by_pattern: bool,
     #[serde(skip)]
     key: Digest,
 }
@@ -257,6 +262,10 @@ pub struct GapDigest {
     /// for a `signer-not-pinned` gap only (absent from the other gaps).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+    /// The fingerprint of the key that made the signature, as this audit's
+    /// verifier reported it, for a `signer-matched-by-pattern` gap only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<String>,
     /// What this version's pass rules find wrong with the archived bytes,
     /// for a `revision-unparsable` gap only: the first
     /// [`MAX_PROBLEMS_SHOWN`] problems, each without its advice, because
@@ -296,6 +305,16 @@ pub struct RevisionUse {
     pub verify_time: Option<String>,
     /// The principal the signature verified for, for `signature-verified`.
     pub verified_for: Option<String>,
+    /// The fingerprint of the key that made the signature, such as
+    /// `SHA256:...`, as this audit's verifier reported it, for
+    /// `signature-verified`. Null when the verifier did not name it, and
+    /// when the audit did not verify. The key in `approval` is only what
+    /// the record says.
+    pub signer_key: Option<String>,
+    /// How the trusted signers file matched the principal, for
+    /// `signature-verified`: `named`, `pattern` or `certificate` (see
+    /// [`PrincipalMatch`]). Null when the verifier did not say.
+    pub principal_match: Option<&'static str>,
 }
 
 /// The revisions the ledger's debits used, in order of first use.
@@ -366,11 +385,54 @@ pub struct SignatureToCheck<'a> {
     pub as_of: OffsetDateTime,
 }
 
-/// What the verifier said about one recorded signature.
+/// How the trusted signers file matched the principal a signature verified
+/// for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalMatch {
+    /// A line that holds the key names the principal: alone, or in a list
+    /// of names without patterns.
+    Named,
+    /// Only a line whose principals use a pattern (`*`, `?` or `!`) holds
+    /// the key for the principal. Such a line trusts its key for every
+    /// principal the pattern matches, so it does not say that the key is
+    /// this principal's.
+    Pattern,
+    /// The key is a certificate, trusted through a `cert-authority` line.
+    /// The verifier checked that the certificate names the principal, so
+    /// the authority vouched for the key.
+    Certificate,
+}
+
+impl PrincipalMatch {
+    /// `named`, `pattern` or `certificate`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Pattern => "pattern",
+            Self::Certificate => "certificate",
+        }
+    }
+}
+
+/// The key that made a signature the verifier accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signer {
+    /// Its fingerprint, such as `SHA256:...`, as the verifier reported it.
+    /// None when the verifier did not name it.
+    pub key: Option<String>,
+    pub principal_match: PrincipalMatch,
+}
+
+/// What the verifier said about one recorded signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Recheck {
-    /// It accepted the signature over the archived bytes.
+    /// It accepted the signature over the archived bytes, and did not say
+    /// which key made it: as [`Recheck::Signed`] with no key and
+    /// [`PrincipalMatch::Named`].
     Verified,
+    /// It accepted the signature over the archived bytes, made by this key.
+    Signed(Signer),
     /// It did not, for the reason code given.
     Rejected(&'static str),
 }
@@ -396,6 +458,11 @@ pub struct Reverify<'a> {
     pub principals: &'a [&'a str],
     /// The time each signature is verified as of.
     pub as_of: AsOf,
+    /// Accept a signature whose key the trusted signers file holds for the
+    /// principal only through a pattern ([`PrincipalMatch::Pattern`]).
+    /// When false, such a revision is a `signer-matched-by-pattern` gap,
+    /// and the audit is never `complete`.
+    pub allow_pattern_principals: bool,
     /// Verifies one signature for one principal. It runs once per digest,
     /// in order of first use, and once more for each further principal in
     /// `principals` until one verifies: the record's principal first when
@@ -454,6 +521,7 @@ pub(super) fn record_revision_gap<'g>(
             truncated: false,
             reason: None,
             principal: None,
+            signer_key: None,
             problems: None,
             problem_count: None,
             key: digest,
@@ -516,11 +584,15 @@ enum Approval {
     /// with what was read under the lock.
     Pending(SignedApproval, Pending),
     /// A recorded signature that the verifier accepted again, for
-    /// `principal`. `pinned` when the auditor named that principal.
+    /// `principal`, made by `signer` when the verifier named it. `pinned`
+    /// when the auditor named that principal; `by_pattern` when only a
+    /// pattern principal matched it and the auditor did not accept that.
     Verified {
         record: SignedApproval,
         principal: String,
         pinned: bool,
+        signer: Option<Signer>,
+        by_pattern: bool,
     },
     /// A recorded signature that the verifier rejected, and why.
     Rejected(SignedApproval, &'static str),
@@ -560,8 +632,13 @@ impl Approval {
     /// this audit verified, for a principal the auditor named, approved it.
     const fn gap(&self) -> Option<&'static str> {
         match self {
-            Self::Verified { pinned: true, .. } => None,
+            Self::Verified {
+                pinned: true,
+                by_pattern: false,
+                ..
+            } => None,
             Self::Verified { pinned: false, .. } => Some("signer-not-pinned"),
+            Self::Verified { pinned: true, .. } => Some("signer-matched-by-pattern"),
             Self::Missing | Self::Unsigned => Some("approval-unverified"),
             Self::Recorded(_) | Self::Pending(..) => Some("signature-not-reverified"),
             Self::Rejected(..) => Some("signature-rejected"),
@@ -571,11 +648,12 @@ impl Approval {
 
 /// The gaps that [`RevisionTracker::finish`] records, about a revision's
 /// approval.
-const APPROVAL_GAPS: [&str; 4] = [
+const APPROVAL_GAPS: [&str; 5] = [
     "approval-unverified",
     "signature-not-reverified",
     "signature-rejected",
     "signer-not-pinned",
+    "signer-matched-by-pattern",
 ];
 
 struct Used {
@@ -753,18 +831,32 @@ fn verify(
             principal: &principal,
             as_of,
         })?;
-        match verdict {
-            Recheck::Verified => {
-                return Ok(Approval::Verified {
-                    record,
-                    principal,
-                    pinned: !named.is_empty(),
-                });
-            }
+        let signer = match verdict {
+            Recheck::Verified => None,
+            Recheck::Signed(signer) => Some(signer),
             Recheck::Rejected(why) => {
                 reason.get_or_insert(why);
+                continue;
             }
+        };
+        // The signature names its key, so a record that names another key
+        // was not written by the verification it claims to record.
+        if let (Some(recorded), Some(Signer { key: Some(key), .. })) = (&record.key, &signer)
+            && recorded != key
+        {
+            return Ok(Approval::Rejected(record, "recorded-key-mismatch"));
         }
+        let by_pattern = !reverify.allow_pattern_principals
+            && signer
+                .as_ref()
+                .is_some_and(|s| s.principal_match == PrincipalMatch::Pattern);
+        return Ok(Approval::Verified {
+            record,
+            principal,
+            pinned: !named.is_empty(),
+            signer,
+            by_pattern,
+        });
     }
     Ok(Approval::Rejected(record, reason.unwrap_or("unknown")))
 }
@@ -815,7 +907,20 @@ fn approval_gap(rows: &[&Used]) -> EvidenceGap {
                         principal,
                         pinned: false,
                         ..
+                    }
+                    | Approval::Verified {
+                        principal,
+                        by_pattern: true,
+                        ..
                     } => Some(principal.clone()),
+                    _ => None,
+                },
+                signer_key: match &used.approval {
+                    Approval::Verified {
+                        by_pattern: true,
+                        signer: Some(signer),
+                        ..
+                    } => signer.key.clone(),
                     _ => None,
                 },
                 problems: None,
@@ -840,6 +945,20 @@ impl Revisions {
         self.index
             .get(&digest)
             .map_or("missing", |&i| self.used[i].approval.as_str())
+    }
+
+    /// Whether the signature of `digest` verified only through a pattern
+    /// principal that the auditor did not accept.
+    pub(super) fn by_pattern(&self, digest: Digest) -> bool {
+        self.index.get(&digest).is_some_and(|&i| {
+            matches!(
+                self.used[i].approval,
+                Approval::Verified {
+                    by_pattern: true,
+                    ..
+                }
+            )
+        })
     }
 
     /// The revisions used, and how their signatures were checked.
@@ -868,6 +987,20 @@ impl Revisions {
                     verify_time: used.verify_time.map(rfc3339),
                     verified_for: match &used.approval {
                         Approval::Verified { principal, .. } => Some(principal.clone()),
+                        _ => None,
+                    },
+                    signer_key: match &used.approval {
+                        Approval::Verified {
+                            signer: Some(signer),
+                            ..
+                        } => signer.key.clone(),
+                        _ => None,
+                    },
+                    principal_match: match &used.approval {
+                        Approval::Verified {
+                            signer: Some(signer),
+                            ..
+                        } => Some(signer.principal_match.as_str()),
                         _ => None,
                     },
                 });
@@ -1052,6 +1185,7 @@ pub fn audit_receipts_with(
                             refusal_code,
                             // Set below, once the signatures are verified.
                             provenance: "",
+                            signer_matched_by_pattern: false,
                             key: d.digest,
                         });
                     } else {
@@ -1070,6 +1204,7 @@ pub fn audit_receipts_with(
         .chain(mismatches.details.iter_mut())
     {
         row.provenance = revisions.provenance(row.key);
+        row.signer_matched_by_pattern = revisions.by_pattern(row.key);
     }
     let (revisions, signatures) = revisions.report();
     // `complete` needs a signature this audit verified over every revision used.
@@ -1433,6 +1568,7 @@ mod gap_tests {
             namespace: crate::APPROVAL_NAMESPACE.to_owned(),
             allowed_signers: Digest::of(b"t"),
             signature: Digest::of(&n.to_le_bytes()),
+            key: None,
         }
     }
 
@@ -1446,6 +1582,8 @@ mod gap_tests {
                 record: record(n),
                 principal: format!("owner-{n}@example.org"),
                 pinned: kind == 3,
+                signer: None,
+                by_pattern: false,
             },
             _ => Approval::Rejected(record(n), "untrusted-key"),
         }

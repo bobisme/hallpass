@@ -717,6 +717,7 @@ impl Library {
                 allowed_signers: Digest::of(b"auditor"),
                 principals,
                 as_of,
+                allow_pattern_principals: false,
                 check: &mut *check,
             }),
         )
@@ -729,6 +730,7 @@ impl Library {
                 allowed_signers: Digest::of(b"auditor"),
                 principals,
                 as_of,
+                allow_pattern_principals: false,
                 check,
             }),
         )

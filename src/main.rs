@@ -373,6 +373,8 @@ enum Command {
         /// Verify as of this RFC 3339 instant instead of now, such as the time a revision was first used. A key the trusted signers file limits with valid-after or valid-before counts only inside that window.
         #[arg(long, value_name = "TIME")]
         at: Option<String>,
+        #[command(flatten)]
+        key: cli_verify::SignerKeyArgs,
     },
     /// Compare two pass revisions without authorizing either one.
     Diff(DiffArgs),
@@ -2759,6 +2761,7 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             principal,
             archive,
             at,
+            key,
         } => cli_verify::verify_approval(
             file,
             signature,
@@ -2766,6 +2769,7 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             principal,
             archive.as_deref(),
             at.as_deref(),
+            key,
         ),
         Command::Diff(args) => cli_diff::review_diff(args),
         Command::ConsumerCoverage { file, can } => consumer_coverage(file, can),

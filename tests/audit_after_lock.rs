@@ -135,6 +135,7 @@ fn reverify(
         allowed_signers: Digest::of(b"auditor"),
         principals: &[OWNER],
         as_of: AsOf::FirstUse,
+        allow_pattern_principals: false,
         check,
     }
 }
