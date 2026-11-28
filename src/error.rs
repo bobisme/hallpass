@@ -406,7 +406,9 @@ impl Error {
                 detail,
             } => (
                 format!("the ledger is damaged at line {line}, so nothing more can be spent"),
-                if (*last && !*complete && detail == CUT_SHORT) || detail == BLANK_LINE {
+                if (*last && !*complete && (detail == CUT_SHORT || detail == NUL_LINE))
+                    || detail == BLANK_LINE
+                {
                     doctor(&pass_of(path))
                 } else {
                     Some(format!(
@@ -833,6 +835,9 @@ pub const CUT_SHORT: &str = "the last line is cut short (no line end)";
 /// The detail of [`Error::LedgerCorrupt`] for a line that is empty or only
 /// white space.
 pub const BLANK_LINE: &str = "the line is blank (empty, or only white space)";
+/// The detail for a line made only of NUL bytes (and white space): what a
+/// crash leaves when a file grew but its data never reached the disk.
+pub const NUL_LINE: &str = "the line holds only NUL bytes";
 
 /// What to do about a damaged ledger, by where the damage is.
 fn corrupt_advice(
@@ -854,6 +859,11 @@ fn corrupt_advice(
     } else if detail == BLANK_LINE && line > 1 {
         format!(
             "a blank line is not a line hallpass wrote (for example `echo >> ledger` adds one). Do not edit the ledger by hand: if everything from that line on is blank and the line before it is the one the witness recorded, `hallpass repair {pass} --drop-blank-tail --preview` removes the blank lines and changes nothing else. If it refuses, {}",
+            backup.replacen('R', "r", 1)
+        )
+    } else if last && line > 1 && detail == NUL_LINE {
+        format!(
+            "a crash can leave NUL bytes where a line was being written (the file grew but its data never reached the disk). Do not edit the ledger by hand: `hallpass repair {pass} --drop-torn-tail --preview` checks that the witness proves the line was never counted, and then the repair removes the NUL bytes and keeps a copy. If it refuses, {}",
             backup.replacen('R', "r", 1)
         )
     } else if last && line > 1 && detail == CUT_SHORT {

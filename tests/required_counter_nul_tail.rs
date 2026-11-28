@@ -275,3 +275,17 @@ fn mixed_bytes_and_a_whole_line_with_nuls_are_still_refused() {
     let (rc, v) = case.json(&["repair", "p.toml", "--drop-torn-tail", "--preview"]);
     assert_ne!(rc, 0, "{v}");
 }
+
+#[test]
+fn a_nul_line_names_the_torn_tail_repair() {
+    let case = Case::new("", "calls = 10");
+    case.spend(2);
+    let mut bytes = fs::read(case.ledger()).expect("read ledger");
+    bytes.extend_from_slice(&[0u8; 40]);
+    bytes.push(b'\n');
+    fs::write(case.ledger(), bytes).expect("write ledger");
+    let (rc, text) = case.run(&["spend", "p.toml", "calls"]);
+    assert_ne!(rc, 0, "{text}");
+    assert!(text.contains("holds only NUL bytes"), "{text}");
+    assert!(text.contains("--drop-torn-tail --preview"), "{text}");
+}

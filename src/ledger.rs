@@ -1017,6 +1017,9 @@ fn scan_ledger(
             if line.iter().all(u8::is_ascii_whitespace) {
                 return corrupt(number, crate::error::BLANK_LINE);
             }
+            if line.contains(&0) && line.iter().all(|b| *b == 0 || b.is_ascii_whitespace()) {
+                return corrupt(number, crate::error::NUL_LINE);
+            }
             corrupt(number, "the line is not a complete ledger entry")
         })?;
         let (seq, last_seq, prev, marker) = match &record {
