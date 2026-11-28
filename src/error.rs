@@ -151,10 +151,11 @@ pub enum Error {
     LedgerElsewhere(Box<ElsewhereLedger>),
     /// The ledger does not contain the line the witness recorded.
     #[error(
-        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {2} --preview`, review what it carries, then `hallpass adopt {2} --reason \"...\" --token TOKEN`, which records the adoption in the ledger and never lowers a count below what the witness recorded.",
+        "the ledger {} was changed outside hallpass: {detail} (witness: {}). hallpass will not trust its count. Restore the ledger hallpass last wrote (from a backup, or the other copy if one is named above); if this ledger is the one to keep, run `hallpass adopt {2} --preview`, review what it carries, then `hallpass adopt {2} --reason \"...\" --token TOKEN`, which records the adoption in the ledger and never lowers a count below what the witness recorded. {3}",
         path.display(),
         witness.display(),
-        pass.display()
+        pass.display(),
+        LastResort::AdoptInPlace.receipts(None)
     )]
     LedgerChanged {
         /// The ledger file.
@@ -272,6 +273,22 @@ fn invalid_advice(problems: &[Problem]) -> &'static str {
 }
 
 impl Error {
+    /// The last resort when no backup copy can replace the ledger:
+    /// [`LastResort::AdoptInPlace`] for [`Error::LedgerChanged`] (the
+    /// ledger verifies as a chain), [`LastResort::MoveAside`] for
+    /// [`Error::LedgerCorrupt`] (it does not), `None` for every other error.
+    /// It says which recovery loses least; whether one may be taken at all
+    /// (no other ledger for the pass id in sight, no repair that applies)
+    /// is for the caller to check first.
+    #[must_use]
+    pub const fn last_resort(&self) -> Option<LastResort> {
+        match self {
+            Self::LedgerChanged { .. } => Some(LastResort::AdoptInPlace),
+            Self::LedgerCorrupt { .. } => Some(LastResort::MoveAside),
+            _ => None,
+        }
+    }
+
     /// The message for a command that cannot write. It never advises
     /// `hallpass adopt`: a read-only command that sends the reader to adopt a
     /// copy can fork the ledger of a live pass.
@@ -602,6 +619,71 @@ impl Error {
         Self::Io {
             path: path.to_path_buf(),
             message,
+        }
+    }
+}
+
+/// The last resort for a ledger that no backup copy can replace.
+///
+/// [`Error::last_resort`] picks it by why the ledger cannot be used. The
+/// message of the error, `hallpass doctor` and the `last-resort` advice of `hallpass
+/// compare-backups` all name this one, so a reader is sent the same way by
+/// each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LastResort {
+    /// The ledger verifies as a chain, but does not hold the line the
+    /// witness recorded ([`Error::LedgerChanged`], such as an older backup
+    /// put back): adopt it where it is. The adoption keeps its entries as
+    /// receipts and carries what the witness recorded beyond them.
+    AdoptInPlace,
+    /// The ledger cannot be read as a chain ([`Error::LedgerCorrupt`]):
+    /// move it aside (keep it), then adopt the pass as ledger-missing. The
+    /// new ledger carries the witness totals, and the receipts in the
+    /// moved ledger are not in its chain.
+    MoveAside,
+}
+
+impl LastResort {
+    /// What the last resort does to the receipts, in one sentence.
+    /// `entries` is the number of verified entries in the ledger, when it
+    /// is known.
+    #[must_use]
+    pub fn receipts(self, entries: Option<u64>) -> String {
+        match (self, entries) {
+            (Self::AdoptInPlace, None) => {
+                "The adoption keeps the verified entries of this ledger as receipts.".to_owned()
+            }
+            (Self::AdoptInPlace, Some(0)) => {
+                "This ledger holds no entries, so the adoption keeps no receipts.".to_owned()
+            }
+            (Self::AdoptInPlace, Some(1)) => {
+                "The adoption keeps the 1 verified entry of this ledger as a receipt.".to_owned()
+            }
+            (Self::AdoptInPlace, Some(n)) => {
+                format!("The adoption keeps the {n} verified entries of this ledger as receipts.")
+            }
+            (Self::MoveAside, _) => {
+                "The receipts in the moved ledger are not in the new chain.".to_owned()
+            }
+        }
+    }
+
+    /// The steps of the last resort for a reader with no backup copy, with
+    /// a leading space. `pass`, `ledger` and `aside` (the new name for a
+    /// ledger moved aside) are as a shell needs them typed; `entries` is as
+    /// for [`LastResort::receipts`].
+    #[must_use]
+    pub fn steps(self, pass: &str, ledger: &str, aside: &str, entries: Option<u64>) -> String {
+        match self {
+            Self::AdoptInPlace => format!(
+                " If no backup copy exists, the last resort is to adopt this ledger where it is: `hallpass adopt {pass} --preview` shows what the adoption carries from the witness and prints its token, and `hallpass adopt {pass} --reason \"...\" --token TOKEN` records it. {}",
+                self.receipts(entries)
+            ),
+            Self::MoveAside => format!(
+                " If no backup copy exists, the last resort is to move this ledger aside (keep it) with `mv -n {ledger} {aside}`, then run doctor again: it shows the adoption preview (`hallpass adopt {pass} --preview`), and `hallpass adopt {pass} --reason \"...\"` with the token starts a new ledger that carries the witness totals. {}",
+                self.receipts(entries)
+            ),
         }
     }
 }

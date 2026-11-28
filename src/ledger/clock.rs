@@ -72,6 +72,18 @@ impl LedgerView {
     pub fn check_clock_kind(&self) -> Result<(), Error> {
         check_view(self)
     }
+
+    /// The latest time recorded in the ledger, for the clock-rollback
+    /// warning: `None` when the ledger holds only test-clock lines and this
+    /// thread uses the real clock, since a rehearsal's times say nothing about
+    /// the real clock.
+    pub(super) fn rollback_latest(&self) -> Option<(time::OffsetDateTime, u64)> {
+        let rehearsal_only = self.test_clock_from.is_some() && self.real_clock_from.is_none();
+        if rehearsal_only && marker().is_none() {
+            return None;
+        }
+        self.latest_time
+    }
 }
 
 /// `test` and `real`: the first test-clock and real-clock entry, if any.

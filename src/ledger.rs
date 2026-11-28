@@ -3066,7 +3066,7 @@ impl LedgerView {
     /// Spends, previews, `permits` and `status` give it.
     #[must_use]
     pub fn clock_warning(&self, now: OffsetDateTime) -> Option<String> {
-        clock_rollback_warning(now, self.latest_time)
+        clock_rollback_warning(now, self.rollback_latest())
     }
 
     fn check_next_witness(&self, state: &StateDir, id: &str) -> Result<(), Error> {

@@ -253,7 +253,7 @@ fn the_clock_mix_message_and_doctor_name_the_safe_recovery() {
     assert_eq!(doctor["problem"], "ledger-clock-mix", "{doctor}");
     assert_eq!(
         doctor["next"],
-        json!(["mv", "p.toml.ledger", "p.toml.ledger.rehearsal"]),
+        json!(["mv", "-n", "p.toml.ledger", "p.toml.ledger.rehearsal"]),
         "{doctor}"
     );
     let step = doctor["next_step"].as_str().expect("step");
@@ -267,7 +267,7 @@ fn the_clock_mix_message_and_doctor_name_the_safe_recovery() {
     let (_, doctor) = env.run(&["doctor", "p.toml"], None);
     assert_eq!(
         doctor["next"],
-        json!(["mv", "p.toml.ledger", "p.toml.ledger.rehearsal-2"]),
+        json!(["mv", "-n", "p.toml.ledger", "p.toml.ledger.rehearsal-2"]),
         "{doctor}"
     );
 }

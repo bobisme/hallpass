@@ -355,7 +355,7 @@ fn a_pass_moved_without_its_ledger_names_the_move() {
     assert_eq!(reply["problem"], "ledger-elsewhere", "{reply}");
     assert_eq!(
         next(&reply),
-        ["mv", &case.real("c/p.toml.ledger"), "d/p.toml.ledger"]
+        ["mv", "-n", &case.real("c/p.toml.ledger"), "d/p.toml.ledger"]
     );
 }
 
@@ -431,7 +431,7 @@ fn damaged_witness_totals_name_moving_the_witness_aside_and_note_nothing() {
     let witness = case.witness().display().to_string();
     assert_eq!(
         next(&reply),
-        ["mv", &witness, &format!("{witness}.damaged")]
+        ["mv", "-n", &witness, &format!("{witness}.damaged")]
     );
     // `status` notes the damage; doctor (checked by `Case::doctor`) did not.
     assert!(!case.state().join(format!("{ID}.witness-damage")).exists());
@@ -629,8 +629,8 @@ fn moving_a_damaged_witness_aside_leads_to_the_adoption() {
     );
     assert!(!step.contains("next spend records"), "{reply}");
     let words = next(&reply);
-    assert_eq!(words[0], "mv", "{reply}");
-    fs::rename(&words[1], &words[2]).expect("move aside");
+    assert_eq!(words[..2], ["mv", "-n"], "{reply}");
+    fs::rename(&words[2], &words[3]).expect("move aside");
     // The copy of the witness shows that one was recorded here, so the
     // witness is lost, not absent: a spend is refused until the adoption.
     let (rc, reply) = case.doctor("c/p.toml");
@@ -883,11 +883,11 @@ fn a_damaged_ledger_with_no_backup_finishes_through_the_last_resort() {
     );
     let mv = step
         .split('`')
-        .find(|part| part.starts_with("mv "))
-        .unwrap_or_else(|| panic!("no mv command in {step}"));
+        .find(|part| part.starts_with("mv -n "))
+        .unwrap_or_else(|| panic!("no mv -n command in {step}"));
     let words: Vec<&str> = mv.split(' ').collect();
-    assert_eq!(words.len(), 3, "{mv}");
-    fs::rename(case.path(words[1]), case.path(words[2])).expect("move aside");
+    assert_eq!(words.len(), 4, "{mv}");
+    fs::rename(case.path(words[2]), case.path(words[3])).expect("move aside");
     let (rc, reply) = case.doctor("c/p.toml");
     assert_eq!(
         (rc, &reply["problem"]),

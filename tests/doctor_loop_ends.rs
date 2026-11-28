@@ -267,7 +267,9 @@ fn edit(path: &Path, from: &str, to: &str, nth_line: Option<usize>) {
 }
 
 /// The step doctor names first, and that compare-backups ends the loop
-/// with the last resort for the ledger beside the pass.
+/// with the last resort for the ledger beside the pass: the adoption in
+/// place for a changed ledger, which verifies as a chain (bn-aao7), and the
+/// move aside for a damaged one.
 fn assert_loop_through_last_resort(case: &Case, problem: &str) {
     let (_, reply) = case.json(&["doctor", "c/p.toml"]);
     assert_eq!(reply["problem"], problem, "{reply}");
@@ -276,16 +278,28 @@ fn assert_loop_through_last_resort(case: &Case, problem: &str) {
         ["hallpass", "compare-backups", "c/p.toml", "c/p.toml.ledger"]
     );
     let steps = follow(case);
-    assert_eq!(
-        steps[..3],
-        [
-            "hallpass compare-backups c/p.toml c/p.toml.ledger",
-            "mv c/p.toml.ledger c/p.toml.ledger.damaged",
-            "hallpass adopt c/p.toml --preview",
-        ],
-        "{steps:#?}"
-    );
-    assert!(case.path("c/p.toml.ledger.damaged").is_file(), "kept aside");
+    if problem == "ledger-changed" {
+        assert_eq!(
+            steps[..2],
+            [
+                "hallpass compare-backups c/p.toml c/p.toml.ledger",
+                "hallpass adopt c/p.toml --preview",
+            ],
+            "{steps:#?}"
+        );
+        assert!(!case.path("c/p.toml.ledger.damaged").exists(), "not moved");
+    } else {
+        assert_eq!(
+            steps[..3],
+            [
+                "hallpass compare-backups c/p.toml c/p.toml.ledger",
+                "mv -n c/p.toml.ledger c/p.toml.ledger.damaged",
+                "hallpass adopt c/p.toml --preview",
+            ],
+            "{steps:#?}"
+        );
+        assert!(case.path("c/p.toml.ledger.damaged").is_file(), "kept aside");
+    }
     assert_recovered(case);
 }
 

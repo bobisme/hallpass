@@ -11,9 +11,13 @@ doctor again, until `result` is `healthy`. When `compare-backups` finds no
 copy that holds the line the witness recorded, a spend fails with
 `ledger-changed` or `ledger-corrupt`, every other candidate was read and no
 other ledger for the pass id is in sight, its `advice` has an entry of type
-`last-resort` whose `argv` moves the ledger aside (`mv LEDGER
-LEDGER.damaged`). Run it only when no other backup copy exists; doctor then
-names the adoption preview.
+`last-resort` with the first command of the recovery that loses least, in
+`argv`. Run it only when no other backup copy exists. For `ledger-changed`
+the ledger verifies as a chain, so the command is `hallpass adopt PASS
+--preview`: the adoption keeps its verified entries as receipts. For
+`ledger-corrupt` it moves the ledger aside (`mv -n LEDGER
+LEDGER.damaged`), and doctor then names the adoption preview: the receipts
+in the moved ledger are not in the new chain.
 
 These commands read local files under shared ledger locks. They produce historical evidence. Sending a unit of work still requires the caller's normal authorization and accounting decision. The audits release the lock before they verify signatures, so a spend never waits for `ssh-keygen`.
 

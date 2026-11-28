@@ -92,7 +92,7 @@ pub fn capacity_with_clock_in(
         })?;
     let now = clock();
     check_clock(now)?;
-    warn_clock_rollback(now, view.latest_time, &mut view.warnings);
+    warn_clock_rollback(now, view.rollback_latest(), &mut view.warnings);
     warn_left_counters(&loaded.pass, &view.tally, &mut view.warnings);
     let decision = decide_debit_policy(&loaded, policy, charges, now).and_then(|labels| {
         let mut counters = Vec::with_capacity(charges.len());

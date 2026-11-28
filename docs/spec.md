@@ -1487,7 +1487,7 @@ real paths, or nothing to do. It uses the library's own errors and advice:
 witness recorded, names `repair --restore-final-newline --preview`; a
 cut-short last line that the repair preview accepts names
 `repair --drop-torn-tail --preview`; other damage and `ledger-changed`
-name `compare-backups`, and with no other ledger for the pass id in sight their step also gives the last resort for a pass with no backup (move the ledger aside, then adopt, with the exact commands and the warning that the moved ledger's receipts leave the chain), and `compare-backups` with no copy that holds the witnessed line gives the move as `last-resort` advice with its `argv`, so following the named commands ends; `ledger-elsewhere` names the `mv` of the live ledger
+name `compare-backups`, and with no other ledger for the pass id in sight their step also gives the last resort for a pass with no backup, the one that loses least, with the exact commands and one sentence on what it does to the receipts: for `ledger-changed`, whose ledger verifies as a chain, adopt it in place (`adopt --preview`, as the spend error names it), which keeps its verified entries as receipts; for `ledger-corrupt`, move the ledger aside with `mv -n` and adopt the pass as `ledger-missing`, whose new chain holds none of the moved ledger's receipts. `compare-backups` with no copy that holds the witnessed line gives that first command as `last-resort` advice with its `argv`, so following the named commands ends. Every `mv` doctor or `compare-backups` names uses `-n`, so it never overwrites a file already at the target; `ledger-elsewhere` names the `mv -n` of the live ledger
 (or a `diff` with the live pass file when one is beside it), and
 `ledger-missing` names `adopt --preview`. It never names `adopt` while the
 ledger may be intact elsewhere: when a file is still where the witness last
@@ -1513,7 +1513,7 @@ does not fail for the state of the pass, its ledger or its witness.
 
 Warnings (no witness yet, a ledger extended past its witness or moved, a
 witness that could not be checked, a debit that checked no destination, a
-decision clock earlier than the latest ledger event, a directory holding the pass that group or others can write without the sticky bit (see below), a destination whose
+decision clock earlier than the latest ledger event (not for a ledger of test-clock lines read on the real clock: a rehearsal's times say nothing about the real clock), a directory holding the pass that group or others can write without the sticky bit (see below), a destination whose
 `names` another destination defeats, declared breadth beyond a comparison
 point) go to standard error as
 `hallpass: warning: ...` in text output, and into `warnings` in JSON.
@@ -1932,7 +1932,7 @@ Crate `hallpass` (re-exports `time`):
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |
 | `read_summary` | the tally and witness status without the entries |
-| `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any logical entry of the ledger and the sequence number of the first entry with it; the warning for a decision clock before it |
+| `LedgerView::latest_time`, `LedgerView::clock_warning(now)` | the latest time on any logical entry of the ledger and the sequence number of the first entry with it; the warning for a decision clock before it, none when every line is a test-clock line and the thread is not in `with_test_clock` |
 | `with_test_clock(f)` | mark every ledger line the library calls in `f` write on this thread as written under a test clock; writes refuse to mix marked and unmarked lines in one ledger (`Error::LedgerClockMix`, [Test-clock lines](#test-clock-lines)) |
 | `with_lock_wait(lock_timeout, on_lock_wait, f)`, `LockWait { path, holder_pid, shared, give_up_in }` | bound every ledger and witness lock wait of the library calls in `f` on this thread, and hear about a long wait ([Lock wait](#lock-wait)) |
 | `open_input(path)` | open a file to read as a pass is opened: not through a link, only a regular file, never blocking on a FIFO |

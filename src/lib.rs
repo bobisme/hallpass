@@ -78,6 +78,7 @@ pub use decision::{
     Decision, Refusal, RefusalCode, WindowState, span, span_left, span_until, stamp,
     stamp_with_fraction, whole_seconds_up,
 };
+pub use error::LastResort;
 pub use error::Summary;
 pub use error::{ElsewhereLedger, Error, MissingLedger};
 pub use files::open_trusted_checkpoint;
