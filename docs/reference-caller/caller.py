@@ -165,6 +165,10 @@ def canonical(a):
         args += ["--to", t["target"] + ("@" + t["name"] if t["name"] is not None else "")]
     code, out = hallpass(*args, "--", a.pass_file, rehearsal=a.rehearsal)
     reply = decode(out)
+    error = reply.get("error")
+    if code == 1 and isinstance(error, dict) and error.get("code") != "usage":
+        # not about the targets: a missing pass, a damaged ledger, a lock; say hallpass's own words
+        fail(f"hallpass error ({error.get('code')}): {error.get('message')}")
     echoed = reply.get("targets")
     if (code not in (0, 2) or reply.get("command") != "permits" or not isinstance(echoed, list)
             or len(echoed) != len(a.to)

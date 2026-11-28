@@ -46,11 +46,20 @@ def hallpass(*args):  # no shell; (None, b"") if hallpass did not run
     return done.returncode, done.stdout
 
 
-def refusal_message(out):
+def refusal_message(out):  # "<code>: <message>" as hallpass says it
     try:
-        return json.loads(out)["refusal"]["message"]
+        refusal = json.loads(out)["refusal"]
+        return f"{refusal['code']}: {refusal['message']}"
     except (ValueError, KeyError, TypeError):
         return "no message"
+
+
+def error_message(out):  # hallpass's own error, with its advice; "" if the reply has none
+    try:
+        error = json.loads(out)["error"]
+        return f"{error['code']}: {error['message']}"
+    except (ValueError, KeyError, TypeError):
+        return ""
 
 
 def do_work():
@@ -64,8 +73,14 @@ code, out = hallpass("permits", "--to", to, *(["--digest", reviewed] if reviewed
 if code == 2:  # refused: show the message, do not send
     print("refused:", refusal_message(out), file=sys.stderr)
     sys.exit(2)
+if code != 0:  # exit 1 is hallpass's own error (missing pass, damaged ledger, bad target): say it, before any clock check
+    if code is None:
+        sys.exit("stop: could not run hallpass; is it on PATH?")
+    sys.exit("stop: hallpass error " + (error_message(out) or f"exit {code} with no error object"))
 try:
     pre = json.loads(out)
+    if pre.get("result") != "allowed":  # exit 0 with any other result is not a preflight we can act on
+        raise ValueError("result")
     # A rehearsal needs a hallpass that honours the test clock; a live one needs a hallpass that does not.
     if pre.get("test_clock") is not rehearsal:
         sys.exit("stop: " + ("--rehearsal, but this hallpass uses the real clock, so a spend would be live. "
@@ -103,4 +118,5 @@ elif verdict == "reconcile":  # a debit may exist (also exit 1 with no reply: ha
     print("reconcile: the spend may be recorded; look up this ref with hallpass receipt", file=sys.stderr)
     sys.exit(3)
 else:  # error, crash, odd reply: unknown outcome, do not send
-    sys.exit("stop: unknown outcome, do not send")
+    detail = error_message(out)
+    sys.exit("stop: unknown outcome, do not send" + (f" (hallpass error {detail})" if detail else ""))
