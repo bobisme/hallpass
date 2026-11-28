@@ -374,8 +374,24 @@ Changes since commit d70c09f.
 - Doctor's step for an unreconciled adoption is the `reconcile-references`
   command with the adoption filled in, not `help reconcile-references`.
 
+- `checkpoint` exports `totals` (not covered by the hash); an older
+  hallpass refuses such a checkpoint as an unknown field. An adoption made
+  with `adopt --checkpoint` records a `checkpoint` field, which an older
+  hallpass reads as `ledger-corrupt` (fails closed). Library: `Checkpoint`
+  gains `totals`, `AdoptPreview` gains `checkpoint`.
+- Clap usage errors use hallpass's shape: `hallpass CMD: error: usage: ...`,
+  a one-line JSON `headline`, and the command's trailing line.
+- `compare-backups` does not count a damaged ledger beside the pass as an
+  unreadable candidate; its exit comes from the other candidates.
+- The `repair` usage line names `--drop-blank-tail`.
+
 ### Added
 
+- `doctor FILE --checkpoint CP` and `adopt FILE --checkpoint CP`: after a
+  whole-machine restore, carry what a retained checkpoint's totals record
+  beyond the ledger; counts only rise, a fork is refused.
+- `repair --drop-blank-tail` (preview and token) removes blank lines after
+  the witnessed last line.
 - `containment.loosenings[].code` (`counter-substitution`), `replaced_by`,
   and `budget_impact.counter_substitution` with a text warning.
 - `adopt --drop-rehearsal REHEARSAL_LEDGER`: after an accidental rehearsal on
@@ -826,3 +842,13 @@ Changes since commit d70c09f.
   hid a partial error; an empty ledger got a machine-move warning (bn-3bk7).
 - `check` reports an integer too large for 64 bits as one problem and still
   reports every other problem (bn-2tyx).
+- A ledger restored together with its state directory could not be
+  brought up to a retained checkpoint (bn-tia9).
+- `echo >> ledger` had no repair; doctor's `compare-backups` step exited 1
+  with an exact backup; doctor contradicted itself after the ledger was
+  moved aside (bn-1otp).
+- The reference caller's `handoff` called a possibly-debited unit "not
+  debited" after a lossy adoption; its shortfall check tripped on unknown
+  outcomes; concurrent runs of one reference wrote several intents (bn-3vgl).
+- `--duration -5` leaked clap's raw error; the future-mtime warning appeared
+  twice (bn-akq0).

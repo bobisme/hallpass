@@ -775,3 +775,7 @@
 1795851424966148	hallpass-dev	itc:AQ		item.assign	bn-1otp	{"action":"assign","agent":"hallpass-dev"}	blake3:YiBd_QgbFY5DBhNbo5_PCXfAECiYD5BBvobLp0CJq-Y
 1795851424978363	hallpass-dev	itc:AQ		item.move	bn-akq0	{"state":"doing"}	blake3:V50ETyyjfhXAwblmapVwt1pzS6VLDbEskiMVt3M_qaI
 1795851424984700	hallpass-dev	itc:AQ		item.assign	bn-akq0	{"action":"assign","agent":"hallpass-dev"}	blake3:tykCp7mAd70b1QXITSzLbUdGg5F8UZNHtRPWZMdihVI
+1795852937038003	hallpass-dev	itc:AQ		item.move	bn-3vgl	{"state":"done"}	blake3:oVPSD_Nz-0kNvM89IMHl_FkgwgIaBexlPynTfbm4FEk
+1795852937058920	hallpass-dev	itc:AQ		item.move	bn-tia9	{"state":"done"}	blake3:VMGQRaaAgXjXSxv4OHE546PEiLapHiosJqgaO9pzzQQ
+1795852937075319	hallpass-dev	itc:AQ		item.move	bn-1otp	{"state":"done"}	blake3:7vd0jwTNYXZ3nwQC3EevpXg4KNt4vkV-QvESbH6qbpk
+1795852937116726	hallpass-dev	itc:AQ		item.move	bn-akq0	{"state":"done"}	blake3:QR0q7hkcXVIVyfkDLmKDe2Aucsb9ie_tri39mKGZep8
