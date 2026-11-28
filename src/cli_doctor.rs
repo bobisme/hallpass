@@ -917,6 +917,57 @@ pub fn last_resort(file: &Path, report: &hallpass::evidence::BackupReport) -> Op
     }))
 }
 
+/// The advice `compare-backups` gives when a copy holds exactly the line
+/// the witness recorded: restore that copy beside the pass (`cp -p COPY
+/// LEDGER` in `argv`), then run doctor. Given only when all of these hold,
+/// so that it is never given over an intact ledger:
+///
+/// - the assessment is `preserved` and no candidate extends the witness
+///   (an extension would be the better copy, and is not judged here);
+/// - a candidate is an exact copy, and it is not the ledger beside the pass;
+/// - reading the ledger beside the pass fails as missing, changed or
+///   damaged.
+///
+/// `None` otherwise.
+pub fn restore_exact(file: &Path, report: &hallpass::evidence::BackupReport) -> Option<Value> {
+    if report.assessment != "preserved"
+        || report.candidates.iter().any(|c| c.relation == "extended")
+    {
+        return None;
+    }
+    let state = StateDir::from_env().read_only();
+    let loaded = hallpass::load(file).ok()?;
+    let ledger = hallpass::ledger_path(file);
+    if !matches!(
+        hallpass::read_summary(&loaded, &state),
+        Err(Error::LedgerMissing(_) | Error::LedgerChanged { .. } | Error::LedgerCorrupt { .. })
+    ) {
+        return None;
+    }
+    let live = std::fs::canonicalize(&ledger).ok();
+    let copy = report.candidates.iter().find(|row| {
+        row.relation == "exact"
+            && std::fs::symlink_metadata(&row.path).is_ok_and(|m| m.file_type().is_file())
+            && live
+                .as_ref()
+                .is_none_or(|live| std::fs::canonicalize(&row.path).ok().as_ref() != Some(live))
+    })?;
+    let pass = shown(file);
+    let cp = argv(["cp", "-p", &copy.path, &shown(&ledger)])?;
+    Some(json!({
+        "level": "info",
+        "type": "restore-backup",
+        "message": safe_message(&format!(
+            "{} holds the line the witness recorded, and the ledger beside the pass is not usable. Restore that copy with `cp -p {} {}` (keep the damaged ledger first if you want it), then run `hallpass doctor {}`. Do this only because the ledger beside the pass is damaged or missing.",
+            shell_word(&copy.path),
+            shell_word(&copy.path),
+            shell_word(&shown(&ledger)),
+            shell_word(&pass),
+        )),
+        "argv": cp,
+    }))
+}
+
 /// The step for a missing ledger. When a file is still where the witness
 /// last saw the ledger, it may be that ledger, so the step is
 /// `compare-backups` on it, never an adoption. Otherwise it is the adoption

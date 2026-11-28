@@ -2291,9 +2291,27 @@ fn create_ledger(path: &Path, pass_id: &str) -> Result<(), Error> {
         .mode(0o600)
         .open(&temp)
         .map_err(|e| Error::ledger_create(path, &e))?;
+    // The header goes to the temporary file first, and the ledger exists only
+    // once the link is made: a full disk or a file size limit here records
+    // nothing, and is reported like a failed append.
+    let written =
+        crate::files::write_within_size_limit(&mut file, format!("{header}\n").as_bytes())
+            .and_then(|()| file.sync_all());
+    if let Err(e) = &written
+        && matches!(
+            e.kind(),
+            std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::StorageFull
+        )
+    {
+        let _ = fs::remove_file(&temp);
+        return Err(Error::AppendRolledBack {
+            path: path.to_path_buf(),
+            event: "ledger header".to_owned(),
+            detail: e.to_string(),
+        });
+    }
     let result = (|| {
-        crate::files::write_within_size_limit(&mut file, format!("{header}\n").as_bytes())?;
-        file.sync_all()?;
+        written?;
         match fs::hard_link(&temp, path) {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
             _ => Ok(()),

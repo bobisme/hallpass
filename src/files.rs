@@ -988,6 +988,41 @@ pub fn load_after(path: &Path, earlier: &LoadedPass) -> Result<LoadedPass, Error
     load_inner(path, Some(earlier)).map(|(loaded, _)| loaded)
 }
 
+/// The phrase that marks a problem as a file of another kind given as a pass.
+pub const NOT_A_PASS: &str = "is not a pass";
+
+/// What a file given as a pass is, when its first line says it is a ledger, a
+/// witness or a checkpoint that hallpass wrote: the message says so and
+/// names the pass file to give. `None` for anything else.
+fn not_a_pass(path: &Path, text: &str) -> Option<String> {
+    let first = text.lines().next()?;
+    let (kind, id) = if first.starts_with("{\"hallpass_ledger\"") {
+        ("the ledger", "pass_id")
+    } else if first.starts_with("{\"hallpass_witness\"") {
+        ("the witness record", "pass_id")
+    } else if first.starts_with("{\"version\"") {
+        ("a checkpoint", "pass_id")
+    } else {
+        return None;
+    };
+    let value: serde_json::Value = serde_json::from_str(first).ok()?;
+    let id = value.get(id)?.as_str()?;
+    if kind == "a checkpoint" && value.get("hash").is_none() {
+        return None;
+    }
+    let pass_file = match path.to_str().and_then(|p| p.strip_suffix(".ledger")) {
+        Some(stem) if kind == "the ledger" => format!(
+            "give the pass file, which is {}",
+            crate::display_quoted(stem)
+        ),
+        _ => "give the pass file, the TOML file the approval is written in".to_owned(),
+    };
+    Some(format!(
+        "this file is {kind} of pass {}, which {NOT_A_PASS}; do not edit it; {pass_file}",
+        crate::display_quoted(id)
+    ))
+}
+
 fn load_inner(path: &Path, prior: Option<&LoadedPass>) -> Result<(LoadedPass, Vec<u8>), Error> {
     let (bytes, file, mark) = read_pass_file(path, prior)?;
     let digest = Digest::of(&bytes);
@@ -998,6 +1033,15 @@ fn load_inner(path: &Path, prior: Option<&LoadedPass>) -> Result<(LoadedPass, Ve
             message: "the file is not UTF-8 text; save it as UTF-8".to_owned(),
         }],
     })?;
+    if let Some(message) = not_a_pass(path, text) {
+        return Err(Error::Invalid {
+            path: path.to_path_buf(),
+            problems: vec![crate::pass::Problem {
+                field: "(file)".to_owned(),
+                message,
+            }],
+        });
+    }
     let pass = Pass::parse(text).map_err(|problems| Error::Invalid {
         path: path.to_path_buf(),
         problems,

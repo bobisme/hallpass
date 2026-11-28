@@ -207,7 +207,7 @@ pub enum Error {
     /// length before the write and synced it, still under the lock, before
     /// the witness was updated: the ledger holds its previous bytes and
     /// nothing was recorded.
-    #[error("could not write the {event} to {} ({detail}); hallpass cut the ledger back to its length before the write, so nothing was recorded. Free disk space or raise the file size limit, then run the command again.", path.display())]
+    #[error("could not write the {event} to {} ({detail}); hallpass left the ledger as it was before the write, so nothing was recorded. Free disk space or raise the file size limit, then run the command again.", path.display())]
     AppendRolledBack {
         path: PathBuf,
         event: String,
@@ -261,6 +261,11 @@ fn invalid_advice(problems: &[Problem]) -> &'static str {
         .any(|p| p.message == crate::files::CHANGED_WHILE_READ)
     {
         "it changed while it was read, so run the command again once the save has finished"
+    } else if problems
+        .iter()
+        .any(|p| p.message.contains(crate::files::NOT_A_PASS))
+    {
+        "give the pass file, not this file"
     } else {
         "fix each one, then run `hallpass check`"
     }
@@ -482,6 +487,8 @@ impl Error {
                 ),
                 Some(if invalid_advice(problems).starts_with("it changed") {
                     "run the command again once the save has finished".to_owned()
+                } else if invalid_advice(problems).starts_with("give the pass") {
+                    "give the pass file (the TOML file), not this file".to_owned()
                 } else {
                     format!(
                         "fix each problem below, then run `hallpass check {}`",
@@ -504,8 +511,15 @@ impl Error {
             ),
             Self::Io { .. }
             | Self::UntrustedOwner { .. }
-            | Self::Usage(_)
-            | Self::ArchiveCorrupt(_) => return None,
+            | Self::Usage(_) => return None,
+            Self::ArchiveCorrupt(why) if why.starts_with("signature record") => (
+                "a signature record in the archive is damaged".into(),
+                Some("restore that record from a copy, or remove it and its .sig, then run `hallpass verify-approval` with --archive again".into()),
+            ),
+            Self::ArchiveCorrupt(_) => (
+                "an archive entry does not match its digest".into(),
+                Some("restore that entry from its backup (never edit it), then run the audit again".into()),
+            ),
         };
         Some((headline, next))
     }

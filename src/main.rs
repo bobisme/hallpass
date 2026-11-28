@@ -3275,9 +3275,32 @@ fn clap_usage_lines(
         .strip_prefix("error: ")
         .unwrap_or(first)
         .trim_end_matches(':');
+    let hint = (error.kind() == ErrorKind::UnknownArgument)
+        .then(|| option_after_double_dash_hint(error, args))
+        .flatten();
     std::iter::once(headline.to_owned())
+        .chain(hint)
         .chain(lines.map(str::to_owned))
         .collect()
+}
+
+/// The hint for an unexpected argument that starts with `-` and stands after
+/// a `--`: from there on every word is a FILE, so an option must go before it.
+fn option_after_double_dash_hint(error: &clap::Error, args: &[OsString]) -> Option<String> {
+    let ContextValue::String(value) = error.get(ContextKind::InvalidArg)? else {
+        return None;
+    };
+    let name = value.split('=').next().unwrap_or(value);
+    let stop = args.iter().position(|a| a.to_str() == Some("--"))?;
+    (name.starts_with('-')
+        && args[stop + 1..].iter().any(|a| {
+            a.to_str()
+                .is_some_and(|a| a.split('=').next() == Some(name))
+        }))
+    .then(|| {
+        "options go before `--`; everything after `--` is a FILE, so move the option in front of it"
+            .to_owned()
+    })
 }
 
 /// The sentence for an option whose value starts with `-`, when that option
