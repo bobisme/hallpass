@@ -291,6 +291,20 @@ Changes since commit d70c09f.
 - A repeated `--format` or `--json` is a usage error; the last one no longer
   wins silently.
 
+- **`diff --containment` proves the endpoints for every instant.** The
+  destination rules are compared whatever `--at` is, and the window and
+  revocation are judged as their own loosenings. A revision whose rules widen
+  is `expanded` (exit 2) even when `--at` is outside NEW's window; it used to
+  be `contained`. `containment.reason` `new-admits-nothing` now means only that
+  NEW is revoked, `old-closed-new-open` is no longer given, and the text line
+  reads `Endpoint scope at every instant:`. New field `containment.replayed_at`.
+- When hallpass cannot write its reply it exits 1 (or keeps its own status 2)
+  instead of panicking with exit 101, and says on stderr whether anything was
+  recorded. The reference decoder maps exit 1 with an empty stdout to
+  `reconcile`. A closed pipe on a read-only command is silent.
+- Archive damage (an archived entry that no longer matches its digest, or a
+  damaged signature record) reports `archive-corrupt` instead of `usage`.
+
 ### Added
 
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
@@ -652,3 +666,15 @@ Changes since commit d70c09f.
 - Caller references that look alike are no longer accepted as distinct new
   references (bn-s33).
 - An oversized `--n` states the limit (1 to 1000000000000) (bn-27g).
+- `diff --containment` no longer certifies a widening revision as `contained`
+  when `--at` falls outside the window (bn-3js).
+- A recorded debit, adoption, reconciliation, repair or archive whose reply
+  cannot be written says on stderr that it IS recorded, with its ledger entry
+  and caller reference (bn-1yo).
+- The moved-or-copied warning no longer promises that the other copy will be
+  refused: a copy with its own witness (another machine, account or state
+  directory) stays live until its ledger is moved away. PASS-FORMAT says
+  "move" for a machine move. When a counted last line is damaged, the repair
+  refusal, the `ledger-corrupt` advice and EVIDENCE name the last resort (move
+  the ledger aside and adopt) (bn-2bg).
+- Archive damage has its own error code (bn-3jb).
