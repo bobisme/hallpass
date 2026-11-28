@@ -101,6 +101,7 @@ pub use ledger::{
     verify_checkpoint, with_test_clock,
 };
 pub use ledger::{FinalNewline, preview_restore_final_newline, restore_final_newline};
+pub use ledger::{RehearsalTotals, adopt_guarded_rehearsal, preview_adopt_rehearsal};
 pub use ledger::{TornTail, drop_torn_tail, preview_drop_torn_tail};
 pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};

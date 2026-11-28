@@ -338,7 +338,9 @@ fn a_real_clock_debit_is_refused_on_a_rehearsal_ledger() {
     for part in [
         "is a rehearsal ledger: entry 1 was recorded under a test clock",
         "this command uses the real clock",
-        "for live work, use a pass with a new id, with no ledger yet",
+        "move the rehearsal ledger aside and keep it",
+        "--preview --drop-rehearsal",
+        "If it refuses, use a pass with a new id, with no ledger yet",
     ] {
         assert!(message.contains(part), "{part}: {message}");
     }

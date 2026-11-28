@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use hallpass::time::Duration;
-use hallpass::{Error, LedgerView, LoadedPass, StateDir, WitnessStatus};
+use hallpass::{Error, LedgerView, LoadedPass, RehearsalTotals::Drop, StateDir, WitnessStatus};
 use serde_json::{Value, json};
 
 use super::{Clock, OK, Output, REFUSED, error_output, safe_message};
@@ -384,17 +384,66 @@ fn no_witness_issue(
     }
 }
 
-/// The adoption preview, with `--carry-noted-totals` when the library
-/// refuses it without.
+/// The adoption preview, with `--carry-noted-totals`, or with
+/// `--drop-rehearsal` and a rehearsal ledger beside the pass that proves
+/// the rehearsal, when the library refuses it without.
 fn adopt_preview(file: &Path, state: &StateDir) -> Option<Vec<String>> {
     let pass = shown(file);
-    let mut words = vec!["hallpass", "adopt", &pass, "--preview"];
-    if hallpass::preview_adopt_with(file, state, false).is_err()
-        && hallpass::preview_adopt_with(file, state, true).is_ok()
-    {
-        words.push("--carry-noted-totals");
+    let mut words = vec![
+        "hallpass".to_owned(),
+        "adopt".to_owned(),
+        pass,
+        "--preview".to_owned(),
+    ];
+    if hallpass::preview_adopt_with(file, state, false).is_err() {
+        if hallpass::preview_adopt_with(file, state, true).is_ok() {
+            words.push("--carry-noted-totals".to_owned());
+        } else if let Some(proof) = rehearsal_asides(&hallpass::ledger_path(file))
+            .into_iter()
+            .find(|aside| {
+                hallpass::preview_adopt_rehearsal(file, state, false, Drop(aside.into())).is_ok()
+            })
+        {
+            words.extend(["--drop-rehearsal".to_owned(), proof]);
+        }
     }
     argv(words)
+}
+
+/// The names a rehearsal ledger moved aside from `ledger` is given:
+/// `LEDGER.rehearsal`, then `LEDGER.rehearsal-2` and on.
+fn rehearsal_asides(ledger: &Path) -> Vec<String> {
+    std::iter::once(format!("{}.rehearsal", shown(ledger)))
+        .chain((2..10).map(|n| format!("{}.rehearsal-{n}", shown(ledger))))
+        .collect()
+}
+
+/// The step for a rehearsal ledger on the real clock: when the witness
+/// shows the rehearsal, move the ledger aside, then adopt carrying nothing;
+/// otherwise a new pass id.
+fn rehearsal_step(file: &Path, state: &StateDir, ledger: &Path) -> Step {
+    let pass = shown(file);
+    if !hallpass::load(file).is_ok_and(|l| state.witness_shows_rehearsal(&l.pass.id)) {
+        return (
+            None,
+            "The witness does not show that every entry it counts was a rehearsal, so an adoption cannot leave them out: for live work, use a pass with a new id, with no ledger yet.".to_owned(),
+        );
+    }
+    let Some(aside) = rehearsal_asides(ledger)
+        .into_iter()
+        .find(|aside| std::fs::symlink_metadata(aside).is_err())
+    else {
+        return (
+            None,
+            "Move the rehearsal ledger aside to a new name, then run `hallpass adopt PASS --preview --drop-rehearsal FILE` with that file.".to_owned(),
+        );
+    };
+    (
+        argv(["mv", &shown(ledger), &aside]),
+        format!(
+            "Keep the rehearsal ledger there. Then run `hallpass adopt {pass} --preview --drop-rehearsal {aside}`: it checks that the file is the witnessed ledger and that every entry is a rehearsal, then shows an adoption that starts a live ledger carrying nothing. Adopt with `--reason \"...\" --drop-rehearsal {aside} --token TOKEN`."
+        ),
+    )
 }
 
 /// Whether this user (the effective user id) owns `path`, so that it can
@@ -614,6 +663,11 @@ fn error_issue(file: &Path, state: &StateDir, error: &Error) -> Issue {
         Error::LedgerMissing(missing) => missing_step(file, state, missing, &mut lines),
         Error::LedgerElsewhere(elsewhere) => elsewhere_step(&pass, elsewhere),
         Error::LedgerChanged { path, .. } => changed_step(file, state, path),
+        Error::LedgerClockMix {
+            path,
+            rehearsal: true,
+            ..
+        } => rehearsal_step(file, state, path),
         _ => (None, format!("Follow the advice in the message. {again}")),
     };
     Issue {
@@ -759,8 +813,28 @@ fn missing_step(
             ),
         );
     }
+    let next = adopt_preview(file, state);
+    if next
+        .as_ref()
+        .is_some_and(|w| w.iter().any(|w| w == "--drop-rehearsal"))
+    {
+        return (
+            next,
+            "The rehearsal ledger moved aside proves that every entry the witness counts was recorded under a test clock: a rehearsal, which spent nothing real. The preview shows an adoption that starts a live ledger carrying nothing, and prints its token; it records nothing.".to_owned(),
+        );
+    }
+    if hallpass::preview_adopt_with(file, state, false).is_err()
+        && hallpass::load(file).is_ok_and(|l| state.witness_shows_rehearsal(&l.pass.id))
+    {
+        return (
+            None,
+            format!(
+                "The witness marks a rehearsal. If you moved the rehearsal ledger aside, run `hallpass adopt {pass} --preview --drop-rehearsal FILE` with that file: hallpass checks that it is the witnessed ledger and that every entry is a rehearsal, then carries nothing. If there is no such file, put the ledger back, or use a pass with a new id."
+            ),
+        );
+    }
     (
-        adopt_preview(file, state),
+        next,
         "First put the ledger back beside the pass if a copy exists (restore it from a backup). If it is really lost, the preview shows what an adoption would carry and prints its token; it records nothing.".to_owned(),
     )
 }

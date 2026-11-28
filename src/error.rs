@@ -235,9 +235,15 @@ pub enum Error {
 /// The message for [`Error::LedgerClockMix`].
 fn clock_mix_message(path: &std::path::Path, seq: u64, rehearsal: bool) -> String {
     if rehearsal {
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(".rehearsal");
         format!(
-            "the ledger {} is a rehearsal ledger: entry {seq} was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), and this command uses the real clock. Rehearsal and live lines must not mix in one ledger, so nothing was recorded. To go on rehearsing, use a debug build with HALLPASS_UNSAFE_TEST_CLOCK set; for live work, use a pass with a new id, with no ledger yet.",
-            path.display()
+            "the ledger {} is a rehearsal ledger: entry {seq} was recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), and this command uses the real clock. Rehearsal and live lines must not mix in one ledger, so nothing was recorded. To go on rehearsing, use a debug build with HALLPASS_UNSAFE_TEST_CLOCK set. To go live with this pass, move the rehearsal ledger aside and keep it (`mv -n {} {}`), then run `hallpass adopt {} --preview --drop-rehearsal {}`: when that file proves that every entry the witness counts was a rehearsal, the adoption starts a live ledger that carries nothing. If it refuses, use a pass with a new id, with no ledger yet.",
+            path.display(),
+            crate::witness::quote_path(path),
+            crate::witness::quote_path(&aside),
+            crate::witness::quote_path(path.with_extension("")),
+            crate::witness::quote_path(&aside)
         )
     } else {
         format!(
@@ -638,13 +644,16 @@ pub struct MissingLedger {
     pub totals: std::collections::BTreeMap<String, u64>,
     /// When the witness was written.
     pub updated: String,
+    /// True when the witness marks a rehearsal ([`crate::Witnessed::test_clock`])
+    /// and the command uses the real clock.
+    pub rehearsal: bool,
 }
 
 impl std::fmt::Display for MissingLedger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the ledger {} for pass `{}` is missing, but the witness {} says its last logical ledger sequence was {} (spent: {}); the ledger was last seen at {} on {}. hallpass will not count from zero. Put the ledger back beside the pass (move it from there, or restore it from a backup); if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals. If the ledger was moved to another account on purpose, do not adopt or spend here: that account now holds the count. If this pass is a different approval that reused the id, give it its own id",
+            "the ledger {} for pass `{}` is missing, but the witness {} says its last logical ledger sequence was {} (spent: {}); the ledger was last seen at {} on {}. hallpass will not count from zero. Put the ledger back beside the pass (move it from there, or restore it from a backup); {}. If the ledger was moved to another account on purpose, do not adopt or spend here: that account now holds the count. If this pass is a different approval that reused the id, give it its own id",
             self.path.display(),
             self.pass_id,
             self.witness.display(),
@@ -652,7 +661,17 @@ impl std::fmt::Display for MissingLedger {
             crate::witness::totals_text(&self.totals),
             self.last_seen,
             self.updated,
-            self.pass.display()
+            if self.rehearsal {
+                format!(
+                    "if it is really lost, run `hallpass adopt {} --preview --carry-rehearsal`, which carries those totals: the witness marks them as a rehearsal's. If it is a rehearsal ledger you moved aside, use `--drop-rehearsal FILE` with that file instead: hallpass checks it, then carries nothing",
+                    self.pass.display()
+                )
+            } else {
+                format!(
+                    "if it is really lost, run `hallpass adopt {} --reason \"...\"`, which starts a new ledger that carries those totals",
+                    self.pass.display()
+                )
+            }
         )
     }
 }
@@ -1030,6 +1049,7 @@ mod tests {
                 last_seen: "/x/p.toml.ledger".into(),
                 totals: std::collections::BTreeMap::new(),
                 updated: "now".into(),
+                rehearsal: false,
             })),
         ]);
         for (live_pass, expected_exists) in

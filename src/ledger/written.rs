@@ -516,6 +516,7 @@ mod tests {
                             tail,
                             totals: BTreeMap::new(),
                             updated,
+                            test_clock: None,
                         }),
                         test_clock,
                         prev,

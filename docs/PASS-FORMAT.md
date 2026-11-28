@@ -476,7 +476,9 @@ edit it. It is JSON Lines:
 - **The witness.** Each spend also writes
   `$XDG_STATE_HOME/hallpass/<pass id>.witness` (default
   `~/.local/state/hallpass/`), one JSON object with the last sequence
-  number, the hash of the last line, the totals and the ledger's path. A
+  number, the hash of the last line, the totals and the ledger's path
+  (and `"test_clock":true` when every entry it counts is a test-clock
+  line and no adoption carried an amount: a rehearsal). A
   ledger that is gone while the witness records lines (`ledger-missing`),
   or that does not hold the witnessed line (`ledger-changed`), permits
   nothing until it is restored or adopted. Do not edit the witness either;

@@ -300,6 +300,22 @@ enum Command {
         /// refused).
         #[arg(long)]
         carry_noted_totals: bool,
+        /// Carry nothing from the witness, after `REHEARSAL_LEDGER` (the
+        /// rehearsal ledger moved aside from beside the pass) proves that
+        /// every entry the witness counts was recorded under a test clock:
+        /// the rehearsal spent nothing real. Without this or
+        /// --carry-rehearsal, an adoption on the real clock from a witness
+        /// marked as a rehearsal's is refused.
+        #[arg(
+            long,
+            value_name = "REHEARSAL_LEDGER",
+            conflicts_with = "carry_rehearsal"
+        )]
+        drop_rehearsal: Option<PathBuf>,
+        /// When the witness shows a rehearsal, carry its totals anyway, so
+        /// the rehearsal units count against the ceilings.
+        #[arg(long)]
+        carry_rehearsal: bool,
         #[command(flatten)]
         lock: LockArgs,
     },
@@ -2070,6 +2086,7 @@ fn witnessed_json(w: &hallpass::Witnessed) -> Value {
         "seq": w.seq,
         "totals": w.totals,
         "updated": w.updated,
+        "test_clock": w.test_clock,
     })
 }
 
@@ -2209,17 +2226,18 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
     }
 }
 
-fn preview_adopt(file: &Path, carry_noted: bool) -> Output {
-    match hallpass::preview_adopt_with(file, &StateDir::from_env(), carry_noted) {
+fn preview_adopt(file: &Path, carry_noted: bool, rehearsal: hallpass::RehearsalTotals) -> Output {
+    match hallpass::preview_adopt_rehearsal(file, &StateDir::from_env(), carry_noted, rehearsal) {
         Ok(p) => Output {
             code: 0,
             text: format!(
-                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}. Projected: {}. Token: {}\n",
+                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}{}. Projected: {}. Token: {}\n",
                 p.case.as_str(),
                 p.pass_id,
                 p.seq,
                 hallpass::totals_text(&p.present),
                 hallpass::totals_text(&p.carried),
+                rehearsal_units_text(p.rehearsal.as_ref(), p.previous.as_ref()),
                 if p.from_note.is_empty() {
                     String::new()
                 } else {
@@ -2231,7 +2249,7 @@ fn preview_adopt(file: &Path, carry_noted: bool) -> Output {
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
@@ -2269,6 +2287,44 @@ fn carried_from_witness(p: &hallpass::AdoptPreview) -> Option<String> {
     ))
 }
 
+/// What an adoption does with the rehearsal units of a witness that shows
+/// a rehearsal, after the carried totals; empty when it shows none.
+fn rehearsal_units_text(
+    rehearsal: Option<&hallpass::RehearsalTotals>,
+    previous: Option<&hallpass::Witnessed>,
+) -> String {
+    let units = previous.map_or_else(String::new, |w| hallpass::totals_text(&w.totals));
+    match rehearsal {
+        Some(hallpass::RehearsalTotals::Drop(file)) => format!(
+            " (the witness's {units} are rehearsal units: {} proves that every entry was recorded under a test clock, so --drop-rehearsal carries none of them)",
+            quoted(&file.display().to_string())
+        ),
+        Some(hallpass::RehearsalTotals::Carry) => format!(
+            " (rehearsal units: the witness's {units} were recorded under a test clock, and they count against the ceilings)"
+        ),
+        _ => String::new(),
+    }
+}
+
+/// `rehearsal` in the adoption replies: null when the witness shows no
+/// rehearsal, else its units and whether they were carried.
+fn rehearsal_json(
+    rehearsal: Option<&hallpass::RehearsalTotals>,
+    previous: Option<&hallpass::Witnessed>,
+) -> Value {
+    match (rehearsal, previous) {
+        (Some(choice), Some(w)) => json!({
+            "units": w.totals,
+            "carried": *choice == hallpass::RehearsalTotals::Carry,
+            "proof": match choice {
+                hallpass::RehearsalTotals::Drop(file) => Some(file.display().to_string()),
+                _ => None,
+            },
+        }),
+        _ => Value::Null,
+    }
+}
+
 /// Where carried totals came from, for the adoption lines.
 fn carried_source(from_note: &std::collections::BTreeMap<String, u64>) -> String {
     if from_note.is_empty() {
@@ -2296,15 +2352,22 @@ fn adopt(
     file: &Path,
     reason: &str,
     token: Option<&str>,
-    carry_noted: bool,
+    (carry_noted, rehearsal): (bool, hallpass::RehearsalTotals),
     clock: &Clock,
 ) -> Output {
     let state = StateDir::from_env();
-    let outcome =
-        match hallpass::adopt_guarded_with(file, reason, clock.now, &state, token, carry_noted) {
-            Ok(o) => o,
-            Err(e) => return error_output("adopt", Some(file), &e),
-        };
+    let outcome = match hallpass::adopt_guarded_rehearsal(
+        file,
+        reason,
+        clock.now,
+        &state,
+        token,
+        carry_noted,
+        rehearsal,
+    ) {
+        Ok(o) => o,
+        Err(e) => return error_output("adopt", Some(file), &e),
+    };
     let what = match outcome.case {
         hallpass::AdoptCase::LedgerMissing => "the ledger was missing; a new one was started",
         hallpass::AdoptCase::LedgerChanged => "the ledger did not match its witness",
@@ -2313,13 +2376,14 @@ fn adopt(
     };
     let a = &outcome.adoption;
     let text = format!(
-        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}. Spent now: {}.\n",
+        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}{}. Spent now: {}.\n",
         safe(&outcome.ledger.display().to_string()),
         outcome.pass_id,
         a.seq,
         quoted(&a.reason),
         carried_source(&outcome.from_note),
         hallpass::totals_text(&a.carried),
+        rehearsal_units_text(outcome.rehearsal.as_ref(), a.previous.as_ref()),
         hallpass::totals_text(&outcome.totals),
     );
     Output {
@@ -2340,6 +2404,7 @@ fn adopt(
             "carried": a.carried,
             "from_note": outcome.from_note,
             "previous": a.previous.as_ref().map(witnessed_json),
+            "rehearsal": rehearsal_json(outcome.rehearsal.as_ref(), a.previous.as_ref()),
             "totals": outcome.totals,
             "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>(),
         }),
@@ -2726,16 +2791,26 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             preview,
             token,
             carry_noted_totals,
+            drop_rehearsal,
+            carry_rehearsal,
             ..
         } => {
+            let rehearsal = drop_rehearsal.as_ref().map_or(
+                if *carry_rehearsal {
+                    hallpass::RehearsalTotals::Carry
+                } else {
+                    hallpass::RehearsalTotals::Refuse
+                },
+                |proof| hallpass::RehearsalTotals::Drop(proof.clone()),
+            );
             if *preview {
-                preview_adopt(file, *carry_noted_totals)
+                preview_adopt(file, *carry_noted_totals, rehearsal)
             } else {
                 adopt(
                     file,
                     reason.as_deref().unwrap_or_default(),
                     token.as_deref(),
-                    *carry_noted_totals,
+                    (*carry_noted_totals, rehearsal),
                     &clock,
                 )
             }

@@ -853,6 +853,7 @@ fn spend_batch_using(
             tail: Digest::of(text.as_bytes()),
             totals: projected.spent.clone(),
             updated: stamp(now),
+            test_clock: locked.parsed.rehearsal_witness(true),
         },
     )?;
     append(&mut locked, &text, "debit batch")?;
@@ -1005,6 +1006,7 @@ fn spend_using(
             tail: Digest::of(line.as_bytes()),
             totals,
             updated: stamp(now),
+            test_clock: locked.parsed.rehearsal_witness(true),
         },
     )?;
     append(&mut locked, &line, "debit")?;

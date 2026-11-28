@@ -675,6 +675,8 @@ struct Parsed {
     test_clock_seq: Option<u64>,
     /// The first entry written without a test clock, if any.
     real_clock_seq: Option<u64>,
+    /// The first adoption that carried an amount, if any.
+    carried_seq: Option<u64>,
     /// The last sequence number (0 when there are only the header).
     seq: u64,
     /// Recorded targets this scan already found valid, so that a target
@@ -699,6 +701,20 @@ impl Parsed {
 
     const fn tail(&self) -> Digest {
         self.tail
+    }
+
+    /// The witness marker for this ledger: true when it proves a rehearsal,
+    /// that is every entry was written under a test clock and no adoption
+    /// carried an amount (a carried amount may come from live work). With
+    /// `appending`, for the ledger after a line written now is appended
+    /// (an adoption that carries an amount clears it itself).
+    fn rehearsal_witness(&self, appending: bool) -> bool {
+        let marked = if appending {
+            clock::marker() == Some(true)
+        } else {
+            self.seq > 0 && self.test_clock_seq.is_some()
+        };
+        marked && self.real_clock_seq.is_none() && self.carried_seq.is_none()
     }
 
     /// The latest adoption that may have lost lines, unless a reference
@@ -832,6 +848,11 @@ struct WitnessLine {
     tail: String,
     totals: BTreeMap<String, u64>,
     updated: String,
+    /// `true` when that witness showed a rehearsal
+    /// ([`Witnessed::test_clock`]) and the adoption is on the real clock;
+    /// absent otherwise, so a rehearsal's own lines are as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test_clock: Option<bool>,
 }
 
 /// Add `n` to `counter` in `totals`, refusing a sum beyond any ceiling.
@@ -937,6 +958,7 @@ fn scan_ledger(
         adoption_count: 0,
         test_clock_seq: None,
         real_clock_seq: None,
+        carried_seq: None,
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -1205,7 +1227,11 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         None => None,
         Some(w) => {
             let tail = w.tail.parse::<Digest>().map_err(|_| bad)?;
-            if !valid_totals(&w.totals) || w.ledger.len() > 4096 || w.updated.len() > 64 {
+            if !valid_totals(&w.totals)
+                || w.ledger.len() > 4096
+                || w.updated.len() > 64
+                || w.test_clock == Some(false)
+            {
                 return Err(bad);
             }
             Some(Witnessed {
@@ -1214,16 +1240,24 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
                 tail,
                 totals: w.totals,
                 updated: w.updated,
+                test_clock: w.test_clock == Some(true),
             })
         }
     };
     parsed.last_time = Some(time);
     parsed.adoption_count += 1;
+    if !line.carried.is_empty() {
+        parsed.carried_seq.get_or_insert(line.seq);
+    }
     for (counter, n) in &line.carried {
         add(&mut parsed.tally.spent, counter, *n)
             .ok_or("the recorded amounts add up beyond any ceiling")?;
     }
-    if reference::may_lose_references(&line.carried, previous.as_ref()) {
+    if reference::may_lose_references(
+        &line.carried,
+        previous.as_ref(),
+        line.test_clock != Some(true),
+    ) {
         parsed.lossy_adoption = Some(line.seq);
     }
     Ok(Adoption {
@@ -1481,6 +1515,8 @@ fn missing_ledger(
             last_seen: w.ledger.clone(),
             totals: w.totals.clone(),
             updated: w.updated.clone(),
+            // Under a test clock, an adoption carries a rehearsal's units.
+            rehearsal: w.test_clock && clock::marker().is_none(),
         })),
     }
 }
@@ -1818,6 +1854,7 @@ fn visit_view(
         adoption_count: 0,
         test_clock_seq: None,
         real_clock_seq: None,
+        carried_seq: None,
         seq: 0,
         valid_targets: Vec::new(),
         last_digest: None,
@@ -2243,7 +2280,8 @@ fn lock_for_writing(
     lock_timeout: Option<std::time::Duration>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
-    let adopting = adopting.then_some(false);
+    let flags = AdoptFlags::default();
+    let adopting = adopting.then_some(&flags);
     lock_for_writing_inner(pass_path, state, adopting, guard, lock_timeout, None, visit)
 }
 
@@ -2257,7 +2295,8 @@ fn lock_for_writing_notifying(
     on_wait: Option<fn(&crate::files::LockWait)>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
-    let adopting = adopting.then_some(false);
+    let flags = AdoptFlags::default();
+    let adopting = adopting.then_some(&flags);
     lock_for_writing_inner(
         pass_path,
         state,
@@ -2269,13 +2308,13 @@ fn lock_for_writing_notifying(
     )
 }
 
-/// `adopting` is `Some(carry_noted)` for an adoption (see
-/// [`adopt_guarded_with`]), `None` for every other writer.
+/// `adopting` is `Some(flags)` for an adoption (see
+/// [`adopt_guarded_rehearsal`]), `None` for every other writer.
 #[allow(clippy::too_many_arguments)]
 fn lock_for_writing_inner(
     pass_path: &Path,
     state: &StateDir,
-    adopting: Option<bool>,
+    adopting: Option<&AdoptFlags>,
     guard: Option<&str>,
     lock_timeout: Option<std::time::Duration>,
     on_wait: Option<fn(&crate::files::LockWait)>,
@@ -2290,18 +2329,22 @@ fn lock_for_writing_inner(
     let wait = LockBudget::requested(lock_timeout, on_wait);
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
-    if let Some(carry_noted) = adopting {
+    if let Some(flags) = adopting {
         // Before anything is created: a refused adoption leaves no ledger.
-        noted_totals(state, &id, witness.as_ref(), carry_noted, pass_path)?;
+        let raised = noted_totals(state, &id, witness.as_ref(), flags.carry_noted, pass_path)?;
+        if !exists(&ledger_path(pass_path))? {
+            rehearsal_totals(witness.as_ref(), flags, raised.is_some(), pass_path, &id)?;
+        }
     }
     if let Some(expected) = guard {
-        let carry_noted = adopting.unwrap_or(false);
-        let current = preview_adopt_with(pass_path, state, carry_noted).map_err(|e| match e {
-            // The preview's own refusal, so that both say the same.
-            Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
-            e @ (Error::WitnessUnavailable { .. } | Error::LockTimeout { .. }) => e,
-            _ => stale_token(pass_path),
-        })?;
+        let flags = adopting.cloned().unwrap_or_default();
+        let current = preview_adopt_rehearsal(pass_path, state, flags.carry_noted, flags.rehearsal)
+            .map_err(|e| match e {
+                // The preview's own refusal, so that both say the same.
+                Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
+                e @ (Error::WitnessUnavailable { .. } | Error::LockTimeout { .. }) => e,
+                _ => stale_token(pass_path),
+            })?;
         if current.token != expected {
             return Err(stale_token(pass_path));
         }
@@ -2554,6 +2597,7 @@ pub fn spend_with_clock_in(
             tail: Digest::of(line.as_bytes()),
             totals,
             updated: stamp(now),
+            test_clock: locked.parsed.rehearsal_witness(true),
         },
     )?;
     append(&mut locked, &line, "spend")?;
@@ -2901,6 +2945,7 @@ fn prepare_witness(
                     .map(stamp)
                     .or_else(|| locked.witness.as_ref().map(|w| w.updated.clone()))
                     .unwrap_or_else(|| stamp(OffsetDateTime::UNIX_EPOCH)),
+                test_clock: locked.parsed.rehearsal_witness(false),
             },
         )?;
     }
@@ -2927,6 +2972,170 @@ pub struct AdoptOutcome {
     /// witness (with `--carry-noted-totals`), and that noted total: the
     /// verified total was higher than the witness's. Empty otherwise.
     pub from_note: BTreeMap<String, u64>,
+    /// When the witness proved a rehearsal ([`Witnessed::test_clock`]):
+    /// whether its totals, rehearsal units, were dropped or carried.
+    /// `None` when it proved none, and under a test clock without a choice
+    /// (a rehearsal adopting its own units).
+    pub rehearsal: Option<RehearsalTotals>,
+}
+
+/// What an adoption does with the totals of a witness that may count a
+/// rehearsal.
+///
+/// A witness written for a ledger of test-clock lines only is marked
+/// ([`Witnessed::test_clock`]). The mark is a hint: it makes an adoption on
+/// the real clock refuse by default, but it never lowers a count. Only
+/// [`RehearsalTotals::Drop`] lowers one, and only after the rehearsal
+/// ledger it names proves the rehearsal (see [`adopt_guarded_rehearsal`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RehearsalTotals {
+    /// On the real clock, refuse an adoption from a marked witness and say
+    /// what the choices do; otherwise adopt as before.
+    #[default]
+    Refuse,
+    /// Carry nothing from the witness, when the rehearsal ledger at this
+    /// path, moved aside from beside the pass, proves that every unit the
+    /// witness counts was a rehearsal: the rehearsal spent nothing real.
+    Drop(PathBuf),
+    /// Carry them: the rehearsal units count against the ceilings.
+    Carry,
+}
+
+impl RehearsalTotals {
+    /// The flag of `hallpass adopt` that chooses it, if any.
+    #[must_use]
+    pub const fn flag(&self) -> Option<&'static str> {
+        match self {
+            Self::Refuse => None,
+            Self::Drop(_) => Some("--drop-rehearsal"),
+            Self::Carry => Some("--carry-rehearsal"),
+        }
+    }
+
+    const fn drops(this: Option<&Self>) -> bool {
+        matches!(this, Some(Self::Drop(_)))
+    }
+}
+
+/// The adoption choices: see [`adopt_guarded_rehearsal`].
+#[derive(Clone, Debug, Default)]
+struct AdoptFlags {
+    carry_noted: bool,
+    rehearsal: RehearsalTotals,
+}
+
+/// What this adoption does with the totals of `witness` as a rehearsal's,
+/// or `None` when it treats them as any totals; the refusals of
+/// [`adopt_guarded_rehearsal`].
+fn rehearsal_totals(
+    witness: Option<&Witnessed>,
+    flags: &AdoptFlags,
+    noted: bool,
+    pass_path: &Path,
+    id: &str,
+) -> Result<Option<RehearsalTotals>, Error> {
+    let pass = crate::witness::quote_path(pass_path);
+    match &flags.rehearsal {
+        RehearsalTotals::Drop(file) => {
+            let Some(w) = witness.filter(|w| w.seq > 0) else {
+                return Err(Error::Usage(format!(
+                    "--drop-rehearsal: there is no witness of any entry for pass `{id}`, so there is nothing to drop; nothing was recorded. Run `hallpass adopt {pass} --preview` without it"
+                )));
+            };
+            if noted {
+                return Err(Error::Usage(format!(
+                    "--drop-rehearsal: the witness of pass `{id}` was found damaged, so it cannot show which entries it counts; nothing was recorded. Run `hallpass adopt {pass} --preview --carry-noted-totals` without --drop-rehearsal"
+                )));
+            }
+            prove_rehearsal(file, &ledger_path(pass_path), w, id)?;
+            Ok(Some(flags.rehearsal.clone()))
+        }
+        RehearsalTotals::Carry => {
+            if witness.is_some_and(|w| w.test_clock) {
+                return Ok(Some(RehearsalTotals::Carry));
+            }
+            Err(Error::Usage(format!(
+                "--carry-rehearsal: the witness of pass `{id}` does not show a rehearsal (hallpass marks a witness when every entry it counts was recorded under a test clock), so its totals are carried as they are; nothing was recorded. Run `hallpass adopt {pass} --preview` without it"
+            )))
+        }
+        RehearsalTotals::Refuse => {
+            let Some(w) = witness.filter(|w| w.test_clock) else {
+                return Ok(None);
+            };
+            if w.totals.values().all(|n| *n == 0) || clock::marker().is_some() {
+                return Ok(None);
+            }
+            Err(Error::Usage(format!(
+                "the witness of pass `{id}` marks a rehearsal: it was written for a ledger whose entries, to sequence {}, were all recorded under a test clock (HALLPASS_UNSAFE_TEST_CLOCK), so its totals (spent: {}) look like rehearsal units. This adoption uses the real clock and would carry them into the live count, so nothing was recorded. If you moved the rehearsal ledger aside, run `hallpass adopt {pass} --preview --drop-rehearsal REHEARSAL_LEDGER` with that file: hallpass checks that it is the witnessed ledger and that every entry is a rehearsal, then carries nothing. To count the units against the ceilings, use --carry-rehearsal instead",
+                w.seq,
+                totals_text(&w.totals),
+            )))
+        }
+    }
+}
+
+/// Check that `file`, given with `--drop-rehearsal`, proves that `w`
+/// counts only a rehearsal: it is a ledger of pass `id`, opened under the
+/// rules for any ledger, other than the one beside the pass (`ledger`), its
+/// whole chain verifies, it ends with the line the witness recorded, every
+/// entry is a test-clock line, no adoption in it carried an amount, and its
+/// totals are the witness's. Any doubt refuses: the mark alone is not proof.
+fn prove_rehearsal(file: &Path, ledger: &Path, w: &Witnessed, id: &str) -> Result<(), Error> {
+    let refuse = |why: String| {
+        Error::Usage(format!(
+            "--drop-rehearsal: {} does not prove that the witness of pass `{id}` counts only a rehearsal: {why}. Nothing was recorded. Give the rehearsal ledger that was moved aside from beside the pass, unchanged; if there is none, the totals stay counted: adopt without --drop-rehearsal, or use a pass with a new id",
+            crate::witness::quote_path(file)
+        ))
+    };
+    if let (Ok(a), Ok(b)) = (fs::canonicalize(file), fs::canonicalize(ledger))
+        && a == b
+    {
+        return Err(refuse(
+            "it is the ledger beside the pass, not one moved aside".to_owned(),
+        ));
+    }
+    let parsed = match inspect_candidate(file, Some(w.seq)).and_then(|p| p.for_pass(file, id)) {
+        Ok(parsed) => parsed,
+        Err(e @ Error::LockTimeout { .. }) => return Err(e),
+        Err(e) => {
+            return Err(refuse(format!(
+                "it is not an intact ledger of this pass ({e})"
+            )));
+        }
+    };
+    if parsed.seq != w.seq || parsed.tail() != w.tail {
+        let why = if parsed.prefix == Some((w.seq, w.tail)) {
+            format!(
+                "it holds entries after sequence {}, the last one the witness recorded",
+                w.seq
+            )
+        } else {
+            format!(
+                "it does not end with the line the witness recorded (sequence {}), so it is not the witnessed ledger",
+                w.seq
+            )
+        };
+        return Err(refuse(why));
+    }
+    if let Some(seq) = parsed.real_clock_seq {
+        return Err(refuse(format!(
+            "entry {seq} was recorded at the real time, so it may be live work"
+        )));
+    }
+    if let Some(seq) = parsed.carried_seq {
+        return Err(refuse(format!(
+            "the adoption at entry {seq} carried an amount, which may be live work"
+        )));
+    }
+    if parsed.test_clock_seq.is_none() || !same_totals(&parsed.tally.spent, &w.totals) {
+        return Err(refuse(format!(
+            "its totals (spent: {}) are not the witness's (spent: {})",
+            totals_text(&parsed.tally.spent),
+            totals_text(&w.totals)
+        )));
+    }
+    Ok(())
 }
 
 /// Read-only adoption snapshot and its guarded-apply token.
@@ -2956,6 +3165,8 @@ pub struct AdoptPreview {
     /// the carried totals may be too low. `None` otherwise (a file it could
     /// not read refuses the adoption instead).
     pub last_seen_unchecked: Option<(PathBuf, String)>,
+    /// As [`AdoptOutcome::rehearsal`].
+    pub rehearsal: Option<RehearsalTotals>,
 }
 
 impl AdoptPreview {
@@ -2966,7 +3177,11 @@ impl AdoptPreview {
     /// for [`Adoption::makes_references_inconclusive`].
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
-        reference::may_lose_references(&self.carried, self.previous.as_ref())
+        reference::may_lose_references(
+            &self.carried,
+            self.previous.as_ref(),
+            clock::marker().is_none(),
+        )
     }
 }
 
@@ -2979,7 +3194,7 @@ impl Adoption {
     /// ([`crate::reconcile_references`]) names it or a later such adoption.
     #[must_use]
     pub fn makes_references_inconclusive(&self) -> bool {
-        reference::may_lose_references(&self.carried, self.previous.as_ref())
+        reference::may_lose_references(&self.carried, self.previous.as_ref(), !self.test_clock)
     }
 }
 
@@ -3003,6 +3218,39 @@ fn carry(present: &BTreeMap<String, u64>, witness: Option<&Witnessed>) -> BTreeM
         }
     }
     carried
+}
+
+/// The previous witness as the adoption line records it, and whether it
+/// records it as a rehearsal's: only when the rehearsal ledger proved it
+/// (`Drop`), on the real clock. The witness's own mark is a hint only.
+fn recorded_previous(
+    witness: Option<Witnessed>,
+    rehearsal: Option<&RehearsalTotals>,
+) -> (bool, Option<Witnessed>) {
+    let proved = RehearsalTotals::drops(rehearsal) && clock::marker().is_none();
+    let previous = witness.map(|mut w| {
+        w.test_clock = proved;
+        w
+    });
+    (proved, previous)
+}
+
+/// What an adoption carries over `present` from `witness` (or `raised`, the
+/// witness with noted totals), and which counters the note raised: nothing
+/// when it drops a rehearsal's units.
+fn adoption_carry(
+    present: &BTreeMap<String, u64>,
+    raised: Option<&Witnessed>,
+    witness: Option<&Witnessed>,
+    rehearsal: Option<&RehearsalTotals>,
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    if RehearsalTotals::drops(rehearsal) {
+        return (BTreeMap::new(), BTreeMap::new());
+    }
+    (
+        carry(present, raised.or(witness)),
+        raised_counters(raised, witness),
+    )
 }
 
 /// The counters `raised` (the witness with noted totals) carries above the
@@ -3091,6 +3339,7 @@ fn adoption_token(
         tail: w.tail.to_string(),
         totals: w.totals.clone(),
         updated: w.updated.clone(),
+        test_clock: (w.test_clock && clock::marker().is_none()).then_some(true),
     });
     let input = serde_json::json!({"version": 1, "pass_id": loaded.pass.id, "pass_digest": loaded.digest.to_string(), "ledger": ledger_identity(path), "exists": parsed.is_some(), "seq": parsed.map_or(0, |p| p.seq), "tail": parsed.map(|p| p.tail.to_string()), "witness": w });
     format!("v1:{}", Digest::of(input.to_string().as_bytes()))
@@ -3139,6 +3388,27 @@ pub fn preview_adopt_with(
     state: &StateDir,
     carry_noted: bool,
 ) -> Result<AdoptPreview, Error> {
+    preview_adopt_rehearsal(pass_path, state, carry_noted, RehearsalTotals::Refuse)
+}
+
+/// [`preview_adopt_with`], and with `rehearsal` the preview of an adoption
+/// that drops or carries the totals of a witness that proves a rehearsal
+/// (see [`adopt_guarded_rehearsal`]).
+///
+/// # Errors
+/// As [`preview_adopt_with`]; on the real clock, a witness that proves a
+/// rehearsal with [`RehearsalTotals::Refuse`] ([`Error::Usage`]); another
+/// choice when the witness proves no rehearsal ([`Error::Usage`]).
+pub fn preview_adopt_rehearsal(
+    pass_path: &Path,
+    state: &StateDir,
+    carry_noted: bool,
+    rehearsal: RehearsalTotals,
+) -> Result<AdoptPreview, Error> {
+    let flags = AdoptFlags {
+        carry_noted,
+        rehearsal,
+    };
     let loaded = load(pass_path)?;
     let id = &loaded.pass.id;
     let path = ledger_path(pass_path);
@@ -3191,8 +3461,15 @@ pub fn preview_adopt_with(
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
     let raised = noted_totals(state, id, witness.as_ref(), carry_noted, pass_path)?;
-    let from_note = raised_counters(raised.as_ref(), witness.as_ref());
-    let carried = carry(&present, raised.as_ref().or(witness.as_ref()));
+    let rehearsal = rehearsal_totals(witness.as_ref(), &flags, raised.is_some(), pass_path, id)?;
+    let (carried, from_note) = adoption_carry(
+        &present,
+        raised.as_ref(),
+        witness.as_ref(),
+        rehearsal.as_ref(),
+    );
+    // As the adoption line will record it: a proved rehearsal, on the
+    // real clock.
     let mut totals = present.clone();
     for (counter, n) in &carried {
         let _ = add(&mut totals, counter, *n);
@@ -3209,6 +3486,7 @@ pub fn preview_adopt_with(
         }
         _ => None,
     };
+    let (_, previous) = recorded_previous(witness, rehearsal.as_ref());
     Ok(AdoptPreview {
         case,
         pass_id: id.clone(),
@@ -3216,10 +3494,11 @@ pub fn preview_adopt_with(
         present,
         carried,
         totals,
-        previous: witness,
+        previous,
         token,
         from_note,
         last_seen_unchecked,
+        rehearsal,
     })
 }
 
@@ -3239,6 +3518,8 @@ fn check_projected_witness_size(
             tail: Digest::of(b""),
             totals: totals.clone(),
             updated: stamp(OffsetDateTime::UNIX_EPOCH),
+            // The longer witness, when a write now may mark it.
+            test_clock: clock::marker().is_some(),
         },
     )?;
     Ok(())
@@ -3343,12 +3624,58 @@ pub fn adopt_guarded_with(
     token: Option<&str>,
     carry_noted: bool,
 ) -> Result<AdoptOutcome, Error> {
+    adopt_guarded_rehearsal(
+        pass_path,
+        reason,
+        now,
+        state,
+        token,
+        carry_noted,
+        RehearsalTotals::Refuse,
+    )
+}
+
+/// [`adopt_guarded_with`], choosing what to do with the totals of a witness
+/// that may count a rehearsal.
+///
+/// A witness marked as a rehearsal's ([`Witnessed::test_clock`]) is a
+/// hint. On the real clock, [`RehearsalTotals::Refuse`] refuses an
+/// adoption from it: carrying rehearsal units would spend live budget on
+/// work that was never sent. [`RehearsalTotals::Carry`] carries them as
+/// before. [`RehearsalTotals::Drop`] carries nothing from the witness, only
+/// when the file it names proves the rehearsal: a ledger of this pass,
+/// other than the one beside the pass, that verifies whole, ends with the
+/// line the witness recorded, holds only test-clock entries and no
+/// adoption that carried an amount, and has the witness's totals. The
+/// mark is not needed for `Drop`, and never enough. Under
+/// [`crate::with_test_clock`], `Refuse` carries the totals as any. A
+/// witness without the mark is adopted as by [`adopt_guarded_with`].
+///
+/// # Errors
+/// As [`adopt_guarded_with`]; the refusals above, and a `Drop` file that
+/// does not prove the rehearsal, naming what failed ([`Error::Usage`]);
+/// `Drop` with `carry_noted` ([`Error::Usage`]: a witness found damaged
+/// proves nothing).
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_guarded_rehearsal(
+    pass_path: &Path,
+    reason: &str,
+    now: OffsetDateTime,
+    state: &StateDir,
+    token: Option<&str>,
+    carry_noted: bool,
+    rehearsal: RehearsalTotals,
+) -> Result<AdoptOutcome, Error> {
+    let flags = AdoptFlags {
+        carry_noted,
+        rehearsal,
+    };
     check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     let mut locked = lock_for_writing_inner(
         pass_path,
         state,
-        Some(carry_noted),
+        Some(&flags),
         token,
         None,
         None,
@@ -3358,11 +3685,20 @@ pub fn adopt_guarded_with(
     let here = ledger_identity(&locked.path);
     let case = locked_adopt_case(pass_path, &locked, state, &id)?;
     let raised = noted_totals(state, &id, locked.witness.as_ref(), carry_noted, pass_path)?;
-    let from_note = raised_counters(raised.as_ref(), locked.witness.as_ref());
-    let carried = carry(
+    let rehearsal = rehearsal_totals(
+        locked.witness.as_ref(),
+        &flags,
+        raised.is_some(),
+        pass_path,
+        &id,
+    )?;
+    let (carried, from_note) = adoption_carry(
         &locked.parsed.tally.spent,
-        raised.as_ref().or(locked.witness.as_ref()),
+        raised.as_ref(),
+        locked.witness.as_ref(),
+        rehearsal.as_ref(),
     );
+    let (proved, previous) = recorded_previous(locked.witness.clone(), rehearsal.as_ref());
     let line = AdoptLine {
         seq: locked.parsed.seq + 1,
         time: rfc3339(now),
@@ -3376,6 +3712,7 @@ pub fn adopt_guarded_with(
             tail: w.tail.to_string(),
             totals: w.totals.clone(),
             updated: w.updated.clone(),
+            test_clock: proved.then_some(true),
         }),
         test_clock: clock::marker(),
         prev: locked.parsed.tail().to_string(),
@@ -3393,6 +3730,7 @@ pub fn adopt_guarded_with(
             tail: Digest::of(text.as_bytes()),
             totals: totals.clone(),
             updated: stamp(now),
+            test_clock: carried.is_empty() && locked.parsed.rehearsal_witness(true),
         },
     )?;
     append(&mut locked, &text, "adoption")?;
@@ -3416,7 +3754,7 @@ pub fn adopt_guarded_with(
             reason: reason.to_owned(),
             digest: locked.loaded.digest,
             carried,
-            previous: locked.witness.clone(),
+            previous,
             test_clock: line.test_clock == Some(true),
         },
         ledger: locked.path.clone(),
@@ -3424,6 +3762,7 @@ pub fn adopt_guarded_with(
         pass_id: id,
         totals,
         from_note,
+        rehearsal,
     })
 }
 
@@ -3649,6 +3988,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn witness_size_refusal_leaves_accounting_records_untouched() {
         const CAP: usize = 1024 * 1024;
         const NEXT_COUNTER: &str = "abcdefghijklmnopqrstuvwxyzabcdef";
@@ -3666,6 +4006,7 @@ mod tests {
             tail: Digest::of(b"placeholder"),
             totals: BTreeMap::new(),
             updated: stamp(NOW),
+            test_clock: false,
         };
         state.write(id, &witness).expect("empty test witness");
         let overhead = fs::read(&witness_path).expect("sample").len();

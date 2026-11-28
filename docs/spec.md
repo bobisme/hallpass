@@ -588,7 +588,10 @@ keeps every line (see "Caller references and receipts"). A reference
 reconciliation (`reconcile-references`, below) ends that refusal. Carried amounts
 count as spent. An adoption never lowers a count below
 what the witness recorded; there is no reset to zero (a new budget is a
-raised ceiling in the pass, or a new pass). Then the witness records the
+raised ceiling in the pass, or a new pass). The one exception is a witness
+that counts only a rehearsal, adopted with `--drop-rehearsal FILE`
+when the rehearsal ledger FILE proves it (see
+[Test-clock lines](#test-clock-lines)): a rehearsal spent nothing real. Then the witness records the
 new last line. The reason follows the note rules and is required.
 (Reading a ledger accepts a recorded reason under the earlier rule, which
 refused line separators and bidirectional controls but not the other
@@ -1496,7 +1499,8 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `test_clock` true for a line written under the test clock),
   `adoptions` (list of `{seq, time, reason, digest, carried, previous,
   may_have_lost_references, test_clock}`; `carried` is an object of counter name to
-  amount, `previous` is `{ledger, seq, totals, updated}` or null,
+  amount, `previous` is `{ledger, seq, totals, updated, test_clock}` or null
+  (`test_clock` true when that witness showed a rehearsal),
   `may_have_lost_references` is true for an adoption that records a
   previous witness of at least one line or carries an amount),
   `reference_reconciliations` (list of `{seq, time, adoption, reason,
@@ -1515,9 +1519,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
 - **adopt**: `ledger`, `pass_id`, `digest`, `now`, `test_clock`, `case`
   (`ledger-missing`, `ledger-changed` or `no-witness`), `created` (a new
   ledger was started), `seq`, `reason`, `carried` and `totals` (objects of
-  counter name to amount), `previous` (as in `ledger`, or null). A preview
+  counter name to amount), `previous` (as in `ledger`, or null),
+  `rehearsal` (null, or `{units, carried, proof}`: see
+  [Test-clock lines](#test-clock-lines)). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
-  `totals`, `previous` and `token`.
+  `totals`, `previous`, `rehearsal` and `token`.
 - **repair**: `result` (`preview` or `repaired`), `ledger`, `pass_id`,
   `seq` (the last complete line, kept), `witness_seq`, `kept_bytes`,
   `removed_bytes`, `token` and `copy` (the file that holds the removed
@@ -1651,6 +1657,49 @@ library caller marks its own lines with `with_test_clock`.
 Both audits also report a line whose time is more than 5 minutes later than
 the audit's own clock as `entry-in-future`; smaller skew between hosts is
 allowed.
+
+The witness shows a rehearsal too: when every entry of the ledger it
+records was written under the test clock and no adoption in it carried an
+amount, it has `"test_clock":true` (hallpass never writes `false`, and a
+witness with it is damaged). A witness without the field reads as before.
+A hallpass from before the field calls such a witness damaged.
+
+A rehearsal run by mistake on the live pass has a way back. A spend on the
+real clock fails `ledger-clock-mix`, and the message and `doctor` name the
+recovery: move the rehearsal ledger aside and keep it (`mv -n
+PASS.ledger PASS.ledger.rehearsal`), then `adopt --preview
+--drop-rehearsal PASS.ledger.rehearsal`. The mark is only a hint: it
+makes an adoption on the real clock from that witness (`ledger-missing` or
+`ledger-changed`) a usage error that names the units as rehearsal units,
+and it chooses the words of the advice and of `doctor`. It never lowers a
+count. The adoption must choose:
+
+- `--drop-rehearsal FILE` carries nothing from the witness, once FILE
+  proves the rehearsal. hallpass opens FILE under the rules for any ledger
+  (not a link, a regular file, private), verifies its whole chain, and
+  checks that it is a ledger of this pass id other than the one beside the
+  pass, that its last line has the sequence number and hash the witness
+  recorded, that every entry is a test-clock line, that no adoption in it
+  carried an amount (which may be live work), and that its totals are the
+  witness's. Any failure is a usage error that names it, and nothing is
+  recorded; there is no fallback to the mark. This is sound because a
+  real-clock write is never added to a ledger of test-clock lines: the
+  witnessed count is the rehearsal's, and it spent nothing real. The
+  adoption line records the witness with `"test_clock":true`, and it does
+  not make guarded spends `reference-inconclusive`: rehearsal references
+  are not live ones. A hallpass from before this field fails closed
+  (`ledger-corrupt`) on that line.
+- `--carry-rehearsal` carries the units as before, and the reply names
+  them as rehearsal units. It is a usage error when the witness has no
+  mark.
+
+`--drop-rehearsal` is refused with `--carry-noted-totals`, since a witness
+found damaged proves nothing. Without the rehearsal ledger, the totals stay
+counted: adopt without the flag, or use a pass with a new id. Under the
+test clock an adoption carries a rehearsal's units without a flag, as any
+totals. The replies have `rehearsal`: null, or `{units, carried, proof}`
+with the witness's totals, whether they were carried, and the file that
+proved the rehearsal (null with `--carry-rehearsal`).
 
 Ledgers written before the marker existed have no marked lines and read as
 before. A test-clock line written by such a version cannot be told from a

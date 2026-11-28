@@ -212,18 +212,28 @@ pub(super) struct ReferenceMatches<'a> {
 /// record a previous witness of at least one line that the adopted ledger
 /// does not hold (that is what made them adoptable), so references on the
 /// witnessed lines may be gone even when nothing is carried. A carried
-/// amount always stands for lines this ledger does not hold.
+/// amount always stands for lines this ledger does not hold. A previous
+/// witness that showed a rehearsal stands for rehearsal lines: their
+/// references were never live ones, so an adoption that carries nothing
+/// from it (`--drop-rehearsal`) loses none.
 fn may_have_lost_references(adoption: &Adoption) -> bool {
-    may_lose_references(&adoption.carried, adoption.previous.as_ref())
+    may_lose_references(
+        &adoption.carried,
+        adoption.previous.as_ref(),
+        !adoption.test_clock,
+    )
 }
 
 /// [`may_have_lost_references`] for an adoption not yet recorded, from what
-/// it would carry and the witness it would record as previous.
+/// it would carry and the witness it would record as previous; `live` when
+/// the adoption is written on the real clock.
 pub(super) fn may_lose_references(
     carried: &std::collections::BTreeMap<String, u64>,
     previous: Option<&crate::Witnessed>,
+    live: bool,
 ) -> bool {
-    !carried.is_empty() || previous.is_some_and(|w| w.seq > 0)
+    // The lines of a rehearsal hold rehearsal references, never live ones.
+    !carried.is_empty() || previous.is_some_and(|w| w.seq > 0 && !(live && w.test_clock))
 }
 
 impl<'a> ReferenceMatches<'a> {
@@ -498,6 +508,7 @@ pub fn reconcile_references(
             tail: Digest::of(text.as_bytes()),
             totals: locked.parsed.tally.spent.clone(),
             updated: stamp(now),
+            test_clock: locked.parsed.rehearsal_witness(true),
         },
     )?;
     append(&mut locked, &text, "reference reconciliation")?;

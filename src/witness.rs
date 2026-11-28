@@ -318,7 +318,7 @@ impl StateDir {
             return Err(damaged());
         }
         let tail = record.tail.parse::<Digest>().map_err(|_| damaged())?;
-        if !valid_totals(&record.totals) {
+        if !valid_totals(&record.totals) || record.test_clock == Some(false) {
             return Err(damaged());
         }
         Ok(Some(Witnessed {
@@ -327,6 +327,7 @@ impl StateDir {
             tail,
             totals: record.totals,
             updated: record.updated,
+            test_clock: record.test_clock == Some(true),
         }))
     }
 
@@ -339,6 +340,18 @@ impl StateDir {
             .ok()
             .flatten()
             .map(|w| PathBuf::from(w.ledger))
+    }
+
+    /// Whether the witness for `pass_id` shows a rehearsal
+    /// ([`Witnessed::test_clock`]): every entry it counts was recorded
+    /// under a test clock. False when there is none or it cannot be read.
+    /// It reads only.
+    #[must_use]
+    pub fn witness_shows_rehearsal(&self, pass_id: &str) -> bool {
+        self.read(pass_id)
+            .ok()
+            .flatten()
+            .is_some_and(|w| w.test_clock)
     }
 
     /// A witness that cannot be trusted, and why: the same error, and the
@@ -385,6 +398,7 @@ impl StateDir {
             tail: witness.tail.to_string(),
             totals: witness.totals.clone(),
             updated: witness.updated.clone(),
+            test_clock: witness.test_clock.then_some(true),
         })
         .map_err(|e| self.unavailable(pass_id, e.to_string()))?;
         text.push('\n');
@@ -736,6 +750,10 @@ struct WitnessFile {
     tail: String,
     totals: BTreeMap<String, u64>,
     updated: String,
+    /// `true` when every entry the witness counts was written under a test
+    /// clock; absent otherwise (hallpass never writes `false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test_clock: Option<bool>,
 }
 
 /// What the witness recorded about a ledger the last time hallpass wrote
@@ -753,6 +771,14 @@ pub struct Witnessed {
     pub totals: BTreeMap<String, u64>,
     /// When it was written (UTC, `YYYY-MM-DDTHH:MM:SSZ`).
     pub updated: String,
+    /// True when the witness proves a rehearsal: every entry of the ledger
+    /// it records was written under a test clock
+    /// ([`crate::with_test_clock`]), and no adoption in it carried an
+    /// amount. An adoption on the real clock then refuses to carry its
+    /// totals unless told what to do with them
+    /// ([`crate::RehearsalTotals`]). A witness from before this marker
+    /// reads as false.
+    pub test_clock: bool,
 }
 
 /// Whether two sets of totals count the same: the same counters with the
@@ -853,6 +879,7 @@ mod tests {
             tail: Digest::of(b"line"),
             totals: BTreeMap::from([("calls".to_owned(), 3)]),
             updated: "2026-11-20T09:00:00Z".to_owned(),
+            test_clock: false,
         };
         state.write("p1", &w).expect("write");
         drop(lock);

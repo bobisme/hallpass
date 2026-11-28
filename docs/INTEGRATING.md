@@ -285,6 +285,16 @@ what a real disk gives. All the numbers, with the setup, are in
   (`ledger-clock-mix`), and audits never call a marked ledger `complete`.
   A Rust caller that passes its own clock marks its lines with
   `hallpass::with_test_clock`.
+  A rehearsal run by mistake on the live pass is not lost work: move the
+  rehearsal ledger aside (`mv -n PASS.ledger PASS.ledger.rehearsal`), then
+  `hallpass adopt PASS --preview --drop-rehearsal PASS.ledger.rehearsal`.
+  hallpass verifies that file: it must be the witnessed ledger, and every
+  entry in it a test-clock line. Then the adoption starts a live ledger
+  that carries nothing. Without a flag such an adoption is refused, so
+  rehearsal units never reach the live count by accident;
+  `--carry-rehearsal` counts them on purpose. If the file does not prove
+  the rehearsal, use a pass with a new id. In Rust, use
+  `adopt_guarded_rehearsal` with `RehearsalTotals::Drop(path)`.
   A caller in rehearsal mode needs the opposite: it accepts `true` and
   refuses `false`, before it runs the work. A release build ignores the
   variable, so a rehearsal against it would debit live. Such a build says
