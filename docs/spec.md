@@ -831,8 +831,8 @@ is still reported in that candidate's row.
 | the path of a file a command reads is not a regular file: a FIFO, a device, a socket or a directory (also if swapped in while opening; the open never waits for a FIFO's writer) | `not-regular-file` |
 | the pass is larger than 1 MiB | `too-large` |
 | `spend` (not `--dry-run`), `adopt` (not `--preview`) or `reconcile-references`, when the directory that holds the pass can be written by others and lacks the sticky bit | `shared-directory` |
-| the pass is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
-| the pass belongs to a user other than the effective user or root | `untrusted-owner` |
+| the pass, or a trusted signers file (`--allowed-signers`), is writable by group or others; the ledger has any group or other bit | `insecure-permissions` |
+| the pass, or a trusted signers file, belongs to a user other than the effective user or root | `untrusted-owner` |
 | the pass does not validate (every problem listed), changed while it was read, or does not end with a newline | `invalid-pass` |
 | the ledger is empty, has a cut last line, an unreadable line, a sequence gap, a broken hash chain, an invalid field, or sums beyond 10^12 | `ledger-corrupt` |
 | the ledger's pass id differs from the pass's | `ledger-foreign` |
@@ -1085,9 +1085,23 @@ pass ID and digest of the exact bytes supplied to the verifier. The operator
 provisions the trust file and selects the principal. It verifies as of now,
 or as of `--at TIME`: a key that the trust file limits with `valid-after` or
 `valid-before` counts only inside that window, and outside it the reason is
-`key-not-valid-at-time`. With `--archive`, the
+`key-not-valid-at-time`. A key whose line has a `namespaces=` option
+without `hallpass-approval-v1` gives `key-not-permitted-for-namespace`. With `--archive`, the
 verified bytes, the signature and a record of the verification are retained
-(see "Archives and evidence"). See the signing and
+(see "Archives and evidence").
+
+The trusted signers file decides whose keys count, so it follows the pass
+file's rule wherever hallpass reads it (`verify-approval` and the audits'
+`--allowed-signers`): owned by the effective user or root, and writable by
+neither group nor others. Otherwise the command stops with
+`untrusted-owner` or `insecure-permissions` and the `chmod 600` to run.
+
+hallpass trusts the `ssh-keygen` it runs: it is the absolute path in
+`HALLPASS_SSH_KEYGEN` when that is set, else `ssh-keygen` on `PATH`. A
+`HALLPASS_SSH_KEYGEN` that is not an absolute path is a `usage` error.
+Whoever controls hallpass's environment controls its verifier either way;
+set `HALLPASS_SSH_KEYGEN` to pin it, for example to `/usr/bin/ssh-keygen`,
+when not every directory on `PATH` is yours. See the signing and
 digest-pinning workflow in the [integration guide](INTEGRATING.md#signing-and-verifying-an-approval).
 
 ### Case suites
@@ -1500,7 +1514,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   `foreign` or `mismatch`), `added` (entries after the checkpoint) and
   `trust_input` (`supplied-checkpoint`).
 - **verify-approval**: `principal` (or `expected_principal` when
-  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
+  unverified), `reason` and `next_step` when unverified (`reason` is `wrong-namespace`, `bytes-do-not-match`, `malformed-signature`, `untrusted-key`, `wrong-principal`, `key-not-valid-at-time`, `key-not-permitted-for-namespace` or `unknown`, read from ssh-keygen's output; the result and exit code do not change), `pass_id` and `digest` when verified, `namespace`, `verify_time` (the `--at` instant, or null for now), `archive`, `provenance`
   (`signature-recorded` when verified with `--archive`, `signature-not-stored`
   when an earlier, different record was kept and this signature was not
   stored, else null) and

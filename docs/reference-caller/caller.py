@@ -15,6 +15,7 @@ import argparse
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,28 @@ def move_aside(a, digest):
             "aside (a record is never replaced), then run pin again")
 
 
+def check_signers_file(path):
+    """Refuse a signers file that another user could change, as hallpass does.
+
+    Whoever can write it can add a key for the owner's principal and sign a
+    widened pass. So it must be a regular file, not a link, owned by this
+    user or root, and writable by neither group nor others. hallpass checks
+    this again when it reads the file."""
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        fail(f"cannot read the trusted signers file {path}: {error.strerror}; check --allowed-signers")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"the trusted signers file {path} is not a regular file (or is a link); name the file itself")
+    if info.st_uid not in (os.geteuid(), 0):
+        fail(f"the trusted signers file {path} is owned by UID {info.st_uid}; use one owned by UID "
+             f"{os.geteuid()} or root after checking every line in it")
+    if info.st_mode & 0o022:
+        fail(f"the trusted signers file {path} has mode {stat.S_IMODE(info.st_mode):04o}, so other users can add "
+             f"a key for any principal to it; run `chmod 600 {path}`, then check that every line in it names a key "
+             "you trust")
+
+
 def signed_digest(a):
     """Verify the signature itself and return the digest it covers. Stop on anything less.
 
@@ -209,6 +232,7 @@ def signed_digest(a):
     archives different bytes, so the digests differ and the pin is refused."""
     if not a.allowed_signers:
         fail("--require-signature needs --allowed-signers: the signers file the operator trusts")
+    check_signers_file(a.allowed_signers)
     signature = a.signature or a.pass_file + ".sig"
     code, out = hallpass("verify-approval", "--signature", signature, "--allowed-signers", a.allowed_signers,
                          "--principal", a.require_signature, "--archive", a.archive, "--", a.pass_file)

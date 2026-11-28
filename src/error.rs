@@ -78,7 +78,7 @@ pub enum Error {
         mode: u32,
     },
     /// A mutable approval must be controlled by the caller or system administrator.
-    #[error("{} is owned by UID {owner}; use an approval owned by effective UID {effective} or root after verifying its content", path.display())]
+    #[error("{} is owned by UID {owner}; use a file owned by effective UID {effective} or root after verifying its content", path.display())]
     UntrustedOwner {
         path: PathBuf,
         owner: u32,

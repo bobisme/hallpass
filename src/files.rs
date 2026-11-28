@@ -675,6 +675,22 @@ fn shared_directory_mode_warning(dir: &Path, mode: u32) -> Option<String> {
 }
 
 fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> Result<(), Error> {
+    check_owner_mode(
+        path,
+        (owner, effective, mode),
+        "other users can change the approval",
+        "check that its content is what the owner approved. If you saved it with `hallpass retrieve DIR DIGEST > FILE` under a umask that leaves group write, write it with `hallpass retrieve DIR DIGEST --output FILE` instead, which creates the file with mode 0600",
+    )
+}
+
+/// The pass file's rule, for any file that decides what is approved: owned
+/// by the effective user or root, and writable by neither group nor others.
+fn check_owner_mode(
+    path: &Path,
+    (owner, effective, mode): (u32, u32, u32),
+    who: &'static str,
+    advice: &'static str,
+) -> Result<(), Error> {
     if owner != effective && owner != 0 {
         return Err(Error::UntrustedOwner {
             path: path.to_owned(),
@@ -686,12 +702,33 @@ fn check_pass_owner_mode(path: &Path, owner: u32, effective: u32, mode: u32) -> 
         return Err(Error::Insecure {
             path: path.to_path_buf(),
             mode: mode & 0o7777,
-            who: "other users can change the approval",
+            who,
             fix: "600",
-            advice: "check that its content is what the owner approved. If you saved it with `hallpass retrieve DIR DIGEST > FILE` under a umask that leaves group write, write it with `hallpass retrieve DIR DIGEST --output FILE` instead, which creates the file with mode 0600",
+            advice,
         });
     }
     Ok(())
+}
+
+/// Open a trusted signers file (`--allowed-signers`) as a pass is opened.
+///
+/// That is never through a link, only a regular file, and under the pass
+/// file's owner and mode rule. Whoever can write this file can add a key for
+/// the owner's principal and sign a widened pass.
+///
+/// # Errors
+/// [`Error::Symlink`], [`Error::NotRegular`], [`Error::UntrustedOwner`],
+/// [`Error::Insecure`] and [`Error::Io`].
+pub fn open_trusted_signers(path: &Path) -> Result<File, Error> {
+    let file = open_input(path)?;
+    let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
+    check_owner_mode(
+        path,
+        (meta.uid(), rustix::process::geteuid().as_raw(), meta.mode()),
+        "other users can add a key for any principal to the trusted signers",
+        "check that every line in it names a key you trust, because a key added there can sign a pass",
+    )?;
+    Ok(file)
 }
 
 /// How long a pass file must have gone unchanged before hallpass uses what
@@ -1048,6 +1085,7 @@ mod tests {
 #[cfg(test)]
 mod ownership {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     #[test]
     fn owner_and_mode_are_independent_requirements() {
         let p = Path::new("example");
@@ -1066,6 +1104,23 @@ mod ownership {
             check_pass_owner_mode(p, 1002, 1001, 0o644),
             Err(Error::UntrustedOwner { .. })
         ));
+    }
+
+    #[test]
+    fn a_trusted_signers_file_follows_the_pass_rule() {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("trusted_signers");
+        fs::write(&path, "owner@example.org ssh-ed25519 AAAA\n").expect("write");
+        for (mode, ok) in [(0o600, true), (0o644, true), (0o664, false), (0o666, false)] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("mode");
+            let opened = open_trusted_signers(&path);
+            assert_eq!(opened.is_ok(), ok, "{mode:o}");
+            if !ok {
+                let e = opened.expect_err("refused");
+                assert_eq!(e.code(), "insecure-permissions");
+                assert!(e.to_string().contains("chmod 600"), "{e}");
+            }
+        }
     }
 }
 

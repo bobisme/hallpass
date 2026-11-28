@@ -216,8 +216,11 @@ gave a scalar spend line. The six gaps about a revision, `archive-missing`,
 marks more). A `signature-rejected` entry also has `reason`, the code
 `verify-approval` uses: `wrong-namespace`,
 `bytes-do-not-match`, `malformed-signature`, `untrusted-key`,
-`wrong-principal`, `key-not-valid-at-time` or `unknown`, read from
-`ssh-keygen`'s output. `key-not-valid-at-time` means that the key is in the
+`wrong-principal`, `key-not-valid-at-time`, `key-not-permitted-for-namespace`
+or `unknown`, read from `ssh-keygen`'s output.
+`key-not-permitted-for-namespace` means that the key is in the trusted
+signers file for that principal, but its `namespaces=` option leaves out
+`hallpass-approval-v1`. `key-not-valid-at-time` means that the key is in the
 trusted signers file for that principal, but its `valid-after` or
 `valid-before` window does not hold the time the signature was verified as
 of. It is never reported as `untrusted-key`. With several `--principal`
@@ -325,11 +328,20 @@ audit writes from the bytes it read and removes afterwards. So `ssh-keygen`
 verifies exactly the bytes that the audit reports, against the FILE whose
 digest `signatures.allowed_signers` gives, even if a file changes on disk
 meanwhile. The result describes the archive and FILE as the audit read them.
-A missing or unreadable FILE is an error (exit 1). So is a temporary
+A missing or unreadable FILE is an error (exit 1). So is a FILE that
+another user could change: FILE follows the pass file's rule, owned by you
+or root and writable by neither group nor others, because whoever can write
+it can add a key for the owner's principal (`insecure-permissions` or
+`untrusted-owner`, with the `chmod 600` to run). So is a temporary
 directory that cannot be created (set `TMPDIR` to a directory you can
 write), and an `ssh-keygen` that cannot run, or that prints its usage instead
 of verifying, when a revision has a record to verify: an unusable verifier
 is never a pass.
+
+The audits trust what `ssh-keygen` says. They run the one that
+`HALLPASS_SSH_KEYGEN` names when it is set (an absolute path), else the one
+on `PATH`. Set the variable, for example to `/usr/bin/ssh-keygen`, when not
+every directory on `PATH` is yours.
 
 ### Revisions and their provenance
 

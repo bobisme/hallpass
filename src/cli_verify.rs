@@ -22,7 +22,8 @@ const MAX_TRUST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The bytes of a signature or trust file, read once. It is opened as a pass
 /// is: never through a link, only a regular file, without blocking on a FIFO.
-fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
+/// A trusted signers file must also pass the pass file's owner and mode rule.
+fn read_input(path: &Path, limit: u64, trusted: bool) -> Result<Vec<u8>, Error> {
     // An absolute name also keeps a literal "-" from acquiring stdin semantics.
     let full = std::path::absolute(path).map_err(|e| Error::Io {
         path: path.into(),
@@ -33,8 +34,12 @@ fn read_input(path: &Path, limit: u64) -> Result<Vec<u8>, Error> {
         message: e.to_string(),
     };
     let mut bytes = Vec::new();
-    hallpass::open_input(&full)?
-        .take(limit + 1)
+    let file = if trusted {
+        hallpass::open_trusted_signers(&full)?
+    } else {
+        hallpass::open_input(&full)?
+    };
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| io(&e))?;
     if bytes.len() as u64 > limit {
@@ -54,8 +59,8 @@ struct Inputs {
 impl Inputs {
     fn read(signature: &Path, trust: &Path) -> Result<Self, Error> {
         Ok(Self {
-            signature: read_input(signature, hallpass::MAX_SIGNATURE_BYTES)?,
-            trust: read_input(trust, MAX_TRUST_BYTES)?,
+            signature: read_input(signature, hallpass::MAX_SIGNATURE_BYTES, false)?,
+            trust: read_input(trust, MAX_TRUST_BYTES, true)?,
         })
     }
 
@@ -241,17 +246,19 @@ enum Why {
     UntrustedKey,
     WrongPrincipal,
     NotValidAtTime,
+    KeyNotForNamespace,
     Unknown,
 }
 
 impl Why {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Namespace,
         Self::Tampered,
         Self::Malformed,
         Self::UntrustedKey,
         Self::WrongPrincipal,
         Self::NotValidAtTime,
+        Self::KeyNotForNamespace,
         Self::Unknown,
     ];
 
@@ -263,6 +270,7 @@ impl Why {
             Self::UntrustedKey => "untrusted-key",
             Self::WrongPrincipal => "wrong-principal",
             Self::NotValidAtTime => "key-not-valid-at-time",
+            Self::KeyNotForNamespace => "key-not-permitted-for-namespace",
             Self::Unknown => "unknown",
         }
     }
@@ -286,6 +294,9 @@ impl Why {
             }
             Self::NotValidAtTime => {
                 "the key is trusted for this principal, but its valid-after or valid-before window in the trusted signers file does not include the verification time; check the window, or for an approval used in the past, verify with --at the time it was first used"
+            }
+            Self::KeyNotForNamespace => {
+                "the key is trusted for this principal, but its line in the trusted signers file has a namespaces= option without hallpass-approval-v1; add hallpass-approval-v1 to that option if this key may approve passes"
             }
             Self::Unknown => {
                 "check the signed bytes, signature namespace, expected principal and trusted signers"
@@ -312,6 +323,9 @@ impl Why {
             }
             Self::NotValidAtTime => {
                 "the key is in the trusted signers file you supplied for the principal checked, but its valid-after or valid-before window there does not include the time the signature was verified as of (verify_time); check the window, and keep a retired key's line with valid-before set, so that the revisions it signed before still verify"
+            }
+            Self::KeyNotForNamespace => {
+                "the key is in the trusted signers file you supplied for the principal checked, but its namespaces= option there does not include hallpass-approval-v1, so it may not approve a pass; add hallpass-approval-v1 to that option if this key may approve passes"
             }
             Self::Unknown => {
                 "check the archived bytes, the archived signature and the trusted signers file you supplied"
@@ -386,7 +400,7 @@ impl SignatureArgs {
                 AsOf::Instant(now.replace_nanosecond(0).unwrap_or(now))
             }
         };
-        let trust = read_input(trust, MAX_TRUST_BYTES)?;
+        let trust = read_input(trust, MAX_TRUST_BYTES, true)?;
         // Made at the first recorded signature, so that an audit with none
         // needs no temporary directory.
         let mut verifier: Option<Verifier> = None;
@@ -437,6 +451,11 @@ fn classify(
     if stderr.contains("namespace does not match") {
         return Why::Namespace;
     }
+    // The trust file's `namespaces=` option leaves out hallpass's namespace
+    // for the only line that has this key and principal.
+    if stderr.contains("not permitted for use in signature namespace") {
+        return Why::KeyNotForNamespace;
+    }
     if stderr.contains("incorrect signature") {
         return Why::Tampered;
     }
@@ -451,7 +470,10 @@ fn classify(
     if outside_window(stderr) {
         return Why::NotValidAtTime;
     }
-    let found = Command::new("ssh-keygen")
+    let Ok(mut found) = ssh_keygen() else {
+        return Why::Unknown;
+    };
+    let found = found
         .args(["-Y", "find-principals", "-f"])
         .arg(trust)
         .arg("-s")
@@ -482,6 +504,45 @@ fn classify(
     }
 }
 
+/// The environment variable that names the `ssh-keygen` to run.
+const SSH_KEYGEN_VARIABLE: &str = "HALLPASS_SSH_KEYGEN";
+
+/// The `ssh-keygen` that verifies signatures: the absolute path in
+/// `HALLPASS_SSH_KEYGEN` when it is set, else `ssh-keygen` on PATH. Whoever
+/// controls hallpass's environment controls its verifier either way; the
+/// variable lets a caller pin it without trusting every PATH directory.
+fn ssh_keygen() -> Result<Command, Error> {
+    let Some(pinned) = std::env::var_os(SSH_KEYGEN_VARIABLE) else {
+        return Ok(Command::new("ssh-keygen"));
+    };
+    let pinned = PathBuf::from(pinned);
+    if !pinned.is_absolute() {
+        return Err(Error::Usage(format!(
+            "{SSH_KEYGEN_VARIABLE} is {}, not an absolute path; set it to the absolute path of OpenSSH ssh-keygen, such as /usr/bin/ssh-keygen, or unset it to use ssh-keygen on PATH",
+            quoted(&pinned.to_string_lossy())
+        )));
+    }
+    Ok(Command::new(pinned))
+}
+
+/// The verifier's name for messages, and what to check when it fails.
+fn verifier_name() -> (PathBuf, String) {
+    std::env::var_os(SSH_KEYGEN_VARIABLE).map_or_else(
+        || {
+            (
+                "ssh-keygen".into(),
+                "check PATH, or set HALLPASS_SSH_KEYGEN to its absolute path".to_owned(),
+            )
+        },
+        |pinned| {
+            (
+                PathBuf::from(pinned),
+                format!("check {SSH_KEYGEN_VARIABLE}"),
+            )
+        },
+    )
+}
+
 /// Run ssh-keygen over `bytes`, with the signature and trusted signers files
 /// that a [`Verifier`] wrote.
 fn verified(
@@ -493,7 +554,8 @@ fn verified(
 ) -> Result<Result<(), Why>, Error> {
     check_principal(principal)?;
     let at = at.map(verify_time_option).transpose()?;
-    let mut verifier = Command::new("ssh-keygen");
+    let mut verifier = ssh_keygen()?;
+    let (program, check) = verifier_name();
     verifier
         .args(["-Y", "verify", "-n", NAMESPACE, "-I", principal])
         .arg("-f")
@@ -505,8 +567,8 @@ fn verified(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = verifier.spawn().map_err(|e| Error::Io {
-        path: "ssh-keygen".into(),
-        message: format!("cannot run OpenSSH ssh-keygen ({e}). Install OpenSSH with SSH signature support and check PATH"),
+        path: program.clone(),
+        message: format!("cannot run OpenSSH ssh-keygen ({e}). Install OpenSSH with SSH signature support and {check}"),
     })?;
     let write = child
         .stdin
@@ -522,20 +584,20 @@ fn verified(
         String::from_utf8_lossy(&raw).into_owned()
     });
     let status = child.wait().map_err(|e| Error::Io {
-        path: "ssh-keygen".into(),
+        path: program.clone(),
         message: e.to_string(),
     })?;
     if let Err(e) = write
         && (status.success() || e.kind() != io::ErrorKind::BrokenPipe)
     {
         return Err(Error::Io {
-            path: "ssh-keygen".into(),
+            path: program,
             message: format!("writing approval to verifier: {e}"),
         });
     }
     if status.code().is_none() {
         return Err(Error::Io {
-            path: "ssh-keygen".into(),
+            path: program,
             message: format!("signature verifier terminated: {status}"),
         });
     }
@@ -544,8 +606,10 @@ fn verified(
     // signature.
     if !status.success() && at.is_some() && stderr.contains("verify-time") {
         return Err(Error::Io {
-            path: "ssh-keygen".into(),
-            message: "ssh-keygen did not accept `-O verify-time`, so it cannot verify a signature as of a given time. Install an OpenSSH whose ssh-keygen supports `-O verify-time` and check PATH".into(),
+            path: program,
+            message: format!(
+                "ssh-keygen did not accept `-O verify-time`, so it cannot verify a signature as of a given time. Install an OpenSSH whose ssh-keygen supports `-O verify-time` and {check}"
+            ),
         });
     }
     // An ssh-keygen without SSH signature support rejects `-Y` and prints its
@@ -554,8 +618,10 @@ fn verified(
         && (stderr.contains("usage: ssh-keygen") || stderr.contains("unknown option"))
     {
         return Err(Error::Io {
-            path: "ssh-keygen".into(),
-            message: "ssh-keygen did not accept `-Y verify` and printed its usage. Install OpenSSH with SSH signature support and check PATH".into(),
+            path: program,
+            message: format!(
+                "ssh-keygen did not accept `-Y verify` and printed its usage. Install OpenSSH with SSH signature support and {check}"
+            ),
         });
     }
     if status.success() {

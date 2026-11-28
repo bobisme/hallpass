@@ -79,8 +79,8 @@ pub use decision::{
 pub use error::{ElsewhereLedger, Error, MissingLedger};
 pub use files::{
     Digest, LoadedPass, LockWait, MAX_PASS_BYTES, check_stream_write, future_mtime_warning, load,
-    load_with_bytes, lock_holder_pid, open_input, refuse_world_writable_directory,
-    shared_directory_warning, with_lock_wait,
+    load_with_bytes, lock_holder_pid, open_input, open_trusted_signers,
+    refuse_world_writable_directory, shared_directory_warning, with_lock_wait,
 };
 pub use ledger::{
     AdoptCase, AdoptOutcome, AdoptPreview, Adoption, Charge, ChargeOutcome, Checkpoint,
