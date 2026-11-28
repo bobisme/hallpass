@@ -114,6 +114,15 @@ the pass on disk with the last digest pinned in the journal. If they differ, it
 prints an `ATTENTION` line with both digests, says that the ceilings shown come
 from the file on disk, and exits 2.
 
+It also reads the journal's pins for the pass. If the last pin has no
+`signed_by` but an earlier pin did, it prints an `ATTENTION` line naming both
+digests and the signer, and exits 2. A signed pin refuses an unsigned edit,
+but a plain `pin` afterwards is accepted by the journal. Units spent on that
+unsigned revision show at audit time as `approval-unverified`. The journal
+does not forbid the plain pin; `handoff` makes it visible. Have the signer
+sign the pass, then run `pin --require-signature` again, or restore the signed
+bytes. A journal that was never signed is not flagged.
+
 | Journal | Ledger | Verdict |
 |---|---|---|
 | `sent` | debit | ok |

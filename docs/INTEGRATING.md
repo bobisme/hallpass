@@ -748,6 +748,12 @@ the append outcome uncertain, reconcile the ledger before attempting another
 spend. The [reference caller](reference-caller/README.md#after-an-interruption)
 shows one way to keep the caller-side record that this reconciliation needs.
 
+After a restore of the whole machine, the ledger and its witness come back
+together and agree, so a caller sees nothing wrong while spends are lost.
+Keep a periodic `checkpoint` outside the machine's backup set and run
+`verify-checkpoint` before the next spend:
+[After a restore](EVIDENCE.md#after-a-restore).
+
 ## Mapping written approvals and practice runs
 
 Keep the exact written reference in `approval.reference`. For a stable ID,

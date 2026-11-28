@@ -480,6 +480,17 @@ No locking crate: the standard library has file locks.
   ledger, a moved pass, a rewritten last line), not a deliberate cheat.
   Keep the engagement directory private (0700) and back up the ledger with
   the evidence.
+- **A restore of the whole machine.** A VM snapshot rollback or a
+  home-directory backup restore that puts back the engagement directory and
+  the state directory together gives a ledger and a witness that agree with
+  each other, so `status` and `spend` report no problem. The spends made
+  since the snapshot are lost, and the pass can be spent past its ceiling
+  across the two histories. This is an ordinary accident, not a cheat, but
+  hallpass cannot see it from the files on this machine. Keep a periodic
+  `checkpoint` outside the machine's backup and snapshot set, and run
+  `verify-checkpoint` after any restore (see "After a restore" in
+  EVIDENCE.md). A checkpoint inside the same snapshot rolls back with the
+  rest and proves nothing.
 - **One witness per user and machine.** A pass used from two machines or
   two user accounts has two witnesses that do not see each other; the
   ledger's lock and chain still hold, but a loss is noticed only by the

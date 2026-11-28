@@ -457,6 +457,13 @@ def handoff(a):
             print(f"ATTENTION: the pass on disk ({current['digest']}) is not the last pinned revision "
                   f"({pins[-1]['digest']}). The ceilings below come from the file on disk, not from "
                   f"the pinned revision; review and pin it again, or restore the pinned bytes.")
+        signed = [r for r in pins[:-1] if r.get("signed_by")]
+        if not pins[-1].get("signed_by") and signed:
+            attention += 1
+            print(f"ATTENTION: the last pin ({pins[-1]['digest']}) is not signed, but an earlier pin "
+                  f"({signed[-1]['digest']}) was signed by {signed[-1]['signed_by']!r}. Units may have been "
+                  f"spent on an unsigned revision; have {signed[-1]['signed_by']!r} sign the pass, then pin "
+                  f"it again with --require-signature, or restore the signed bytes.")
     spent = ", ".join(f"{t['name']} {t['spent']} of {t['total']}" for t in ledger["totals"])
     shown = ledger.get("shown")
     scope = f"{len(ledger['entries'])} debits" if not shown else (

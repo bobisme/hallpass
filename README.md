@@ -228,6 +228,15 @@ What it does not guard against:
 - a determined operator: they own the pass, the ledger and the witness,
   and can edit or delete all of them consistently. The witness catches
   accidents and casual edits, not a deliberate cheat;
+- a restore of the whole machine: if a snapshot rollback or a backup restore
+  puts back both the ledger and the state directory (`$XDG_STATE_HOME`), the
+  witness matches the old ledger, nothing is noticed, and the spends made
+  since the snapshot are forgotten (a ceiling of 3 can be spent to 5 across
+  the two histories). Keep a periodic `hallpass --json checkpoint PASS >
+  checkpoint.json` where the snapshot or backup does not reach, and after any
+  restore run `hallpass --json verify-checkpoint PASS.ledger checkpoint.json`:
+  `mismatch` (exit 2) means the ledger no longer holds the line you
+  exported. See [After a restore](docs/EVIDENCE.md#after-a-restore);
 - the same pass used from two machines or user accounts (each has its own
   witness);
 - a wrong system clock (the window uses the decision clock; status, permits and spends warn if it is strictly earlier than the latest time recorded in the ledger);

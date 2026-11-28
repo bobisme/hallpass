@@ -546,3 +546,34 @@ valid checkpoint, and `verify-checkpoint` rejects the file with exit 1.
 Check the exit code before you retain the output. A
 missing ledger after a witnessed spend is an error (exit 1), not an empty
 result.
+
+### After a restore
+
+A restore of the whole machine (a VM snapshot rolled back, a home-directory
+backup put back) restores the ledger and the witness together. They agree
+with each other, so `status` says "the witness matches" and `spend` goes on
+without a warning, while every spend made since the snapshot is gone. With a
+ceiling of 3, five units can be spent across the two histories. hallpass
+cannot see this from this machine's files. A checkpoint kept elsewhere can.
+
+Export a checkpoint now and then, and keep it where a snapshot or backup of
+this machine does not reach (another host, a password manager, a ticket):
+
+```sh
+hallpass --json checkpoint engagement.toml > checkpoint.json
+```
+
+A checkpoint stored inside the snapshot is rolled back with everything else
+and proves nothing. After any restore, before the next spend:
+
+1. Fetch the newest checkpoint from the outside copy.
+2. Run `hallpass --json verify-checkpoint engagement.toml.ledger checkpoint.json`.
+   `exact` or `extended` (exit 0): the ledger still holds the exported line.
+   `mismatch` (exit 2): the ledger was rolled back or replaced, and spends
+   after the checkpoint may be lost.
+3. On `mismatch`, do not spend. Find the lost spends in the callers' own
+   journals and the target's records, restore the newer ledger if one
+   exists, or have the owner decide how much of the approval is left.
+
+A restore older than your newest checkpoint is caught. One newer than it is
+not, so export often enough that the gap is a loss you accept.
