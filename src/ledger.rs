@@ -41,6 +41,7 @@ use crate::request::{TargetRefusal, decide_targets};
 use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
 use crate::{MAX_TARGETS, NamedTarget};
 
+mod append;
 pub mod capacity;
 mod clock;
 mod debit;
@@ -48,6 +49,7 @@ pub mod evidence;
 mod evidence_charges;
 mod evidence_manifest;
 mod reference;
+mod repair;
 pub mod scenario;
 mod written;
 pub use clock::with_test_clock;
@@ -58,6 +60,7 @@ pub use reference::{
     ReferenceEvidence, ReferenceReconciliation, read_reference_list, reconcile_references,
 };
 use reference::{ReconcileLine, parse_reconcile};
+pub use repair::{TornTail, drop_torn_tail, preview_drop_torn_tail};
 
 /// The ledger format version.
 const LEDGER_VERSION: u32 = 1;
@@ -900,7 +903,7 @@ fn scan_ledger(
         ));
     }
     if first.pop() != Some(b'\n') {
-        return Err(corrupt(1, "the last line is cut short (no line end)"));
+        return Err(corrupt(1, crate::error::CUT_SHORT));
     }
     let header: Header = serde_json::from_slice(&first)
         .map_err(|_| corrupt(1, "the header line is not a hallpass ledger header"))?;
@@ -945,7 +948,7 @@ fn scan_ledger(
         number += 1;
         at_end.set(reader.fill_buf().is_ok_and(<[u8]>::is_empty));
         if line.pop() != Some(b'\n') {
-            return Err(corrupt(number, "the last line is cut short (no line end)"));
+            return Err(corrupt(number, crate::error::CUT_SHORT));
         }
         let record = Line::decode(&line).ok_or_else(|| {
             if let Some(detail) = unknown_event(&line).or_else(|| invalid_record(&line)) {
@@ -2107,16 +2110,14 @@ fn check_clock(now: OffsetDateTime) -> Result<(), Error> {
 }
 
 /// Append one line (without its newline) to the locked ledger and sync it.
+/// A failed write is rolled back under the lock ([`append::append_line`]).
 fn append(locked: &mut Locked, line: &str, what: &str) -> Result<(), Error> {
-    locked
-        .file
-        .write_all(format!("{line}\n").as_bytes())
-        .and_then(|()| locked.file.sync_data())
-        .map_err(|e| Error::AppendUncertain {
-            path: locked.path.clone(),
-            event: what.to_owned(),
-            detail: e.to_string(),
-        })
+    append::append_line(
+        &mut locked.file,
+        &locked.path,
+        format!("{line}\n").as_bytes(),
+        what,
+    )
 }
 
 /// Atomically check and record a spend against the pass at `pass_path`,

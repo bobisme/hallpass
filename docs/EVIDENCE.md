@@ -62,6 +62,34 @@ history it observes and reserves nothing. Retain your own execution record
 to decide whether the external action occurred. Calls that omit the guard
 can reuse references for correlation.
 
+## Recover from a failed write
+
+A spend whose ledger write fails (a full disk, a file size limit) is rolled
+back under the lock: the ledger is cut back to its length before the write.
+The reply is then `error.code = "ledger-append-failed"` with
+`error.recording = "not-recorded"`: nothing was debited or permitted, and the
+same unit can be spent again once the cause is fixed. With
+`ledger-append-uncertain`, stop and reconcile as above; `receipt` shows
+whether the debit is in the ledger.
+
+If the rollback failed too, or an older hallpass wrote the ledger, the
+ledger can end with a line cut short, and every command then fails
+`ledger-corrupt` at that line with `error.last_line` true. Do not edit the
+ledger by hand. Preview the repair, review it, and apply it with its token:
+
+```sh
+hallpass --json repair engagement.toml --drop-torn-tail --preview
+hallpass --json repair engagement.toml --drop-torn-tail --token "$token"
+```
+
+The repair removes only a last line with no line end, and only when the
+witness recorded one of the complete lines before it, so the witness
+proves the cut-short line was never counted. It keeps the removed bytes in
+`engagement.toml.ledger.torn-N` (named in `copy`). It refuses anything else,
+such as a complete last line that is invalid, damage before the last line or
+a missing witness: restore the ledger from a backup instead, as below. See
+[Dropping a cut-short last line](spec.md#dropping-a-cut-short-last-line).
+
 ## Replay historical endpoint decisions
 
 Retain each revision the owner approves together with the signature that

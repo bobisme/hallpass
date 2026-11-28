@@ -189,6 +189,13 @@ fn history_guide(name: &str) -> Guide {
             ],
             "Use this for recovery. Inspect case, present, carry, totals and warnings in the preview: an adoption that carries totals leaves later --require-new-ref spends reference-inconclusive until reconcile-references records the references that may be in the lost lines. After reviewing them, supply its token and a reason to record the adoption. A stale token requires a new review. An appended adoption still counts after a witness update failure. A ledger that is intact where the witness last saw it is not adopted (ledger-elsewhere): replace that pass file's content instead.",
         ),
+        "repair" => (
+            &[
+                "hallpass --format json repair engagement.pass.toml --drop-torn-tail --preview",
+                "hallpass --format json repair engagement.pass.toml --drop-torn-tail --token \"$token\"",
+            ],
+            "Use this when a command fails ledger-corrupt because the last line is cut short (no line end), for example after a disk filled up during a spend. The preview checks that every complete line verifies, that the witness recorded one of them, and that the cut-short bytes start the next line hallpass would write. Review seq, witness_seq and removed_bytes, then supply the token. The removed bytes are kept in the file named by copy. Any other damage is refused: restore the ledger from a backup instead.",
+        ),
         "reconcile-references" => (
             &[
                 "hallpass --format json ledger engagement.pass.toml",

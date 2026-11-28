@@ -381,10 +381,15 @@ The Rust path is `permits_in` with an ordered slice of `NamedTarget` values.
 
 A spend error with `error.recording = "recorded"` identifies a durable debit
 by `error.ledger` and `error.seq`. With `"uncertain"`, the append or sync
-failed. Stop and inspect the ledger before deciding whether another spend is
+failed and could not be undone. Stop and inspect the ledger before deciding whether another spend is
 appropriate. Never automatically retry either outcome. If the caller recorded a
 reference before submitting, use `hallpass --json receipt FILE --caller-ref REF`
 to match the debit to that durable run record. [Worked reconciliation](EVIDENCE.md#reconcile-a-lost-spend-response)
+
+A failed write that hallpass rolled back is `error.code =
+"ledger-append-failed"` with `recording = "not-recorded"`: nothing was
+debited, and the unit may be submitted again after the cause (a full disk, a
+file size limit) is fixed. [Recover from a failed write](EVIDENCE.md#recover-from-a-failed-write)
 
 A real spend can bound writer lock acquisition with `--lock-timeout-ms N`
 or `SpendRequest::lock_timeout` (also on the policy of a multi-charge request).

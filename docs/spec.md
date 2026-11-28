@@ -392,17 +392,17 @@ first one in request order. On success each
 #### Damaged ledger advice
 
 A chain break at line N says that line N does not follow line N-1: one of the
-two was changed, or a line between them was removed or moved. The message
-advises removing a final line that was cut short only when N is the last line
-of the file (`error.last_line` is true). When N is earlier, it advises
-restoring the ledger from a backup, finding the good copy with `hallpass
-compare-backups`, and not editing lines by hand. The error code stays
-`ledger-corrupt`.
+two was changed, or a line between them was removed or moved. When N is the last line of the file (`error.last_line` is
+true) and the line has no line end, the message names `hallpass repair FILE
+--drop-torn-tail --preview` ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)).
+In every other case it advises restoring the ledger from a backup, finding
+the good copy with `hallpass compare-backups`, and not editing lines by hand.
+The error code stays `ledger-corrupt`.
 
 #### Lock wait
 
 Every command that takes the ledger lock accepts `--lock-timeout-ms N`:
-`spend` (with `--dry-run` too), `adopt` (with `--preview` too),
+`spend` (with `--dry-run` too), `adopt` (with `--preview` too), `repair`,
 `reconcile-references`, `permits`, `status`, `ledger`, `capacity`,
 `rehearse`, `receipt`, `audit-receipts`, `audit-charges`, `reconcile`,
 `compare-backups`, `checkpoint`, `verify-checkpoint`, and `diff` with
@@ -567,6 +567,34 @@ pass or ledger files without taking those locks can change them after a reviewed
 snapshot; the missing-ledger decision uses the validated pass snapshot held at
 publication time.
 
+### Dropping a cut-short last line
+
+A failed append is rolled back ([Fail-closed cases](#fail-closed-cases)), so
+hallpass itself leaves a cut-short line only when the rollback fails too, or
+when an older hallpass wrote the ledger. `hallpass repair FILE
+--drop-torn-tail --preview` shows what would be removed and prints a token
+(`tail1:sha256:...`); `hallpass repair FILE --drop-torn-tail --token TOKEN`
+removes it. Both refuse (exit 1, `usage`, nothing changed) unless all of
+these hold:
+
+- the ledger does not end with a line end, and it has at least one
+  complete line (the header);
+- every complete line verifies, for this pass;
+- the witness exists and its line is one of the complete lines, so the
+  witness never counted the cut-short line;
+- the cut-short bytes start as hallpass starts the next line,
+  `{"seq":N,` with N one past the last complete line, or are a shorter
+  start of that.
+
+A complete last line that is invalid is never removed. The repair takes
+both writer locks and checks the token again; a stale token requires a new
+preview. Before the ledger is cut, the removed bytes are written to a new
+private file beside it, `LEDGER.torn-N` (`LEDGER.torn-N.2` and on when that
+exists), and synced. The repair records no ledger line and does not change
+the witness: the ledger then ends with the line the witness recorded, or
+with lines after it. In Rust: `preview_drop_torn_tail` and `drop_torn_tail`,
+which return a `TornTail`.
+
 ### `reconcile-references(pass, adoption, references, reason, now)`
 
 After an adoption that may have lost lines, every guarded spend is
@@ -714,7 +742,8 @@ is still reported in that candidate's row.
 | the ledger does not hold the line its witness recorded | `ledger-changed` |
 | `spend`, `adopt`, `reconcile-references`: no state directory, or it is not a private writable directory, or the witness is damaged or not private | `witness-unavailable` |
 | the command used up its `--lock-timeout-ms` (or `lock_timeout`) waiting for a ledger or witness lock, before it read or recorded anything | `lock-timeout` |
-| the append or its sync failed and the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
+| writing the line failed, and the ledger was cut back to its length before the write and synced, under the lock and before the witness was updated: nothing was recorded | `ledger-append-failed` |
+| the line was written but its sync failed, or a failed write could not be rolled back; the caller must reconcile the ledger before retrying | `ledger-append-uncertain` |
 | the spend was recorded but the witness could not be updated afterwards (the spend counts; do not proceed) | `witness-not-updated` |
 | `init` target already exists (also a dangling link) | `exists` |
 | bad arguments: malformed `--to`, `--digest`, `--n 0`, a bad note or reason, nothing to adopt, a bad reference list or nothing to reconcile, a malformed test clock | `usage` |
@@ -726,7 +755,21 @@ A JSON error says in `error.recording` what the failed command left in the
 ledger. After `witness-not-updated`, `error.recording` is `recorded` and the
 JSON error contains `seq` and `ledger`. A `ledger-append-uncertain` error
 includes the ledger path and `recording = "uncertain"`. Both exit 1. Inspect
-the ledger and reconcile before retrying. `lock-timeout` and
+the ledger and reconcile before retrying.
+
+Every append happens under both writer locks, before the witness is
+updated. When the write fails (for example a short write on a full disk or
+at a file size limit), hallpass cuts the ledger back to its length before
+the write and syncs it. When that works and the length reads back as before,
+the ledger holds exactly its previous bytes, since an append only adds bytes
+at the end: the error is `ledger-append-failed` with the ledger path and
+`recording = "not-recorded"`, and the command can be run again once the cause
+is fixed. `recording` is `uncertain` in two cases. First, the rollback
+failed: the ledger may end with a cut-short line, which `repair
+--drop-torn-tail` can remove. Second, the whole line was written but its
+sync failed: after a failed sync the page cache no longer tells what is on
+disk, and a later sync can report success without writing the line, so
+hallpass leaves the line in place. If it is there, it counts. `lock-timeout` and
 `witness-unavailable` and `shared-directory` have `recording = "not-recorded"`: the attempt appended
 no entry to the ledger. So does every `usage` error, whether clap or hallpass
 found it, because arguments are checked before any write. So does every error
@@ -1070,6 +1113,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `digest` | printed | never | invalid pass |
 | `ledger` | listed (also when there is no ledger yet) | never | invalid pass, ledger error (as `status`), bad `--counter` |
 | `adopt` | adoption recorded, or the `--preview` snapshot | never | invalid pass, damaged ledger, nothing to adopt, the ledger is intact elsewhere, missing reason, stale token, unusable state directory |
+| `repair` | the cut-short last line was removed, or the `--preview` | never | invalid pass, no ledger, nothing safe to remove (a complete last line, damage before it, no witness, a line the witness counted), stale token |
 | `reconcile-references` | reconciliation recorded | never | invalid pass, list or reason, damaged, missing or changed ledger, no adoption to reconcile, not the latest such adoption, no witness, unusable state directory |
 | `archive` | the exact bytes are retained | never | invalid pass, unusable archive directory |
 | `retrieve` | the exact bytes are printed | never | malformed digest, missing or unusable archive entry |
@@ -1278,6 +1322,10 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   counter name to amount), `previous` (as in `ledger`, or null). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
   `totals`, `previous` and `token`.
+- **repair**: `result` (`preview` or `repaired`), `ledger`, `pass_id`,
+  `seq` (the last complete line, kept), `witness_seq`, `kept_bytes`,
+  `removed_bytes`, `token` and `copy` (the file that holds the removed
+  bytes, null in a preview).
 - **reconcile-references**: `ledger`, `pass_id`, `digest`, `now`,
   `test_clock`, `seq` (of the new line), `adoption`, `reason` and
   `references` (the list recorded).
@@ -1435,6 +1483,7 @@ Crate `hallpass` (re-exports `time`):
 | `spend_charges_batch`, `spend_charges_batch_in`, `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`, `SpendChargesBatchOutcome`, `SpendChargesBatchUnitOutcome`, `MAX_DEBIT_BATCH_UNITS` | 1 to 1024 distinct guarded caller-reference debits, each one unit of the same counter and with one optional retained target, decided under one lock and committed as one all-or-none ledger line |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
 | `preview_adopt`, `adopt_guarded`, `AdoptPreview` | the adoption preview and its token |
+| `preview_drop_torn_tail`, `drop_torn_tail`, `TornTail` | the repair of a cut-short last ledger line, and its preview and token ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)) |
 | `reconcile_references(path, adoption, &[String], reason, now, &StateDir) -> Result<ReconcileReferencesOutcome, Error>`, `read_reference_list(path, pass_id)`, `ReferenceReconciliation`, `MAX_RECONCILED_REFERENCES`, `MAX_REFERENCE_LIST_BYTES` | record a reference reconciliation (`ReconcileReferencesOutcome { reconciliation, ledger, pass_id, warnings }`) and read its list |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |
 | `read_ledger(&LoadedPass, &StateDir) -> Result<LedgerView, Error>` | every entry (`LedgerEntry { seq, time, counter, amount, digest, note }`), every `Adoption` and `ReferenceReconciliation`, `unreconciled_adoption`, the tally, the `WitnessStatus`, `moved_from` and `warnings`; chain verified under a shared lock; read-only |

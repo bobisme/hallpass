@@ -440,6 +440,15 @@ underlying contracts, see
 [Reconcile a lost spend response](EVIDENCE.md#reconcile-a-lost-spend-response)
 and [Reconcile a run manifest](EVIDENCE.md#reconcile-a-run-manifest).
 
+### A spend that could not be written
+
+When the disk fills up during a spend, hallpass cuts the ledger back to how
+it was and replies `ledger-append-failed` with `recording` set to
+`not-recorded`: nothing was debited, and the unit can run again once there
+is space. A ledger left with a last line cut short (`ledger-corrupt` with
+`last_line` true) is repaired with `hallpass repair --drop-torn-tail`,
+never by hand: [Recover from a failed write](EVIDENCE.md#recover-from-a-failed-write).
+
 Hand over the journal, the outbox, the pass with its ledger, the archive and
 the handoff output, but not as a copy: to another account the files must
 move and be adopted. [Step 9](#9-hand-the-pass-to-another-account) shows

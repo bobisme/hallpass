@@ -97,7 +97,7 @@ pub enum Error {
         "the ledger {} is damaged at line {line}: {}. hallpass will not guess the count, so nothing more can be spent under this pass until it is repaired: {}",
         path.display(),
         without_stop(detail),
-        corrupt_advice(.last, .complete)
+        corrupt_advice(path, *line, detail, *last, *complete)
     )]
     LedgerCorrupt {
         /// The ledger file.
@@ -203,6 +203,16 @@ pub enum Error {
         event: String,
         detail: String,
     },
+    /// Writing the line failed, and hallpass cut the ledger back to its
+    /// length before the write and synced it, still under the lock, before
+    /// the witness was updated: the ledger holds its previous bytes and
+    /// nothing was recorded.
+    #[error("could not write the {event} to {} ({detail}); hallpass cut the ledger back to its length before the write, so nothing was recorded. Free disk space or raise the file size limit, then run the command again.", path.display())]
+    AppendRolledBack {
+        path: PathBuf,
+        event: String,
+        detail: String,
+    },
     /// The lock-wait budget ran out before the command took the lock, so it
     /// read and recorded nothing.
     #[error("timed out waiting for the lock on {}, which another process holds; this command recorded nothing. Retry, or find and stop the process holding it (`fuser {}`). The lock is released automatically when its holder exits or crashes, so a stale lock does not need removing.", path.display(), path.display())]
@@ -302,6 +312,7 @@ impl Error {
             Self::Io { .. } => "io",
             Self::LockTimeout { .. } => "lock-timeout",
             Self::AppendUncertain { .. } => "ledger-append-uncertain",
+            Self::AppendRolledBack { .. } => "ledger-append-failed",
             Self::Symlink { .. } => "symlink",
             Self::NotRegular { .. } => "not-regular-file",
             Self::TooLarge { .. } => "too-large",
@@ -490,15 +501,37 @@ fn without_stop(detail: &str) -> &str {
     detail.strip_suffix('.').unwrap_or(detail)
 }
 
+/// The detail of [`Error::LedgerCorrupt`] for a last line with no line end.
+pub const CUT_SHORT: &str = "the last line is cut short (no line end)";
+
 /// What to do about a damaged ledger, by where the damage is.
-#[allow(clippy::trivially_copy_pass_by_ref)] // thiserror passes the field by reference
-const fn corrupt_advice(last: &bool, complete: &bool) -> &'static str {
-    if *complete {
-        "the line is complete, not cut short, so do not remove it or edit it by hand. Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one."
-    } else if *last {
-        "compare it with your notes, and remove only a final line that was cut short (that spend was never confirmed). If the line is not just cut short, restore the ledger from a backup instead."
+fn corrupt_advice(
+    path: &std::path::Path,
+    line: usize,
+    detail: &str,
+    last: bool,
+    complete: bool,
+) -> String {
+    const BACKUP: &str = "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one.";
+    if complete {
+        format!(
+            "the line is complete, not cut short, so do not remove it or edit it by hand. {BACKUP}"
+        )
+    } else if last && line > 1 && detail == CUT_SHORT {
+        // The pass is the ledger's path without `.ledger`.
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let pass = name.strip_suffix(".ledger").map_or_else(
+            || "PASS".to_owned(),
+            |pass| path.with_file_name(pass).display().to_string(),
+        );
+        format!(
+            "if a write failed while it recorded that line (for example on a full disk), the line was never confirmed. Do not edit the ledger by hand: `hallpass repair {pass} --drop-torn-tail --preview` checks that the witness proves the line was never counted, and then the repair removes it and keeps a copy. If it refuses, {}",
+            BACKUP.replacen('R', "r", 1)
+        )
+    } else if last {
+        format!("do not edit lines by hand. {BACKUP}")
     } else {
-        "the damage is before the end of the file, so do not edit lines by hand. Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one."
+        format!("the damage is before the end of the file, so do not edit lines by hand. {BACKUP}")
     }
 }
 
@@ -569,6 +602,11 @@ mod tests {
                 detail: detail.clone(),
             });
             messages.push(Error::AppendUncertain {
+                path: path.clone(),
+                event: "spend".into(),
+                detail: detail.clone(),
+            });
+            messages.push(Error::AppendRolledBack {
                 path: path.clone(),
                 event: "spend".into(),
                 detail: detail.clone(),

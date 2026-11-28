@@ -94,6 +94,7 @@ const INVOCATIONS: &[&[&str]] = &[
     &["verify-checkpoint", "@p.toml.ledger", "@checkpoint.json"],
     &["adopt", "@p.toml", "--preview"],
     &["adopt", "@p.toml", "--reason", "restored from backup"],
+    &["repair", "@p.toml", "--drop-torn-tail", "--preview"],
     &[
         "reconcile-references",
         "@p.toml",
@@ -351,6 +352,13 @@ fn a_fifo_in_place_of_the_ledger_is_refused_at_once() {
         vec!["--json", "spend", "f.toml", "calls", "--dry-run"],
         vec!["--json", "checkpoint", "f.toml"],
         vec!["--json", "adopt", "f.toml", "--preview"],
+        vec![
+            "--json",
+            "repair",
+            "f.toml",
+            "--drop-torn-tail",
+            "--preview",
+        ],
     ] {
         let (took, out) = case.run_timed(&args);
         assert!(took < PROMPTLY, "{args:?} took {took:?}");

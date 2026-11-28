@@ -7,6 +7,7 @@
 mod cli_debit;
 mod cli_evidence;
 mod cli_help;
+mod cli_repair;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -281,6 +282,31 @@ enum Command {
         #[command(flatten)]
         lock: LockArgs,
     },
+    /// Remove a last ledger line that a failed write cut short, when the witness proves it was never counted.
+    ///
+    /// The removed bytes are kept in a new file beside the ledger
+    /// (LEDGER.torn-N). Anything else (a complete last line, damage before
+    /// it, a line the witness counted) is refused and nothing is changed.
+    Repair {
+        /// The pass file.
+        file: PathBuf,
+        /// Remove the cut-short last line (the only repair there is).
+        #[arg(long, required = true)]
+        drop_torn_tail: bool,
+        /// Show what would be removed, and the token, without changing anything.
+        #[arg(long)]
+        preview: bool,
+        /// The token the preview printed; the repair runs only if nothing changed since.
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            conflicts_with = "preview",
+            required_unless_present = "preview"
+        )]
+        token: Option<String>,
+        #[command(flatten)]
+        lock: LockArgs,
+    },
     /// After an adoption that may have lost lines, record which caller references may be in them, so guarded spends resume.
     ///
     /// The reconciliation is written into the ledger. From it on, a spend
@@ -410,6 +436,7 @@ impl Command {
             Self::Digest { .. } => "digest",
             Self::Ledger { .. } => "ledger",
             Self::Adopt { .. } => "adopt",
+            Self::Repair { .. } => "repair",
             Self::ReconcileReferences { .. } => "reconcile-references",
             Self::Archive { .. } => "archive",
             Self::Retrieve { .. } => "retrieve",
@@ -438,6 +465,7 @@ impl Command {
             | Self::Permits { lock, .. }
             | Self::Ledger { lock, .. }
             | Self::Adopt { lock, .. }
+            | Self::Repair { lock, .. }
             | Self::ReconcileReferences { lock, .. }
             | Self::Receipt { lock, .. }
             | Self::AuditReceipts { lock, .. }
@@ -576,6 +604,7 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
         Error::WitnessNotUpdated { .. } => Some("recorded"),
         Error::AppendUncertain { .. } => Some("uncertain"),
         Error::LockTimeout { .. }
+        | Error::AppendRolledBack { .. }
         | Error::Usage(_)
         | Error::SharedDirectory { .. }
         | Error::LedgerClockMix { .. } => Some("not-recorded"),
@@ -584,7 +613,8 @@ fn recording(command: &str, error: &Error) -> Option<&'static str> {
         {
             Some("not-recorded")
         }
-        _ if READ_ONLY_COMMANDS.contains(&command) => Some("not-recorded"),
+        // `repair` removes only bytes that are not an entry: it never records.
+        _ if READ_ONLY_COMMANDS.contains(&command) || command == "repair" => Some("not-recorded"),
         _ => None,
     }
 }
@@ -643,7 +673,7 @@ fn error_output(command: &str, file: Option<&Path>, error: &Error) -> Output {
                 "code": error.code(),
                 "recording": recording(command, error),
                 "seq": match error { Error::WitnessNotUpdated{seq,..}=>Some(seq), _=>None },
-                "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}=>Some(path), _=>None },
+                "ledger": match error { Error::WitnessNotUpdated{path,..}|Error::AppendUncertain{path,..}|Error::AppendRolledBack{path,..}=>Some(path), _=>None },
                 "message": message,
                 "line": match error {
                     Error::LedgerCorrupt { line, .. } => Some(*line),
@@ -2595,6 +2625,12 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
                 )
             }
         }
+        Command::Repair {
+            file,
+            preview,
+            token,
+            ..
+        } => cli_repair::repair(file, *preview, token.as_deref()),
         Command::ReconcileReferences {
             file,
             adoption,

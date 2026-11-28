@@ -216,9 +216,6 @@ fn a_cut_short_last_line_keeps_the_cut_short_advice() {
     assert_eq!(v["error"]["line"], 4);
     assert_eq!(v["error"]["last_line"], true);
     let m = message(&v);
-    assert!(
-        m.contains("remove only a final line that was cut short"),
-        "{m}"
-    );
-    assert!(!m.contains("do not edit lines by hand"), "{m}");
+    assert!(m.contains("--drop-torn-tail --preview"), "{m}");
+    assert!(m.contains("Do not edit the ledger by hand"), "{m}");
 }
