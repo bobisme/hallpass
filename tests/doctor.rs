@@ -954,8 +954,9 @@ fn a_damaged_ledger_with_another_ledger_in_sight_never_names_the_adoption() {
     assert!(!step.contains("hallpass adopt"), "{reply}");
 }
 
-/// A writer stopped while it holds the ledger lock does not hold doctor up
-/// without end: doctor waits a few seconds, then reports `blocked`.
+/// A writer stopped while it holds the ledger lock does not hold doctor up:
+/// doctor tries the lock without waiting and reports `needs-action`
+/// (`lock-held`, bn-22sm).
 #[test]
 fn doctor_bounds_its_own_wait_for_a_held_lock() {
     if Command::new("flock").arg("--version").output().is_err() {
@@ -975,14 +976,14 @@ fn doctor_bounds_its_own_wait_for_a_held_lock() {
     holder.wait().expect("reap holder");
     assert_eq!(
         (rc, &reply["result"], &reply["problem"]),
-        (2, &Value::from("blocked"), &Value::from("lock-timeout")),
+        (2, &Value::from("needs-action"), &Value::Null),
         "{reply}"
     );
     assert!(waited < Duration::from_secs(15), "{waited:?}");
     assert!(
-        reply["next_step"]
+        reply["headline"]
             .as_str()
-            .is_some_and(|s| s.contains("--lock-timeout-ms")),
+            .is_some_and(|s| s.contains("p.toml.ledger")),
         "{reply}"
     );
 }

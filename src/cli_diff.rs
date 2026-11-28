@@ -6,6 +6,38 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+/// The ledger summary a projection reads, the path it came from, and its
+/// source. Neither file has a ledger beside it when `source` is `none`: if the
+/// witness names an intact live ledger with its pass file beside it, that one
+/// is read (read only); if it has no pass file, the reader is told to give
+/// the live pass as OLD.
+fn read_projection<'a>(
+    ledger_of: &LoadedPass,
+    source: &'a str,
+    state: &StateDir,
+) -> Result<(hallpass::LedgerView, std::path::PathBuf, &'a str), Error> {
+    let ledger = hallpass::ledger_path(&ledger_of.path);
+    match read_summary(ledger_of, state) {
+        Err(Error::LedgerElsewhere(elsewhere)) if source == "none" => {
+            let live = elsewhere
+                .live_pass
+                .as_deref()
+                .and_then(|path| hallpass::load(path).ok())
+                .filter(|live| live.pass.id == ledger_of.pass.id);
+            let Some(live) = live else {
+                return Err(Error::Usage(format!(
+                    "neither OLD nor NEW has a ledger beside it, and the ledger for pass {} is kept elsewhere ({}) with no pass file of the same id beside it. Nothing was changed. To see the budget impact, give the live pass file as OLD.",
+                    super::quoted(&ledger_of.pass.id),
+                    super::quoted(&elsewhere.live.display().to_string()),
+                )));
+            };
+            let view = read_summary(&live, state)?;
+            Ok((view, hallpass::ledger_path(&live.path), "live"))
+        }
+        other => Ok((other?, ledger, source)),
+    }
+}
+
 fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(), Error> {
     if old.pass.id != proposed.pass.id {
         out.code = REFUSED;
@@ -26,8 +58,7 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
     } else {
         ("none", proposed)
     };
-    let ledger = hallpass::ledger_path(&ledger_of.path);
-    let view = read_summary(ledger_of, &state)?;
+    let (view, ledger, source) = read_projection(ledger_of, source, &state)?;
     if let WitnessStatus::NotChecked { reason } = view.witness {
         return Err(Error::WitnessUnavailable {
             pass_id: old.pass.id.clone(),
@@ -73,6 +104,7 @@ fn budget(old: &LoadedPass, proposed: &LoadedPass, out: &mut Output) -> Result<(
         match source {
             "new" => "beside NEW",
             "old" => "beside OLD; NEW has none",
+            "live" => "the live ledger, named by the witness",
             _ => "neither OLD nor NEW has one yet",
         }
     );

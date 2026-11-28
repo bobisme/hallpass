@@ -221,13 +221,12 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
 #[test]
 fn read_only_commands_name_the_live_ledger_without_advising_adopt() {
     let case = Case::amended();
-    let commands: [&[&str]; 6] = [
+    let commands: [&[&str]; 5] = [
         &["permits", "q.toml", "--to", TO],
         &["ledger", "q.toml"],
         &["capacity", "q.toml", "--charge", "calls=1", "--to", TO],
         &["receipt", "q.toml", "--caller-ref", "unit-1"],
         &["checkpoint", "q.toml"],
-        &["diff", "q.toml", "q.toml", "--budget-impact"],
     ];
     for args in commands {
         let (rc, out) = case.json(args);
@@ -246,6 +245,15 @@ fn read_only_commands_name_the_live_ledger_without_advising_adopt() {
         );
         assert!(!out.to_string().contains("adopt"), "{args:?}: {out}");
     }
+    // `diff --budget-impact` reads the live ledger the witness names, with
+    // its pass file beside it (bn-22sm), and changes nothing.
+    let shown = case.run(&["diff", "q.toml", "q.toml", "--budget-impact"]);
+    assert_eq!(shown.status.code(), Some(0), "{}", text(&shown));
+    assert!(
+        text(&shown).contains("(the live ledger, named by the witness)"),
+        "{}",
+        text(&shown)
+    );
     // These may stop at their own inputs first; whatever they say, they
     // never send the reader to adopt.
     let evidence: [&[&str]; 4] = [

@@ -147,23 +147,36 @@ fn diagnose(
         d.block(error_issue(file, state, e));
     }
     let now = clock.sample();
-    match hallpass::read_summary(&loaded, state) {
-        Ok(view) => {
-            ledger_findings(
-                &mut d,
-                file,
-                &loaded,
-                &view,
-                state,
-                now,
-                directory_refused.is_some(),
-            );
-            if let Some((path, cp)) = &checkpoint {
-                checkpoint::findings(&mut d, file, &loaded, path, cp, state);
+    let held = held_locks(file, &loaded, state);
+    let ledger_busy = held.iter().any(|h| h.ledger);
+    if !held.is_empty() {
+        d.act(held_issue(file, &held));
+    }
+    if ledger_busy {
+        // A read would wait for the holder; doctor answers without that.
+        d.find(
+            "ledger-not-read",
+            "the ledger is held by another process, so doctor did not read it; run doctor again once the lock is free",
+        );
+    } else {
+        match hallpass::read_summary(&loaded, state) {
+            Ok(view) => {
+                ledger_findings(
+                    &mut d,
+                    file,
+                    &loaded,
+                    &view,
+                    state,
+                    now,
+                    directory_refused.is_some(),
+                );
+                if let Some((path, cp)) = &checkpoint {
+                    checkpoint::findings(&mut d, file, &loaded, path, cp, state);
+                }
             }
+            Err(Error::LockTimeout { path }) => d.block(lock_issue(file, &path)),
+            Err(e) => d.block(error_issue(file, state, &e)),
         }
-        Err(Error::LockTimeout { path }) => d.block(lock_issue(file, &path)),
-        Err(e) => d.block(error_issue(file, state, &e)),
     }
     if let Some(warning) = state.observe_pass_file(&loaded) {
         d.find("pass-edited-in-place", warning);
@@ -207,6 +220,92 @@ fn diagnose(
         _ => {}
     }
     Ok(d)
+}
+
+/// A lock another process holds right now.
+struct HeldLock {
+    path: std::path::PathBuf,
+    /// True for the ledger's lock, false for the writer (witness) lock.
+    ledger: bool,
+    holder: Option<u32>,
+}
+
+/// Try each lock once without waiting: the writer lock for the pass id, and
+/// the ledger's. A probe that takes a lock lets go of it at once (the file is
+/// dropped). Nothing is created, so a lock file that is not there is free.
+fn held_locks(file: &Path, loaded: &LoadedPass, state: &StateDir) -> Vec<HeldLock> {
+    let mut held = Vec::new();
+    let mut probe = |path: std::path::PathBuf, ledger: bool, shared: bool| {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return;
+        };
+        if !meta.file_type().is_file() {
+            return;
+        }
+        let Ok(lock) = std::fs::File::open(&path) else {
+            return;
+        };
+        let attempt = if shared {
+            lock.try_lock_shared()
+        } else {
+            lock.try_lock()
+        };
+        if matches!(attempt, Err(std::fs::TryLockError::WouldBlock)) {
+            let holder = hallpass::lock_holder_pid(&path);
+            held.push(HeldLock {
+                path,
+                ledger,
+                holder,
+            });
+        }
+    };
+    if let Ok(dir) = state.path() {
+        probe(dir.join(format!("{}.lock", loaded.pass.id)), false, false);
+    }
+    // A read takes the ledger shared, so only a writer blocks it.
+    probe(hallpass::ledger_path(file), true, true);
+    held
+}
+
+/// The issue for locks held now. A spend waits for the writer lock and times
+/// out at its limit, so this needs action, but a lock is held for moments in
+/// a healthy run, so it does not block: run doctor again if it clears.
+fn held_issue(file: &Path, held: &[HeldLock]) -> Issue {
+    let describe = |h: &HeldLock| {
+        let which = if h.ledger { "ledger" } else { "writer" };
+        let who = h.holder.map_or_else(
+            || "another process holds it".to_owned(),
+            |pid| format!("process {pid} holds it"),
+        );
+        format!("the {which} lock {}: {who}", shown(&h.path))
+    };
+    let first = &held[0];
+    let inspect = first.holder.map_or_else(
+        || {
+            format!(
+                "Find the process that holds it with `fuser {}`",
+                shown(&first.path)
+            )
+        },
+        |pid| format!("Find out what process {pid} is doing (`ps -p {pid}`)"),
+    );
+    let mut lines = vec![format!(
+        "{}. A spend or another command that writes waits for it, and times out if it is held too long. Doctor changed nothing.",
+        held.iter().map(describe).collect::<Vec<_>>().join("; ")
+    )];
+    if held.iter().any(|h| h.ledger) {
+        lines.push("Doctor did not read the ledger, so this report does not cover it.".to_owned());
+    }
+    Issue {
+        code: "lock-held".to_owned(),
+        headline: Some(format!("another process holds {}", shown(&first.path))),
+        lines,
+        next: None,
+        step: format!(
+            "{inspect}. If it is a spend in progress, wait for it to finish. If it is hung, stop it: the lock is released when its holder exits, and a stopped writer leaves the ledger and witness intact. Then run `hallpass doctor {}` again.",
+            shown(file)
+        ),
+    }
 }
 
 /// The issue for a lock another process holds past the wait: nothing was

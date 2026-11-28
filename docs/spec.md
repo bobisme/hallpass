@@ -430,6 +430,16 @@ sync. An external process timeout can leave the outcome unknown.
 `lock-timeout` (exit 2), naming the holder's process when it is known and
 saying how to wait longer; it does not fail with an error.
 
+Before it reads, `doctor` also tries the writer lock and the ledger lock
+once each, without waiting (a probe that takes a lock lets go of it at
+once, and no lock file is created). A lock another process holds is
+reported as `needs-action` with code `lock-held`, naming the holder's
+process when it is known (else `fuser PATH`) and saying that a hung writer
+can be stopped, which frees the lock. It is `needs-action`, not `blocked`,
+because a lock is often held for moments by a healthy spend; run doctor
+again if it clears. A held ledger lock means doctor does not read the
+ledger (a read would wait), and says so in a finding.
+
 A preflight (`permits` before each further address) should pass
 `--lock-timeout-ms`. Then a writer that stopped while it held the lock (a
 `SIGSTOP`, a hung disk, a debugger) makes the worker fail with
@@ -1037,7 +1047,7 @@ kind, so a newly allowed one comes before every other newly allowed row.
 
 ### Projecting an amendment against live balances
 
-`hallpass diff OLD NEW --budget-impact --json` reads one verified summary from the live ledger. In the documented flow OLD is an archived copy with no ledger and NEW is the live pass, so the ledger beside NEW is used; the ledger beside OLD is used only when NEW has none. `budget_impact.ledger` is the path read and `budget_impact.ledger_source` is `new`, `old` or `none` (neither exists; the projection then starts from zero spend, or fails when the witness records spends). Text prints the same as `Ledger used:`. A read-only command never advises `hallpass adopt`; its ledger and witness errors say only that nothing was changed, and recovery advice appears from `status`, `spend` and `adopt`. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). `budget_impact.counter_substitution` is `{dropped, added}` when NEW drops a ceiling and adds one under a new name, and null otherwise. Text then warns that a new counter starts with nothing spent, so spend on a dropped counter does not count against it. Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
+`hallpass diff OLD NEW --budget-impact --json` reads one verified summary from the live ledger. In the documented flow OLD is an archived copy with no ledger and NEW is the live pass, so the ledger beside NEW is used; the ledger beside OLD is used only when NEW has none. When neither has one and the witness names an intact live ledger for the id, with its pass file beside it, that ledger is read, read only, and the text says `Ledger used: PATH (the live ledger, named by the witness).`; if the live ledger has no pass file beside it, the command fails and says to give the live pass file as OLD. `budget_impact.ledger` is the path read and `budget_impact.ledger_source` is `new`, `old`, `live` or `none` (neither exists; the projection then starts from zero spend, or fails when the witness records spends). Text prints the same as `Ledger used:`. A read-only command never advises `hallpass adopt`; its ledger and witness errors say only that nothing was changed, and recovery advice appears from `status`, `spend` and `adopt`. Both digests identify the files compared. The projection gives the witness status and verified ledger tip (null before the first ledger). Each counter row shows the two limits, mandatory-charge flags and remaining amounts against the same historical spend, including adoption carry. A missing ceiling is null. For eight calls spent and a proposed ceiling of six, proposed_remaining is zero and over_proposed is two. This is a completed review (exit 0). `budget_impact.counter_substitution` is `{dropped, added}` when NEW drops a ceiling and adds one under a new name, and null otherwise. Text then warns that a new counter starts with nothing spent, so spend on a dropped counter does not count against it. Different pass IDs make a projection inapplicable (exit 2). Unusable accounting evidence exits 1. A proposal can change after review and concurrent spends can change these balances.
 
 ### Proving endpoint containment
 
