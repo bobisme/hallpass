@@ -848,3 +848,134 @@ fn a_state_directory_under_another_users_directory_names_xdg_state_home() {
     );
     assert!(!Path::new(state).exists());
 }
+
+/// With no backup, doctor's own steps lead from a damaged ledger to a
+/// healthy pass: the step gives the move and the adoption, and the warning.
+#[test]
+fn a_damaged_ledger_with_no_backup_finishes_through_the_last_resort() {
+    let case = Case::spent(2);
+    let ledger = case.path("c/p.toml.ledger");
+    let text = fs::read_to_string(&ledger).expect("ledger");
+    fs::write(&ledger, text.replacen("\"seq\":1", "\"seq\":7", 1)).expect("damage");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["problem"]),
+        (2, &Value::from("ledger-corrupt")),
+        "{reply}"
+    );
+    assert_eq!(
+        next(&reply),
+        ["hallpass", "compare-backups", "c/p.toml", "c/p.toml.ledger"]
+    );
+    let step = reply["next_step"].as_str().expect("step");
+    assert!(step.contains("If no backup copy exists"), "{reply}");
+    assert!(step.contains("not in the new chain"), "{reply}");
+    assert!(
+        step.contains("`hallpass adopt c/p.toml --reason"),
+        "{reply}"
+    );
+    let mv = step
+        .split('`')
+        .find(|part| part.starts_with("mv "))
+        .unwrap_or_else(|| panic!("no mv command in {step}"));
+    let words: Vec<&str> = mv.split(' ').collect();
+    assert_eq!(words.len(), 3, "{mv}");
+    fs::rename(case.path(words[1]), case.path(words[2])).expect("move aside");
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (rc, &reply["problem"]),
+        (2, &Value::from("ledger-missing")),
+        "{reply}"
+    );
+    assert_eq!(
+        next(&reply),
+        ["hallpass", "adopt", "c/p.toml", "--preview"],
+        "{reply}"
+    );
+    adopt(&case, "c/p.toml");
+    // The moved ledger's lines may hold caller references: doctor names the
+    // reconciliation, and with it the pass is healthy.
+    let (rc, reply) = case.doctor("c/p.toml");
+    assert_eq!(
+        (
+            rc,
+            &reply["result"],
+            next(&reply).last().map(String::as_str)
+        ),
+        (
+            2,
+            &Value::from("needs-action"),
+            Some("reconcile-references")
+        ),
+        "{reply}"
+    );
+    fs::write(
+        case.path("refs.json"),
+        format!("{{\"version\": 1, \"pass_id\": \"{ID}\", \"references\": []}}"),
+    )
+    .expect("references");
+    let (rc, out) = case.json(&[
+        "reconcile-references",
+        "c/p.toml",
+        "--adoption",
+        "1",
+        "--references",
+        "refs.json",
+        "--reason",
+        "no run used a caller reference",
+    ]);
+    assert_eq!(rc, 0, "{out}");
+    assert_healthy(&case, "c/p.toml");
+}
+
+/// A damaged ledger with another ledger for the pass id in sight is never
+/// sent to the last resort.
+#[test]
+fn a_damaged_ledger_with_another_ledger_in_sight_never_names_the_adoption() {
+    let case = Case::spent(2);
+    fs::create_dir(case.path("d")).expect("d");
+    fs::copy(case.path("c/p.toml.ledger"), case.path("d/p.toml.ledger")).expect("copy");
+    case.pass("d/p.toml", PASS);
+    let (rc, out) = case.json(&["spend", "d/p.toml", "calls", "--to", TO]);
+    assert_eq!(rc, 0, "{out}");
+    let ledger = case.path("c/p.toml.ledger");
+    let text = fs::read_to_string(&ledger).expect("ledger");
+    fs::write(&ledger, text.replacen("\"seq\":1", "\"seq\":7", 1)).expect("damage");
+    let (_, reply) = case.doctor("c/p.toml");
+    assert_eq!(reply["problem"], "ledger-corrupt", "{reply}");
+    let step = reply["next_step"].as_str().expect("step");
+    assert!(!step.contains("hallpass adopt"), "{reply}");
+}
+
+/// A writer stopped while it holds the ledger lock does not hold doctor up
+/// without end: doctor waits a few seconds, then reports `blocked`.
+#[test]
+fn doctor_bounds_its_own_wait_for_a_held_lock() {
+    if Command::new("flock").arg("--version").output().is_err() {
+        return;
+    }
+    let case = Case::spent(1);
+    let mut holder = Command::new("flock")
+        .args(["-x", "c/p.toml.ledger", "sleep", "20"])
+        .current_dir(case.dir.path())
+        .spawn()
+        .expect("hold the lock");
+    std::thread::sleep(Duration::from_millis(500));
+    let began = std::time::Instant::now();
+    let (rc, reply) = case.json(&["doctor", "c/p.toml"]);
+    let waited = began.elapsed();
+    holder.kill().expect("stop holder");
+    holder.wait().expect("reap holder");
+    assert_eq!(
+        (rc, &reply["result"], &reply["problem"]),
+        (2, &Value::from("blocked"), &Value::from("lock-timeout")),
+        "{reply}"
+    );
+    assert!(waited < Duration::from_secs(15), "{waited:?}");
+    assert!(
+        reply["next_step"]
+            .as_str()
+            .is_some_and(|s| s.contains("--lock-timeout-ms")),
+        "{reply}"
+    );
+}

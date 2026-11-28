@@ -61,6 +61,14 @@ fn lock_holder(file: &File) -> Option<u32> {
     })
 }
 
+/// The process holding an `flock` on the file at `path`, when it can be found
+/// (Linux, from `/proc/locks`). The file is opened for reading only and no
+/// lock is taken.
+#[must_use]
+pub fn lock_holder_pid(path: &Path) -> Option<u32> {
+    lock_holder(&File::open(path).ok()?)
+}
+
 /// The lock wait that [`with_lock_wait`] set on this thread: what is left of
 /// its budget, and who hears about a long wait.
 #[derive(Clone, Copy)]

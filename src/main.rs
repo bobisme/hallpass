@@ -2599,13 +2599,19 @@ fn command_clock(command: &Command) -> Result<Clock, Error> {
     }
 }
 
+/// How long `doctor` waits for a lock when no `--lock-timeout-ms` is given.
+const DOCTOR_LOCK_WAIT_MS: u64 = 3000;
+
 /// Run the command. A command that takes the ledger lock waits for it as long
 /// as its `--lock-timeout-ms` allows, and says on stderr when it has waited a
 /// while.
 fn run(cli: &Cli, format: Format) -> Output {
+    // Doctor is the command to run first, so it never waits without end.
+    let default_ms = matches!(cli.command, Command::Doctor { .. }).then_some(DOCTOR_LOCK_WAIT_MS);
     let limit = cli
         .command
         .lock_timeout_ms()
+        .or(default_ms)
         .map(std::time::Duration::from_millis);
     hallpass::with_lock_wait(limit, Some(announce_lock_wait), || dispatch(cli, format))
 }

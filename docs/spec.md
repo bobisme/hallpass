@@ -418,12 +418,17 @@ N is one monotonic wait budget for every lock the command takes: on a
 committing spend, both writer locks; on a read, the ledger lock (and the lock
 of each candidate, for `compare-backups`). Only time spent waiting is
 counted, not time spent reading. Zero requests one nonblocking attempt per
-lock. Omitting the option uses blocking locks and waits without limit. A
+lock. Omitting the option uses blocking locks and waits without limit,
+except for `doctor`, which then waits 3 seconds. A
 timeout exits 1 with `error.code = "lock-timeout"` and
 `error.recording = "not-recorded"`. For `compare-backups`, a timeout on any
 candidate fails the whole command; it is not reported as a row. The budget
 covers lock acquisition. It places no deadline on a subsequent append or
 sync. An external process timeout can leave the outcome unknown.
+
+`doctor` reports a lock still held after its wait as `blocked` with problem
+`lock-timeout` (exit 2), naming the holder's process when it is known and
+saying how to wait longer; it does not fail with an error.
 
 A preflight (`permits` before each further address) should pass
 `--lock-timeout-ms`. Then a writer that stopped while it held the lock (a
@@ -1206,7 +1211,7 @@ it was recognized (null otherwise). Help and version requests return their own c
 | `init` | template written (mode 0600; it does not validate until filled in) | never | file exists, write failed |
 | `check` | the pass validates (warnings can still be present) | never | any problem |
 | `status` | the window is valid | not-yet-valid, expired or revoked | invalid pass, ledger error (also missing or changed per the witness) |
-| `doctor` | `healthy`: nothing blocks a spend and nothing needs doing | `needs-action` or `blocked`, with the one next command | a pass path that cannot be read or is not a regular file, an unusable archive directory, `lock-timeout` |
+| `doctor` | `healthy`: nothing blocks a spend and nothing needs doing | `needs-action` or `blocked`, with the one next command | a pass path that cannot be read or is not a regular file, an unusable archive directory |
 | `permits` | allowed | refused, also `pass-changed` with `--digest` | invalid pass or target, ledger error (as `status`) |
 | `spend` | recorded (with `--to`: and the destination is permitted); with `--dry-run`, `would-allow` | refused by the digest, the window, the reference guard, the destination or the ceiling; nothing recorded | error; inspect recording state before retry |
 | `capacity` | budget count, including zero | invalid unit policy | usage, pass or accounting error |
@@ -1244,7 +1249,7 @@ real paths, or nothing to do. It uses the library's own errors and advice:
 witness recorded, names `repair --restore-final-newline --preview`; a
 cut-short last line that the repair preview accepts names
 `repair --drop-torn-tail --preview`; other damage and `ledger-changed`
-name `compare-backups`, `ledger-elsewhere` names the `mv` of the live ledger
+name `compare-backups`, and with no other ledger for the pass id in sight their step also gives the last resort for a pass with no backup (move the ledger aside, then adopt, with the exact commands and the warning that the moved ledger's receipts leave the chain); `ledger-elsewhere` names the `mv` of the live ledger
 (or a `diff` with the live pass file when one is beside it), and
 `ledger-missing` names `adopt --preview`. It never names `adopt` while the
 ledger may be intact elsewhere: when a file is still where the witness last

@@ -145,7 +145,7 @@ fn diagnose(
             now,
             directory_refused.is_some(),
         ),
-        Err(e @ Error::LockTimeout { .. }) => return Err(e),
+        Err(Error::LockTimeout { path }) => d.block(lock_issue(file, &path)),
         Err(e) => d.block(error_issue(file, state, &e)),
     }
     if let Some(warning) = state.observe_pass_file(&loaded) {
@@ -188,6 +188,37 @@ fn diagnose(
         _ => {}
     }
     Ok(d)
+}
+
+/// The issue for a lock another process holds past the wait: nothing was
+/// read, so nothing else is said about the ledger.
+fn lock_issue(file: &Path, path: &Path) -> Issue {
+    let holder = hallpass::lock_holder_pid(path);
+    let who = holder.map_or_else(
+        || "another process holds it".to_owned(),
+        |pid| format!("process {pid} holds it"),
+    );
+    let inspect = holder.map_or_else(
+        || {
+            format!(
+                "Find the process that holds it with `fuser {}`",
+                shown(path)
+            )
+        },
+        |pid| format!("Find out what process {pid} is doing (`ps -p {pid}`)"),
+    );
+    Issue {
+        code: "lock-timeout".to_owned(),
+        lines: vec![format!(
+            "timed out waiting for the lock on {}: {who}. Doctor changed nothing.",
+            shown(path)
+        )],
+        next: None,
+        step: format!(
+            "{inspect}; if it is stopped or stuck, stop it (the lock is released when its holder exits), or wait for it to finish. To wait longer, run `hallpass doctor {} --lock-timeout-ms MS`. Then run doctor again.",
+            shown(file)
+        ),
+    }
 }
 
 /// What a ledger that reads without an error still says.
@@ -655,12 +686,30 @@ fn corrupt_step(
             )),
         }
     }
+    let elsewhere = hallpass::load(file).is_ok_and(|loaded| {
+        state
+            .last_seen_ledger(&loaded.pass.id)
+            .filter(|seen| seen.is_absolute() && seen.is_file())
+            .is_some_and(|seen| std::fs::canonicalize(ledger).ok().as_ref() != Some(&seen))
+    });
+    let mut step = format!(
+        "Add each backup copy of the ledger after {}: compare-backups shows which copy is the good one. Restore that copy beside the pass. Do not edit the ledger by hand.",
+        shown(ledger)
+    );
+    if elsewhere {
+        step.push_str(" Another ledger for this pass id may be intact, so do not adopt: add it to compare-backups too.");
+    } else {
+        let _ = write!(
+            step,
+            " If no backup copy exists, the last resort is to move this ledger aside (keep it) with `mv {ledger} {aside}`, then run doctor again: it shows the adoption preview (`hallpass adopt {pass} --preview`), and `hallpass adopt {pass} --reason \"...\"` with the token starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain.",
+            ledger = shell_word(&shown(ledger)),
+            aside = shell_word(&aside(ledger)),
+            pass = shell_word(&pass),
+        );
+    }
     (
         argv(["hallpass", "compare-backups", &pass, &shown(ledger)]),
-        format!(
-            "Add each backup copy of the ledger after {}: compare-backups shows which copy is the good one. Restore that copy beside the pass. Do not edit the ledger by hand.",
-            shown(ledger)
-        ),
+        step,
     )
 }
 
