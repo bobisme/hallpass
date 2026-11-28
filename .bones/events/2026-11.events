@@ -699,3 +699,7 @@
 1795841532768232	hallpass-dev	itc:AQ		item.assign	bn-2i6n	{"action":"assign","agent":"hallpass-dev"}	blake3:rbbvgduP1c4AuPMlYJBMcxaMz1l-NiRyka_Ei6b16hc
 1795841532781202	hallpass-dev	itc:AQ		item.move	bn-ulz6	{"state":"doing"}	blake3:i7h8mfqx__utg5HhiMjRFFsZIMkYrdNjFcela0gqslE
 1795841532785375	hallpass-dev	itc:AQ		item.assign	bn-ulz6	{"action":"assign","agent":"hallpass-dev"}	blake3:0YMQNuDGKxX-GIlGDF8hIjN2FActt-AsDGMSyj9OZVY
+1795842730796615	hallpass-dev	itc:AQ		item.move	bn-x9yr	{"state":"done"}	blake3:NMiV053TUY7ZLelIRT0hlMU_IDmmZs2CTzMP5qhx5wY
+1795842730813369	hallpass-dev	itc:AQ		item.move	bn-1gvw	{"state":"done"}	blake3:kwYXSvRmXD_InJxVNQ8KvdMBU4G5JjWo7Z8DjDXMzsc
+1795842730829943	hallpass-dev	itc:AQ		item.move	bn-2i6n	{"state":"done"}	blake3:7mbBoyu3tQYoDSK8sHo7tstt9NeacJ_9ovttQYFHKg4
+1795842730844955	hallpass-dev	itc:AQ		item.move	bn-ulz6	{"state":"done"}	blake3:NpVOpnJyKcisbKiPtLrUwflasM1e4_esSKFrYhjivY0

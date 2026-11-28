@@ -316,8 +316,28 @@ Changes since commit d70c09f.
 - A pass with `-0` or a quoted single port (`ports = "443"`) no longer loads.
   Write `0` or `443`; quoted strings are for ranges such as `"8000-8100"`.
 
+- `hallpass doctor` no longer reports `healthy` when the next spend would
+  fail: a ledger with entries and no witness is `needs-action` (`no-witness`,
+  next `adopt --preview`); an unwritable state directory, witness lock, ledger
+  or pass directory is `blocked` with the spend's error code and the `chmod`
+  (or `XDG_STATE_HOME` when another user owns the directory); every ceiling
+  reached is `blocked` (`ceiling-reached`). Scripts that read exit 0 as "ok"
+  see exit 2 there.
+- A pass whose ledger was copied and then spent from elsewhere is refused as
+  `ledger-elsewhere` (with the live ledger and the diff / mv / new-id steps) on
+  spend, status and permits, instead of `ledger-changed` with adopt advice.
+- `hallpass repair` needs one of `--drop-torn-tail` or
+  `--restore-final-newline`.
+
 ### Added
 
+- `hallpass repair --restore-final-newline` (with `--preview` and `--token`;
+  library `preview_restore_final_newline`, `restore_final_newline`,
+  `FinalNewline`) adds the missing line end to a whole last ledger line that
+  chains and is the line the witness recorded, keeping every receipt. Doctor
+  names it when it applies.
+- `StateDir::last_seen_ledger`.
+- The minimal caller takes an optional COUNTER argument (default `requests`).
 - `hallpass doctor FILE [--archive DIR]`: a read-only diagnosis of a pass,
   its ledger, witness and state. It gives `healthy` / `needs-action` /
   `blocked`, the `problem` code a spend would fail with, exactly one `next`
@@ -704,3 +724,12 @@ Changes since commit d70c09f.
   (bn-134).
 - `-0` was accepted although `+0` was refused; a quoted single port was
   accepted though not documented (bn-2ew).
+- Doctor said HEALTHY in states where the next spend failed, and its
+  damaged-witness advice led into one of them (bn-x9yr).
+- A changed copy's spend error suggested `adopt` while `adopt` refused it as
+  a fork. Creating the ledger in an unwritable directory blamed the missing
+  ledger file; it now names the directory and the `chmod` (bn-1gvw).
+- A counted last line that lost only its newline can be repaired without
+  dropping receipts (bn-ulz6).
+- INTEGRATING says that a closed stdout loses the reply undetectably: the
+  runtime reopens it on `/dev/null` before hallpass runs (bn-2i6n).
