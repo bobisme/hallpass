@@ -418,8 +418,23 @@ Changes since commit d70c09f.
 - `archive-corrupt` has a next step; compare-backups advice can carry a
   `restore-backup` entry.
 
+- Text errors, spend refusals and doctor are short by default: a headline,
+  `Next:`, at most three bullets and a `More:` pointer. The global
+  `--verbose` prints the full text; JSON is unchanged. Help lists each agent
+  workflow as numbered steps.
+- For `ledger-changed`, compare-backups' `last-resort` advice is an in-place
+  `hallpass adopt PASS --preview`, not a move aside; every `mv` argv doctor
+  or compare-backups gives starts `mv -n`.
+- `verify-checkpoint`, `doctor --checkpoint` and `adopt --checkpoint` refuse
+  a checkpoint file that group or others can write, or another user owns; a
+  symlink to a checkpoint is followed and checked.
+
 ### Added
 
+- Global `--verbose`.
+- `checkpoint --output FILE` (mode 0600, refuses an existing file).
+- `hallpass::LastResort`, `Error::last_resort()`, `open_trusted_checkpoint`.
+- docs/PASS-FORMAT.md: "Renewing or extending an approval".
 - `doctor` `lock-held` and the `ledger-not-read` finding.
 - compare-backups `restore-backup` advice with an `argv` for an exact copy
   when the ledger beside the pass is missing or damaged.
@@ -908,3 +923,9 @@ Changes since commit d70c09f.
 - Signers through a symlink were refused; a lossy adopt skipped the
   reviewed token (bn-37q2).
 - Text messages ran to 900-1,450 characters on one line (bn-2va1).
+- Doctor named a move-aside recovery that dropped every receipt where the
+  error named an in-place adoption that keeps them; doctor's rehearsal step
+  dropped `mv -n`; rehearsal lines raised a clock warning (bn-aao7).
+- Text messages ran to 1,000-2,550 characters and repeated their advice
+  (bn-u8fo).
+- A checkpoint file anyone could write was trusted (bn-9qrd).
