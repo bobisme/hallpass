@@ -345,8 +345,35 @@ Changes since commit d70c09f.
   pass time's fraction of a second. `hallpass <command> --version` is gone
   (`hallpass --version` remains).
 
+- Every text-mode error's first line is `hallpass CMD: error: CODE: HEADLINE`
+  (the code is new on every error, including `usage`), then a `Next:` line
+  when there is one, then the old message indented. Doctor's verdict line is
+  the short headline, followed by `Next:` and a `Details:` section. JSON error
+  objects gain `headline` and `next`.
+- New `DIGEST.approval` records are version 2 and carry the signing `key`;
+  older hallpass reads them as damaged. Audits whose trusted signers file
+  gives the owner's key only through a pattern line (`*`, `?`, `!`) are
+  `incomplete` (`signer-matched-by-pattern`) unless
+  `--allow-pattern-principals`. Library: `Recheck` gains `Signed` and is no
+  longer `Copy`; `Reverify` gains `allow_pattern_principals`.
+- A witness for a ledger holding only rehearsal entries carries
+  `"test_clock":true`. A real-clock `adopt` from such a witness refuses unless
+  given `--drop-rehearsal REHEARSAL_LEDGER` or `--carry-rehearsal`.
+- The minimal caller's refusal line is `refused: CODE: MESSAGE`.
+- `reconcile --json` rows have a `reason` key.
+
 ### Added
 
+- `adopt --drop-rehearsal REHEARSAL_LEDGER`: after an accidental rehearsal on
+  the live pass, move the rehearsal ledger aside and adopt carrying nothing;
+  hallpass first proves the moved file is the witnessed ledger and holds only
+  test-clock entries. `--carry-rehearsal` keeps the units. Doctor names both
+  steps.
+- `verify-approval` reports `key` and `principal_match`, warns on
+  pattern-only matches, and takes `--signer-key` and
+  `--allow-pattern-principals`; audits report `signer_key` per revision from
+  their own verification and refuse a record whose key differs
+  (`recorded-key-mismatch`).
 - `HALLPASS_SSH_KEYGEN`: the absolute path of the ssh-keygen that verifies
   signatures. Library `open_trusted_signers`, `check_stream_write`,
   `lock_holder_pid`.
@@ -768,3 +795,12 @@ Changes since commit d70c09f.
 - The 10,000-reference error says how to split; the minimal caller's
   rehearsal message names the unset variable (bn-239c).
 - `repair`'s usage line shows its real required arguments (bn-3lic).
+- The minimal caller reported every preflight error as a test-clock problem;
+  both callers now print hallpass's own code and message (bn-kbt6).
+- A signature by another person's key on a wildcard trusted signers line
+  passed silently as the owner's (bn-2xsn).
+- An accidental rehearsal on the live pass had no way back, and the natural
+  workaround carried rehearsal units into the live budget (bn-3ei2).
+- An incomplete reconcile row gave no reason (bn-9hcp).
+- Long error and doctor messages open with a short headline and one next step
+  (bn-jyl7).

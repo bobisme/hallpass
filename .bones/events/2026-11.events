@@ -742,3 +742,8 @@
 1795845958408393	hallpass-dev	itc:AQ		item.assign	bn-9hcp	{"action":"assign","agent":"hallpass-dev"}	blake3:ddg3HdvIYUdkt7X-HKWbUhSw5qFEMkSbh26W3fC1hlk
 1795845958420632	hallpass-dev	itc:AQ		item.move	bn-jyl7	{"state":"doing"}	blake3:yGnbC9CwxgUqiftliDVHYutIDXxYSg_vxB8foS_Ms6w
 1795845958424599	hallpass-dev	itc:AQ		item.assign	bn-jyl7	{"action":"assign","agent":"hallpass-dev"}	blake3:5w3QAQuN6EaoLFreozB_vxRz-SI-dAejc6fQYE26jWg
+1795848001316704	hallpass-dev	itc:AQ		item.move	bn-kbt6	{"state":"done"}	blake3:55dSeNVOweZq3JduirVJZOtzbedAdVgYu1AuhCjzwNY
+1795848001340864	hallpass-dev	itc:AQ		item.move	bn-2xsn	{"state":"done"}	blake3:6OOYrSSFjxlO5leljPcEiwfkjniZwXfVtZNBs0EjwEo
+1795848001366081	hallpass-dev	itc:AQ		item.move	bn-3ei2	{"state":"done"}	blake3:HfMwaj_MC9VBKbdYgc3bw47sb51iKMgqPjFeynl0DZQ
+1795848001387384	hallpass-dev	itc:AQ		item.move	bn-9hcp	{"state":"done"}	blake3:0rH0qpLMfE3cBqVGwTnSo0xPBDB290GSih5KC2bEuLI
+1795848001414743	hallpass-dev	itc:AQ		item.move	bn-jyl7	{"state":"done"}	blake3:xJKv6s2TcOWl2s7mlDJRs5YQjURFDvmQPMJ-OS-zO3k
