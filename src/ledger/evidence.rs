@@ -1375,6 +1375,8 @@ pub fn compare_backups_with_ancestry(
         seq: w.seq,
         hash: w.tail.to_string(),
         totals: None,
+        latest: None,
+        anchors: None,
     });
     let mut groups = BTreeMap::new();
     let mut extensions = BTreeSet::new();
@@ -1400,6 +1402,8 @@ pub fn compare_backups_with_ancestry(
                     seq: parsed.seq,
                     hash: parsed.tail.to_string(),
                     totals: None,
+                    latest: None,
+                    anchors: None,
                 };
                 let group = *groups
                     .entry((tip.pass_id.clone(), tip.seq, tip.hash.clone()))
@@ -1789,6 +1793,8 @@ mod ancestry_tests {
                     seq: scan.seq,
                     hash: scan.tail.to_string(),
                     totals: None,
+                    latest: None,
+                    anchors: None,
                 };
                 BackupCandidate {
                     path: path.display().to_string(),

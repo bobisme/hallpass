@@ -40,7 +40,7 @@ pub(super) fn findings(
         Ok(CheckpointCover::Adopted { seq }) => d.find(
             "checkpoint-adopted",
             format!(
-                "the adoption at entry {seq} acted on the checkpoint {named} (sequence {}): the ledger was behind it, and the adoption carried what its totals recorded beyond the ledger's",
+                "the adoption at entry {seq} acted on the checkpoint {named} (sequence {}): the ledger was behind it, and the adoption carried from its totals what the ledger's lines it proved its own did not count",
                 cp.seq
             ),
         ),
@@ -86,11 +86,10 @@ fn behind_issue(
     gap: &CheckpointGap,
 ) -> Issue {
     let missing = format!(
-        "the ledger ends at sequence {}, but the checkpoint {named} commits to sequence {}: the ledger once held entries {} to {}, and they are not here (for example the ledger and the state directory were both restored from an older copy). A spend now counts only what the ledger holds.",
+        "the ledger ends at sequence {}, but the checkpoint {named} commits to sequence {}: the ledger once reached it, and checkpointed entries are not here (for example the ledger and the state directory were both restored from an older copy). A spend now counts only what the ledger holds. {}",
         gap.ledger_seq,
         gap.checkpoint_seq,
-        gap.ledger_seq + 1,
-        gap.checkpoint_seq
+        gap.placement()
     );
     let Some(recorded) = &gap.recorded else {
         return Issue {
@@ -113,7 +112,8 @@ fn behind_issue(
             lines: vec![
                 missing,
                 format!(
-                    "But the ledger counts more than the checkpoint records (spent here: {}; in the checkpoint: {}). Counts only grow, so the ledger is not an older copy of the checkpointed history: the two differ, and hallpass does not merge them.",
+                    "But the ledger's entries 1 to {}, which the checkpoint's line hashes prove are checkpointed ones, count more than the checkpoint records (spent in them: {}; in the checkpoint: {}). Counts only grow, so the checkpoint's totals do not belong to its line hashes, and hallpass does not carry from it.",
+                    gap.shared,
                     hallpass::totals_text(&gap.above),
                     hallpass::totals_text(recorded)
                 ),
@@ -144,19 +144,25 @@ fn behind_issue(
             "--preview",
         ]),
         step: format!(
-            "If a copy of the ledger that holds sequence {seq} is left (`hallpass verify-checkpoint COPY {cp_file}` says exact or extended for it), put it back instead: it keeps the receipts. Otherwise the preview shows an adoption that carries, per counter, what the checkpoint records beyond the ledger ({carry}), so no count goes down, and prints its token. Compare the totals with your run records, then run `hallpass adopt {pass} --checkpoint {cp_file} --reason \"...\" --token TOKEN`. After it, a spend with --require-new-ref is refused as reference-inconclusive until the references that may be in the lost entries are reconciled; doctor then names that command.",
+            "If a copy of the ledger that holds sequence {seq} is left (`hallpass verify-checkpoint COPY {cp_file}` says exact or extended for it), put it back instead: it keeps the receipts. Otherwise the preview shows an adoption that carries, per counter, what the checkpoint records beyond {what} ({carry}), so no count goes down, and prints its token. Compare the totals with your run records, then run `hallpass adopt {pass} --checkpoint {cp_file} --reason \"...\" --token TOKEN`. After it, a spend with --require-new-ref is refused as reference-inconclusive until the references that may be in the lost entries are reconciled; doctor then names that command.",
             seq = cp.seq,
             carry = hallpass::totals_text(&gap.carry),
+            what = if gap.exact() {
+                "the ledger".to_owned()
+            } else if gap.shared == 0 {
+                "nothing, counting every ledger entry as new".to_owned()
+            } else {
+                format!(
+                    "the ledger's entries 1 to {}, counting its later entries as new",
+                    gap.shared
+                )
+            },
         ),
     }
 }
 
 fn headline(gap: &CheckpointGap) -> String {
-    format!(
-        "the ledger is behind a retained checkpoint: entries {} to {} are missing",
-        gap.ledger_seq + 1,
-        gap.checkpoint_seq
-    )
+    gap.headline()
 }
 
 /// The step when hallpass cannot count what the checkpoint shows is lost.

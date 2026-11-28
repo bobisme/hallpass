@@ -590,9 +590,12 @@ pass digest, the witness's previous record, and `carried`):
 - no witness: `carried` is empty;
 - with `--checkpoint`, a ledger behind a retained checkpoint: `carried`
   rises, per counter, to what the checkpoint records beyond the ledger
+  lines it proves are its own
   (see [After a whole-machine restore](#after-a-whole-machine-restore)).
-  The line then also has `checkpoint`; a hallpass before this one does not
-  read such a line and stops with `ledger-corrupt`.
+  The line then also has `checkpoint` (`version`, `pass_id`, `seq`, `hash`
+  and `totals`, without `latest` and `anchors`); a hallpass before the one
+  that added `checkpoint` does not read such a line and stops with
+  `ledger-corrupt`.
 
 In the first two cases the ledger cannot confirm the carried totals: the
 ledger is missing, or it does not hold the witnessed line. They come from
@@ -1208,6 +1211,18 @@ does not cover them. A checkpoint without `totals` (from an earlier
 hallpass) is still read; `verify-checkpoint` refuses `totals` that are not
 counter names with whole numbers from 0 to the largest ceiling.
 
+It also has `latest` and `anchors`, which place a shorter ledger (see
+[After a whole-machine restore](#after-a-whole-machine-restore)).
+`latest` is the latest time on any line through the checkpointed one (RFC
+3339; absent when no line has a time). `anchors` maps a sequence to the hash
+of the line that ends there, for the 16 lines just before the checkpointed
+one and for the lines a power of two after the header or before the
+checkpointed one (at most 144; none inside a debit batch line, which ends at
+a later sequence). A checkpoint without them (from an earlier hallpass) is
+still read; `verify-checkpoint` refuses a `latest` that is not an RFC 3339
+time, and `anchors` with more than 256 entries, a sequence of 0 or not
+below the checkpoint's own, or a hash that is not one.
+
 ### After a whole-machine restore
 
 A restore of both the ledger and the state directory from an older copy
@@ -1224,26 +1239,61 @@ doctor's own error, exit 1) and compares it with the ledger, read only:
   `checkpoint-behind`, naming `adopt FILE --checkpoint CHECKPOINT
   --preview`; with a checkpoint without `totals` it names no command;
 - the ledger holds another line at that sequence (`mismatch`), or is
-  shorter but counts more of some counter than the checkpoint records
-  (counts only grow, so it is not an older copy): **blocked**
-  `checkpoint-fork`, with no command: hallpass does not merge two
-  histories;
+  shorter but the lines the checkpoint proves are its own count more of
+  some counter than the checkpoint records (counts only grow, so its totals
+  do not belong to its line hashes): **blocked** `checkpoint-fork`, with no
+  command: hallpass does not merge two histories;
 - the checkpoint is for another pass: **blocked** `checkpoint-foreign`.
+
+A shorter ledger is not always an older copy of the checkpointed history.
+After a whole-machine restore a worker may spend before anyone runs
+doctor, and then the ledger's last entries are new spends at the sequences
+the lost entries had. So hallpass places the ledger by the checkpoint:
+
+- **shared**: the ledger's lines through the last anchor whose hash the
+  ledger has at that sequence, taken in order up to the first it does not
+  have, are the checkpointed history's own (each line hash covers every
+  line before it). Only the header is shared when there is no such anchor,
+  and always for a checkpoint without `anchors`.
+- **new**: the ledger's line at the first anchor it does not have, and
+  every later line, are not checkpointed ones; nor is a line whose time is
+  later than `latest`, or any line after it.
+- the lines between are not placed: the checkpoint has no hash for them.
+
+The doctor finding and the preview say which lines are which. The headline
+says entries `ledger_seq + 1` to the checkpoint's sequence are missing only
+when every ledger line is shared; otherwise it says checkpointed entries
+after the last shared line are missing.
+
+Times never prove a line shared: a restored machine's clock may run behind
+the one that wrote the lost entries, so a spend since the restore can carry
+an earlier time than `latest`. A time later than `latest` does prove a line
+new, whatever any clock did, because no checkpointed line has a later time.
+A clock that ran ahead before the restore only makes `latest` later, so
+fewer lines are proved new; the carry does not depend on times.
 
 `adopt FILE --checkpoint CHECKPOINT` (with `--preview`, then `--reason` and
 `--token`) acts only on `checkpoint-behind` with `totals`. Every other
 relation is a usage error that names the next step. The adoption carries,
-per counter, what the checkpoint's totals record beyond the ledger's; when
+per counter, what the checkpoint's totals record beyond what the shared
+lines count, and so counts every other ledger line as new: the result is at
+least the checkpoint's totals plus every spend since the restore. A line
+that is not placed but was in fact an older copy of a checkpointed one
+counts twice, which is on the safe side for spending; with a checkpoint
+without `anchors`, every ledger line counts so. When the ledger has changed
+between the comparison and the adoption's lock, the adoption refuses and
+names doctor again. When
 the witness also calls for an adoption (`ledger-missing`,
 `ledger-changed`, `no-witness`), it carries per counter the higher of the
 two, so no count goes down. Its case is `checkpoint-behind` when the ledger
 and witness agree or there is neither. The line records the checkpoint
-(`checkpoint`, as exported), so it is not adopted twice. The token covers
+(`checkpoint`, as exported but without `latest` and `anchors`), so it is
+not adopted twice. The token covers
 the checkpoint. `--checkpoint` cannot be used with `--drop-rehearsal`.
 
-The checkpoint proves only that the ledger once reached its sequence. It
-cannot show what the missing entries were or that the restored ledger is a
-prefix of that history, and nothing authenticates its totals beyond the
+The checkpoint proves that the ledger once reached its sequence, and which
+ledger lines are its own as far as its anchors reach. It cannot show what
+the missing entries were, and nothing authenticates its totals beyond the
 operator who kept it. A higher count is the safe side for spending; a total
 edited lower would carry too little. `adopt --preview` says this in
 `warnings`. An adoption from a checkpoint always may have lost caller
@@ -1614,7 +1664,7 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   counter name to amount), `previous` (as in `ledger`, or null),
   `rehearsal` (null, or `{units, carried, proof}`: see
   [Test-clock lines](#test-clock-lines)), `checkpoint` (the checkpoint
-  acted on with `--checkpoint`, as `checkpoint` exports it, or null). A preview
+  acted on with `--checkpoint`, as the adoption line records it, or null). A preview
   has `result = "preview"`, `case`, `pass_id`, `seq`, `present`, `carried`,
   `totals`, `previous`, `rehearsal`, `checkpoint` and `token`.
 - **repair**: `result` (`preview` or `repaired`), `ledger`, `pass_id`,
@@ -1642,9 +1692,11 @@ pass path use `file`. A `refusal` is `{code, message}` or null.
   are numbers for `charge.<counter>` and `targets.count`, strings for the
   other fields, and null when that side has none; `reconciled_at` as in
   `receipt`).
-- **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash, totals}`,
-  or null when `result` is `empty`; `totals` is an object of counter name
-  to amount), `local_corroboration`, `witness` `{relation,
+- **checkpoint**: `checkpoint` (`{version, pass_id, seq, hash, totals,
+  latest, anchors}`, or null when `result` is `empty`; `totals` is an
+  object of counter name to amount, `latest` an RFC 3339 time (absent when
+  no line has one), `anchors` an object of sequence to line hash: see
+  [Checkpoints](#checkpoints)), `local_corroboration`, `witness` `{relation,
   witnessed_seq, exported_seq}` (`relation` is `matches`, `lags` or
   `absent`; `witnessed_seq` is null for `absent`, `exported_seq` null for
   `empty`).

@@ -856,7 +856,7 @@ struct AdoptLine {
     /// The checkpoint an `adopt --checkpoint` acted on; absent otherwise,
     /// so every other adoption line is as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    checkpoint: Option<Checkpoint>,
+    checkpoint: Option<Box<Checkpoint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_clock: Option<bool>,
     prev: String,
@@ -904,7 +904,7 @@ fn parse_ledger(
 enum VerifiedEvent {
     Spend(LedgerEntry),
     Debit(LedgerDebit),
-    Adopt(Adoption),
+    Adopt(Box<Adoption>),
     Reconcile(ReferenceReconciliation),
 }
 
@@ -1068,7 +1068,7 @@ fn scan_ledger(
             Line::DebitBatch(batch) => parse_debit_batch(&mut parsed, batch)
                 .map(|debits| debits.into_iter().map(VerifiedEvent::Debit).collect()),
             Line::Adopt(adopt) => parse_adopt(&mut parsed, adopt)
-                .map(VerifiedEvent::Adopt)
+                .map(|a| VerifiedEvent::Adopt(Box::new(a)))
                 .map(|event| vec![event]),
             Line::Reconcile(line) => parse_reconcile(&mut parsed, line)
                 .map(VerifiedEvent::Reconcile)
@@ -1081,7 +1081,7 @@ fn scan_ledger(
                 match event {
                     VerifiedEvent::Spend(entry) => parsed.entries.push(entry),
                     VerifiedEvent::Debit(debit) => parsed.debits.push(debit),
-                    VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(adopt),
+                    VerifiedEvent::Adopt(adopt) => parsed.adoptions.push(*adopt),
                     VerifiedEvent::Reconcile(r) => parsed.reconciliations.push(r),
                 }
             }
@@ -1302,7 +1302,7 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
         digest,
         carried: line.carried,
         previous,
-        checkpoint: line.checkpoint,
+        checkpoint: line.checkpoint.map(|cp| *cp),
         test_clock: line.test_clock == Some(true),
     })
 }
@@ -1990,6 +1990,8 @@ fn visit_view(
             seq: parsed.seq,
             hash: parsed.tail.to_string(),
             totals: None,
+            latest: None,
+            anchors: None,
         }),
         entries: parsed.entries,
         unreconciled_adoption,
@@ -2026,6 +2028,19 @@ pub struct Checkpoint {
     /// checkpoint from a hallpass before they were exported has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<BTreeMap<String, u64>>,
+    /// The latest time on any line through `seq` (RFC 3339, UTC). A
+    /// ledger line with a later time is not one of the checkpointed lines,
+    /// whatever any clock did. A checkpoint from a hallpass before it was
+    /// exported has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    /// The hashes of some earlier lines, by the sequence each line ends at:
+    /// the 16 lines just before `seq`, and the lines a power of two after
+    /// the header or before `seq`. They show how far a shorter ledger is
+    /// the checkpointed history. A checkpoint from a hallpass before they
+    /// were exported has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchors: Option<BTreeMap<u64, String>>,
 }
 
 /// Result of verifying a complete ledger against a checkpoint.
@@ -2154,6 +2169,21 @@ pub fn export_checkpoint_observed(
             exported: parsed.seq,
         },
     };
+    // The line hashes a later, shorter ledger is placed by: a second scan
+    // under the same lock, once the last sequence is known.
+    let wanted = checkpoint::anchor_seqs(parsed.seq);
+    let mut found = BTreeMap::new();
+    if !wanted.is_empty() {
+        std::io::Seek::rewind(&mut &file).map_err(|e| Error::io(&path, &e))?;
+        scan_ledger(
+            &path,
+            BufReader::new(&file),
+            false,
+            None,
+            Some((&wanted, &mut found)),
+            &mut |_| Ok(()),
+        )?;
+    }
     Ok(CheckpointExport::Exported(
         Checkpoint {
             version: 1,
@@ -2161,6 +2191,13 @@ pub fn export_checkpoint_observed(
             seq: parsed.seq,
             hash: parsed.tail.to_string(),
             totals: Some(parsed.tally.spent),
+            latest: parsed.latest.map(|(time, _)| rfc3339(time)),
+            anchors: Some(
+                found
+                    .into_iter()
+                    .map(|(seq, hash)| (seq, hash.to_string()))
+                    .collect(),
+            ),
         },
         relation,
     ))
@@ -3197,17 +3234,17 @@ impl AdoptFlags {
     }
 
     /// With a checkpoint: the refusal when it cannot be acted on, checked
-    /// before anything is locked or created.
-    fn check_checkpoint(&self, loaded: &LoadedPass) -> Result<(), Error> {
+    /// before anything is locked or created, or the gap it shows.
+    fn check_checkpoint(&self, loaded: &LoadedPass) -> Result<Option<CheckpointGap>, Error> {
         let Some(given) = &self.checkpoint else {
-            return Ok(());
+            return Ok(None);
         };
         if let RehearsalTotals::Drop(_) = self.rehearsal {
             return Err(Error::Usage(
                 "--checkpoint and --drop-rehearsal cannot be used together: a checkpoint's totals may count the rehearsal's units. Adopt with --drop-rehearsal first, then run `hallpass doctor PASS --checkpoint CHECKPOINT` again; nothing was recorded".to_owned(),
             ));
         }
-        given.behind(loaded).map(|_| ())
+        given.behind(loaded).map(Some)
     }
 }
 
@@ -3355,6 +3392,9 @@ pub struct AdoptPreview {
     pub rehearsal: Option<RehearsalTotals>,
     /// The checkpoint the adoption acts on (`adopt --checkpoint`), if any.
     pub checkpoint: Option<Checkpoint>,
+    /// What that checkpoint shows about the ledger: the lines it proves are
+    /// its own, and the carry.
+    pub checkpoint_gap: Option<CheckpointGap>,
 }
 
 impl AdoptPreview {
@@ -3667,7 +3707,7 @@ fn preview_adopt_flags(
     flags: &AdoptFlags,
 ) -> Result<AdoptPreview, Error> {
     let loaded = load(pass_path)?;
-    flags.check_checkpoint(&loaded)?;
+    let gap = flags.check_checkpoint(&loaded)?;
     let id = &loaded.pass.id;
     let path = ledger_path(pass_path);
     let file = if exists(&path)? {
@@ -3717,8 +3757,8 @@ fn preview_adopt_flags(
         Ok(_) => return Err(nothing_to_adopt(&path, pass_path)),
         Err(e) => return Err(e),
     };
-    if let (Some(given), Some(parsed)) = (&flags.checkpoint, &parsed) {
-        given.still_behind(parsed, pass_path)?;
+    if let (Some(given), Some(gap), Some(parsed)) = (&flags.checkpoint, &gap, &parsed) {
+        given.still_behind(gap, parsed, pass_path)?;
     }
     check_preview_write_access(pass_path, &path, parsed.is_some(), state, id)?;
     // The token covers a lost witness's copy; the adoption acts on it only
@@ -3740,8 +3780,8 @@ fn preview_adopt_flags(
         witness.as_ref(),
         rehearsal.as_ref(),
     );
-    if let Some(given) = &flags.checkpoint {
-        given.raise(&present, &mut carried);
+    if let Some(gap) = &gap {
+        checkpoint::Given::raise(gap, &mut carried);
     }
     // As the adoption line will record it: a proved rehearsal, on the
     // real clock.
@@ -3781,6 +3821,7 @@ fn preview_adopt_flags(
         last_seen_unchecked,
         rehearsal,
         checkpoint: flags.checkpoint().cloned(),
+        checkpoint_gap: gap,
     })
 }
 
@@ -4014,9 +4055,11 @@ fn adopt_flags(
     flags: &AdoptFlags,
 ) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
-    if flags.checkpoint.is_some() {
-        flags.check_checkpoint(&load(pass_path)?)?;
-    }
+    let gap = if flags.checkpoint.is_some() {
+        flags.check_checkpoint(&load(pass_path)?)?
+    } else {
+        None
+    };
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
     let mut locked = lock_for_writing_inner(
         pass_path,
@@ -4035,8 +4078,8 @@ fn adopt_flags(
         // ledger without a witness (the token above covered the copy).
         locked.witness = None;
     }
-    if let Some(given) = &flags.checkpoint {
-        given.still_behind(&locked.parsed, pass_path)?;
+    if let (Some(given), Some(gap)) = (&flags.checkpoint, &gap) {
+        given.still_behind(gap, &locked.parsed, pass_path)?;
     }
     let raised = noted_totals(
         state,
@@ -4058,8 +4101,8 @@ fn adopt_flags(
         locked.witness.as_ref(),
         rehearsal.as_ref(),
     );
-    if let Some(given) = &flags.checkpoint {
-        given.raise(&locked.parsed.tally.spent, &mut carried);
+    if let Some(gap) = &gap {
+        checkpoint::Given::raise(gap, &mut carried);
     }
     let (proved, previous) = recorded_previous(locked.witness.clone(), rehearsal.as_ref());
     let line = AdoptLine {
@@ -4077,7 +4120,10 @@ fn adopt_flags(
             updated: w.updated.clone(),
             test_clock: proved.then_some(true),
         }),
-        checkpoint: flags.checkpoint().cloned(),
+        checkpoint: flags
+            .checkpoint
+            .as_ref()
+            .map(|given| Box::new(given.recorded())),
         test_clock: clock::marker(),
         prev: locked.parsed.tail().to_string(),
     };
@@ -4119,7 +4165,7 @@ fn adopt_flags(
             digest: locked.loaded.digest,
             carried,
             previous,
-            checkpoint: line.checkpoint.clone(),
+            checkpoint: line.checkpoint.as_deref().cloned(),
             test_clock: line.test_clock == Some(true),
         },
         ledger: locked.path.clone(),

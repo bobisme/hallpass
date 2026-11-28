@@ -525,12 +525,16 @@ mod tests {
                             updated,
                             test_clock: None,
                         }),
-                        checkpoint: checkpoint.map(|(seq, hash)| crate::Checkpoint {
-                            version: 1,
-                            pass_id: "p".to_owned(),
-                            seq,
-                            hash,
-                            totals: Some(BTreeMap::new()),
+                        checkpoint: checkpoint.map(|(seq, hash)| {
+                            Box::new(crate::Checkpoint {
+                                version: 1,
+                                pass_id: "p".to_owned(),
+                                seq,
+                                hash,
+                                totals: Some(BTreeMap::new()),
+                                latest: None,
+                                anchors: None,
+                            })
                         }),
                         test_clock,
                         prev,

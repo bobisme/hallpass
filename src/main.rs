@@ -2266,7 +2266,10 @@ fn preview_adopt(
                 rehearsal_units_text(p.rehearsal.as_ref(), p.previous.as_ref()),
                 p.checkpoint
                     .as_ref()
-                    .map_or_else(String::new, checkpoint_carry_text),
+                    .map_or_else(String::new, |cp| checkpoint_carry_text(
+                        cp,
+                        p.checkpoint_gap.as_ref()
+                    )),
                 if p.from_note.is_empty() {
                     String::new()
                 } else {
@@ -2278,22 +2281,41 @@ fn preview_adopt(
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(checkpoint_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(checkpoint_warning)).chain(p.checkpoint_gap.as_ref().filter(|g| !g.exact()).map(placement_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
 }
 
 /// What an adoption carries from a retained checkpoint, after the
-/// carried totals.
-fn checkpoint_carry_text(cp: &hallpass::Checkpoint) -> String {
+/// carried totals; with what the checkpoint shows about the ledger, the
+/// ledger entries that count as new on top.
+fn checkpoint_carry_text(
+    cp: &hallpass::Checkpoint,
+    gap: Option<&hallpass::CheckpointGap>,
+) -> String {
     format!(
-        " (so that each count reaches at least what the checkpoint at sequence {} records: {})",
+        " (so that each count reaches at least what the checkpoint at sequence {} records: {}{})",
         cp.seq,
         cp.totals
             .as_ref()
-            .map_or_else(|| "nothing".to_owned(), hallpass::totals_text)
+            .map_or_else(|| "nothing".to_owned(), hallpass::totals_text),
+        gap.filter(|g| !g.exact())
+            .map_or_else(String::new, |g| format!(
+                ", plus what the ledger counts after sequence {}, all of it as new",
+                g.shared
+            ))
     )
+}
+
+/// The warning for a preview whose checkpoint does not prove every ledger
+/// line its own: which lines count as new, and why.
+fn placement_warning(gap: &hallpass::CheckpointGap) -> String {
+    let text = gap.placement();
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_lowercase().chain(chars).collect()
+    })
 }
 
 /// What an adoption from a retained checkpoint relies on: what the
@@ -2454,7 +2476,7 @@ fn adopt(
         rehearsal_units_text(outcome.rehearsal.as_ref(), a.previous.as_ref()),
         a.checkpoint
             .as_ref()
-            .map_or_else(String::new, checkpoint_carry_text),
+            .map_or_else(String::new, |cp| checkpoint_carry_text(cp, None)),
         hallpass::totals_text(&outcome.totals),
     );
     Output {
@@ -2641,7 +2663,13 @@ fn checkpoint(file: &Path) -> Output {
         .and_then(|loaded| hallpass::export_checkpoint_observed(&loaded, &StateDir::from_env()));
     match result {
         Ok(hallpass::CheckpointExport::Exported(checkpoint, relation)) => {
-            let value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash, "totals": checkpoint.totals});
+            let mut value = json!({"version": checkpoint.version, "pass_id": checkpoint.pass_id, "seq": checkpoint.seq, "hash": checkpoint.hash, "totals": checkpoint.totals});
+            if let Some(map) = value.as_object_mut() {
+                if let Some(latest) = &checkpoint.latest {
+                    map.insert("latest".to_owned(), json!(latest));
+                }
+                map.insert("anchors".to_owned(), json!(checkpoint.anchors));
+            }
             let (corroboration, warning) = match relation {
                 hallpass::WitnessRelation::Matches => (
                     json!({"relation": "matches", "witnessed_seq": checkpoint.seq, "exported_seq": checkpoint.seq}),

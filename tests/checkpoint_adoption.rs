@@ -499,9 +499,11 @@ fn another_history_at_the_checkpointed_sequence_is_explained_not_merged() {
 }
 
 #[test]
-fn a_shorter_ledger_that_counts_more_than_the_checkpoint_is_another_history() {
+fn a_shorter_ledger_that_counts_more_than_the_checkpoint_has_new_spends_on_top() {
     let case = Case::restored();
-    // One spend after the restore, larger than the lost two together.
+    // One spend after the restore, larger than the lost two together. The
+    // checkpoint's line hashes prove entries 1 and 2 its own and entry 3
+    // not, so entry 3 counts on top of the checkpoint's totals.
     case.spend("run-5", 5);
     let (rc, verified) = case.json(&["verify-checkpoint", "c/p.toml.ledger", CHECKPOINT]);
     assert_eq!(
@@ -511,13 +513,11 @@ fn a_shorter_ledger_that_counts_more_than_the_checkpoint_is_another_history() {
     );
     let (rc, doctor) = case.doctor();
     assert_eq!(rc, 2, "{doctor}");
-    assert_eq!(doctor["problem"], "checkpoint-fork", "{doctor}");
+    assert_eq!(doctor["problem"], "checkpoint-behind", "{doctor}");
     let (rc, preview) = case.json(&["adopt", PASS_FILE, "--checkpoint", CHECKPOINT, "--preview"]);
-    assert_eq!(rc, 1, "{preview}");
-    assert!(
-        message(&preview).contains("counts more than the checkpoint records"),
-        "{preview}"
-    );
+    assert_eq!(rc, 0, "{preview}");
+    assert_eq!(preview["carried"]["calls"], 2, "{preview}");
+    assert_eq!(preview["totals"]["calls"], 9, "{preview}");
 }
 
 #[test]
