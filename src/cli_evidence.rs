@@ -409,7 +409,21 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
         Ok(report) => report,
         Err(e) => return error_output("compare-backups", Some(file), &e),
     };
-    let mut text = format!("Backup assessment {}.\n", report.assessment);
+    let mut text = if report.errors > 0 {
+        // The result is `partial-error` and the exit status 1, so say so
+        // first; the assessment covers only the candidates that could be read.
+        format!(
+            "Partial error: {} unreadable; assessment of the rest: {}.\n",
+            if report.errors == 1 {
+                "1 candidate".to_owned()
+            } else {
+                format!("{} candidates", report.errors)
+            },
+            report.assessment
+        )
+    } else {
+        format!("Backup assessment {}.\n", report.assessment)
+    };
     match &report.anchor {
         Some(anchor) => {
             let _ = writeln!(text, "Captured witness: {}", tip_text(anchor));

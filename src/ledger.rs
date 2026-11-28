@@ -1718,6 +1718,16 @@ fn refuse_fork(
     }
 }
 
+/// The reason a witness was not checked. A witness error is reduced to its
+/// detail, because callers that refuse on it wrap the detail in a full
+/// witness message again; anything else is shown whole.
+fn not_checked_reason(e: &Error) -> String {
+    match e {
+        Error::WitnessUnavailable { detail, .. } => without_stop(detail).to_owned(),
+        other => other.to_string(),
+    }
+}
+
 /// Warnings for a comparison that did not fail. `writing` is true when the
 /// caller is about to record (or has recorded) a new witness.
 fn warnings(
@@ -1817,7 +1827,7 @@ fn visit_view(
     let (witness, moved) = match saved_witness {
         Err(e) => (
             WitnessStatus::NotChecked {
-                reason: e.to_string(),
+                reason: not_checked_reason(&e),
             },
             None,
         ),
@@ -1826,7 +1836,7 @@ fn visit_view(
             // answered with a warning, as one that does not parse.
             Err(e @ Error::WitnessUnavailable { .. }) => (
                 WitnessStatus::NotChecked {
-                    reason: e.to_string(),
+                    reason: not_checked_reason(&e),
                 },
                 None,
             ),
@@ -2923,9 +2933,11 @@ fn prepare_witness(
     let preserve_unanchored =
         !anchor_unwitnessed && status == WitnessStatus::Missing && locked.parsed.seq > 0;
     let mut warnings = warnings(&status, moved.as_ref(), id, !preserve_unanchored);
-    if locked.created && status == WitnessStatus::Missing {
-        // This call started the ledger: it has no witness because it is
-        // new, not because it came from somewhere else.
+    if (locked.created || locked.parsed.seq == 0) && status == WitnessStatus::Missing {
+        // This call started the ledger, or an earlier first spend left only
+        // its header (the entry could not be written): it has no witness
+        // because it holds nothing yet, not because it came from somewhere
+        // else, and there is no history to lose.
         warnings.clear();
     }
     warnings.extend(crate::files::shared_directory_warning(pass_path));
