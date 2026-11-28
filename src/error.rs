@@ -288,6 +288,20 @@ impl Error {
                     &text[..from]
                 )
             }
+            Self::LedgerCorrupt { .. } => {
+                // The last resort ends in `adopt`: a reader that cannot
+                // write is told only to restore from a backup.
+                let end = "are not in the new chain.";
+                match (
+                    text.find(" With no backup, the last resort"),
+                    text.find(end),
+                ) {
+                    (Some(from), Some(to)) if from < to => {
+                        format!("{}{}", &text[..from], &text[to + end.len()..])
+                    }
+                    _ => text,
+                }
+            }
             Self::WitnessUnavailable { .. } => text.replace(
                 "; move it aside and run `hallpass adopt` to record a new one",
                 "; this command only reads and changed nothing",
@@ -518,26 +532,28 @@ fn corrupt_advice(
     last: bool,
     complete: bool,
 ) -> String {
-    const BACKUP: &str = "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one.";
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let pass = name.strip_suffix(".ledger").map_or_else(
+        || "PASS".to_owned(),
+        |pass| path.with_file_name(pass).display().to_string(),
+    );
+    let backup = format!(
+        "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {pass} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals, but the receipts in the moved ledger are not in the new chain."
+    );
+    let backup = backup.as_str();
     if complete {
         format!(
-            "the line is complete, not cut short, so do not remove it or edit it by hand. {BACKUP}"
+            "the line is complete, not cut short, so do not remove it or edit it by hand. {backup}"
         )
     } else if last && line > 1 && detail == CUT_SHORT {
-        // The pass is the ledger's path without `.ledger`.
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let pass = name.strip_suffix(".ledger").map_or_else(
-            || "PASS".to_owned(),
-            |pass| path.with_file_name(pass).display().to_string(),
-        );
         format!(
             "if a write failed while it recorded that line (for example on a full disk), the line was never confirmed. Do not edit the ledger by hand: `hallpass repair {pass} --drop-torn-tail --preview` checks that the witness proves the line was never counted, and then the repair removes it and keeps a copy. If it refuses, {}",
-            BACKUP.replacen('R', "r", 1)
+            backup.replacen('R', "r", 1)
         )
     } else if last {
-        format!("do not edit lines by hand. {BACKUP}")
+        format!("do not edit lines by hand. {backup}")
     } else {
-        format!("the damage is before the end of the file, so do not edit lines by hand. {BACKUP}")
+        format!("the damage is before the end of the file, so do not edit lines by hand. {backup}")
     }
 }
 

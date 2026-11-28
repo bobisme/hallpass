@@ -479,8 +479,11 @@ edit it. It is JSON Lines:
   ledger that is gone while the witness records lines (`ledger-missing`),
   or that does not hold the witnessed line (`ledger-changed`), permits
   nothing until it is restored or adopted. Do not edit the witness either;
-  back it up with the ledger if the engagement moves machines (or adopt the
-  ledger on the new machine, which is recorded).
+  move it with the ledger if the engagement moves machines (or adopt the
+  ledger on the new machine, which is recorded). A move must stop the old
+  copy: a copy left on the old machine has its own witness and stays live,
+  so both would spend. Move the old ledger away there, and it is refused as
+  `ledger-missing`. Back up the witness with the ledger only to restore it.
 - `hallpass ledger FILE` lists the entries and verifies the chain; read
   the file with it rather than by hand.
 - **When the pass is edited**, spends recorded under the old digest still

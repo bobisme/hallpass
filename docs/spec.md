@@ -396,7 +396,10 @@ two was changed, or a line between them was removed or moved. When N is the last
 true) and the line has no line end, the message names `hallpass repair FILE
 --drop-torn-tail --preview` ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)).
 In every other case it advises restoring the ledger from a backup, finding
-the good copy with `hallpass compare-backups`, and not editing lines by hand.
+the good copy with `hallpass compare-backups`, and not editing lines by hand. It
+then names the last resort for when there is no backup: move the ledger aside and
+`adopt` it as `ledger-missing` (the receipts of the moved ledger are lost from
+the chain).
 The error code stays `ledger-corrupt`.
 
 #### Lock wait
@@ -509,7 +512,10 @@ witness it names) under `adopt`.
 The path in the witness is informational: identity is the hash chain. A
 pass moved with its ledger is accepted with a warning and the witness
 follows it; the copy left behind is then `ledger-changed` (only one copy
-can be spent from). A second pass file that reuses an id and has no ledger
+can be spent from) when it shares that witness (the same state directory).
+A copy on another machine or account has a witness of its own and is not
+refused: it stays live until its ledger is moved away there, and it is then
+`ledger-missing`. The warning says both. A second pass file that reuses an id and has no ledger
 is never a fresh count.
 
 When the ledger beside the pass is missing and the witness last saw it at
@@ -574,7 +580,9 @@ format characters, invisible characters or look-alike spaces.) With
 nothing to adopt (the ledger matches its witness, or there is neither a
 ledger nor a witnessed spend) it is a usage error. A damaged ledger
 (`ledger-corrupt`) is not adopted: repair it, or move it aside and adopt
-the loss. A missing ledger that is intact where the witness last saw it
+the loss (the last resort when a counted last line is damaged and there is
+no backup: the new ledger carries the witness totals, but the receipts of
+the moved ledger are no longer in the chain). A missing ledger that is intact where the witness last saw it
 is not adopted either: `adopt` and `adopt --preview` both fail with
 `ledger-elsewhere` and record nothing, because the adoption would fork the
 history. There is no flag to force it. If that ledger really is to be

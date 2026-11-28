@@ -1270,7 +1270,7 @@ pub fn compare_backups_with_ancestry(
                 errors += 1;
                 row.error = Some(BackupError {
                     code: e.code(),
-                    message: e.to_string(),
+                    message: e.read_only_message(),
                 });
             }
         }
@@ -1336,7 +1336,7 @@ fn analyze_ancestry(
                 row.error = Some(match result {
                     Err(e) => BackupError {
                         code: e.code(),
-                        message: e.to_string(),
+                        message: e.read_only_message(),
                     },
                     Ok(_) => BackupError {
                         code: "candidate-changed",

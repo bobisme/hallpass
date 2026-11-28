@@ -204,7 +204,10 @@ fn inspect(
                     "the witness recorded sequence {}, but the complete lines of the ledger end at sequence {}: the cut-short line was counted, so removing it would lower the count",
                     witness.seq, parsed.seq
                 ),
-                BACKUP,
+                &format!(
+                    "{BACKUP}. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain",
+                    pass_path.display()
+                ),
             ));
         }
         Ok(_) | Err(Error::LedgerChanged { .. }) => {

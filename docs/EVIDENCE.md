@@ -87,7 +87,13 @@ witness recorded one of the complete lines before it, so the witness
 proves the cut-short line was never counted. It keeps the removed bytes in
 `engagement.toml.ledger.torn-N` (named in `copy`). It refuses anything else,
 such as a complete last line that is invalid, damage before the last line or
-a missing witness: restore the ledger from a backup instead, as below. See
+a missing witness: restore the ledger from a backup instead, as below.
+If the witness counted the damaged last line, the repair always refuses,
+because removing the line would lower the count. With no backup, the last
+resort is to move the ledger aside (keep it, it holds the receipts) and run
+`hallpass adopt engagement.toml --reason "..."`. The pass is then
+`ledger-missing`, and the adoption starts a new ledger that carries the
+witness totals. The receipts in the moved ledger are not in the new chain. See
 [Dropping a cut-short last line](spec.md#dropping-a-cut-short-last-line).
 
 ## Replay historical endpoint decisions

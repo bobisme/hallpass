@@ -1534,8 +1534,11 @@ fn warnings(
         WitnessStatus::Fresh | WitnessStatus::Matches => {}
     }
     if let Some(from) = moved {
+        // The old copy is refused only when this witness guards it (the
+        // same state directory). A copy with a witness of its own, on
+        // another machine, account or state directory, stays live.
         out.push(format!(
-            "the witness last saw this ledger at {from}; it was moved or copied. Spend from one copy only: the other will then be refused as changed"
+            "the witness last saw this ledger at {from}; it was moved or copied. Spend from one copy only. A copy that uses this same state directory will now be refused as changed. A copy on another machine, account or state directory has its own witness and is not refused: it stays live until its ledger is moved away there, after which it is refused as `ledger-missing`"
         ));
     }
     out
