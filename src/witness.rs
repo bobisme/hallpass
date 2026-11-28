@@ -292,15 +292,7 @@ impl StateDir {
             .read_to_end(&mut bytes)
             .map_err(|e| self.unavailable(pass_id, format!("{} ({e})", quote_path(&path))))?;
         self.check_size(pass_id, bytes.len())?;
-        let damaged = || {
-            self.unavailable(
-                pass_id,
-                format!(
-                    "{} is damaged (not a hallpass witness for this pass id); move it aside and run `hallpass adopt` to record a new one",
-                    quote_path(&path)
-                ),
-            )
-        };
+        let damaged = || self.damaged(pass_id, "not a hallpass witness for this pass id");
         let record: WitnessFile = serde_json::from_slice(&bytes).map_err(|_| damaged())?;
         if record.hallpass_witness != WITNESS_VERSION || record.pass_id != pass_id {
             return Err(damaged());
@@ -316,6 +308,27 @@ impl StateDir {
             totals: record.totals,
             updated: record.updated,
         }))
+    }
+
+    /// A witness that cannot be trusted, and why: the same error, and the
+    /// same advice, for a witness that does not parse and for one whose
+    /// contents contradict the verified ledger.
+    pub(crate) fn damaged(&self, pass_id: &str, why: &str) -> Error {
+        let path = self.witness_path(pass_id).unwrap_or_default();
+        self.unavailable(
+            pass_id,
+            format!(
+                "{} is damaged ({why}); move it aside and run `hallpass adopt` to record a new one",
+                quote_path(&path)
+            ),
+        )
+    }
+
+    /// A witness noted as damaged, refused for an adoption: `why` names the
+    /// next step itself (moving the witness aside would lose its count).
+    pub(crate) fn noted_as_damaged(&self, pass_id: &str, why: &str) -> Error {
+        let path = self.witness_path(pass_id).unwrap_or_default();
+        self.unavailable(pass_id, format!("{} is damaged: {why}", quote_path(&path)))
     }
 
     fn check_size(&self, pass_id: &str, len: usize) -> Result<(), Error> {
@@ -386,6 +399,271 @@ impl StateDir {
     }
 }
 
+// Advisory notes beside the witness.
+//
+// Two small files in the state directory help hallpass choose its words.
+// They never decide a count or a refusal, so a missing or damaged note only
+// costs a clearer message: hallpass then says what it said before. They are
+// separate from the witness so that the witness format (and the hallpass
+// releases that read it) is unchanged.
+//
+// - `<pass id>.forks`: where an adoption started a new history (the adopted
+//   line, and the line before it), so that a ledger from before the adoption
+//   is named as a different history, not an older copy.
+// - `<pass id>.pass-file`: the identity and digest of the pass file at the
+//   last `spend`, `permits` or `status`, so that a pass rewritten in place is
+//   noticed.
+
+/// The largest note hallpass reads.
+const MAX_NOTE_BYTES: u64 = 64 * 1024;
+/// The adoptions a forks note keeps (the latest ones).
+const MAX_FORKS: usize = 16;
+
+/// An adoption that replaced the history the witness had recorded: the
+/// ledger was missing, or it did not hold the witnessed line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fork {
+    /// The sequence number of the adoption line.
+    pub seq: u64,
+    /// The hash of the adoption line.
+    pub hash: String,
+    /// The hash of the line before it (the adopted ledger's last line).
+    pub prev: String,
+    /// When the adoption was recorded (UTC).
+    pub time: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForksNote {
+    hallpass_forks: u32,
+    pass_id: String,
+    forks: Vec<Fork>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PassFileNote {
+    hallpass_pass_file: u32,
+    pass_id: String,
+    /// The pass path, its directory resolved as for a ledger.
+    path: String,
+    dev: u64,
+    ino: u64,
+    born_ns: Option<u64>,
+    digest: String,
+}
+
+/// What a command saw when it proved the witness damaged against a present
+/// ledger: the digest of the witness file's bytes, and the totals the
+/// witness and the verified ledger had at the witnessed sequence. Adoption
+/// refuses to carry totals from a witness whose bytes match it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DamageNote {
+    hallpass_witness_damage: u32,
+    pass_id: String,
+    witness: String,
+    /// The witnessed sequence.
+    pub seq: u64,
+    /// The totals the damaged witness records.
+    pub recorded: BTreeMap<String, u64>,
+    /// The verified ledger's totals at that sequence.
+    pub verified: BTreeMap<String, u64>,
+}
+
+impl StateDir {
+    /// The bytes of the witness file, when it can be read as [`StateDir::read`]
+    /// reads it (no link, private, within the size limit).
+    fn witness_bytes(&self, pass_id: &str) -> Option<Vec<u8>> {
+        let dir = self.existing_dir(pass_id)?;
+        let file = open_no_follow(
+            &dir.join(format!("{pass_id}.witness")),
+            OpenOptions::new().read(true),
+        )
+        .ok()?;
+        if file.metadata().ok()?.mode() & 0o077 != 0 {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_WITNESS_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() <= MAX_WITNESS_BYTES).then_some(bytes)
+    }
+
+    /// Note that the witness `w`, still on disk, was proved damaged: at
+    /// its sequence the verified ledger had `verified`. Best effort, as the
+    /// other notes; nothing is noted unless the file still holds `w`.
+    pub(crate) fn record_damage(
+        &self,
+        pass_id: &str,
+        w: &Witnessed,
+        verified: &BTreeMap<String, u64>,
+    ) {
+        let Some(bytes) = self.witness_bytes(pass_id) else {
+            return;
+        };
+        let Ok(on_disk) = serde_json::from_slice::<WitnessFile>(&bytes) else {
+            return;
+        };
+        if on_disk.seq != w.seq || on_disk.tail != w.tail.to_string() || on_disk.totals != w.totals
+        {
+            return;
+        }
+        let note = DamageNote {
+            hallpass_witness_damage: 1,
+            pass_id: pass_id.to_owned(),
+            witness: Digest::of(&bytes).to_string(),
+            seq: w.seq,
+            recorded: w.totals.clone(),
+            verified: verified.clone(),
+        };
+        if self
+            .read_note::<DamageNote>(pass_id, "witness-damage")
+            .as_ref()
+            != Some(&note)
+        {
+            self.write_note(pass_id, "witness-damage", &note);
+        }
+    }
+
+    /// The damage noted for the witness now on disk: `None` when there is
+    /// no note, or the witness's bytes are not the ones noted.
+    pub(crate) fn noted_damage(&self, pass_id: &str) -> Option<DamageNote> {
+        let note = self.read_note::<DamageNote>(pass_id, "witness-damage")?;
+        let bytes = self.witness_bytes(pass_id)?;
+        (note.hallpass_witness_damage == 1
+            && note.pass_id == pass_id
+            && note.witness == Digest::of(&bytes).to_string()
+            && valid_totals(&note.verified))
+        .then_some(note)
+    }
+
+    /// The state directory when it already exists and is private; notes are
+    /// never a reason to create it.
+    fn existing_dir(&self, pass_id: &str) -> Option<&Path> {
+        let dir = self.path().ok()?;
+        self.check_dir(pass_id, dir).ok()?;
+        Some(dir)
+    }
+
+    fn read_note<T: serde::de::DeserializeOwned>(&self, pass_id: &str, kind: &str) -> Option<T> {
+        let dir = self.existing_dir(pass_id)?;
+        let file = open_no_follow(
+            &dir.join(format!("{pass_id}.{kind}")),
+            OpenOptions::new().read(true),
+        )
+        .ok()?;
+        if file.metadata().ok()?.mode() & 0o077 != 0 {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_NOTE_BYTES + 1).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > MAX_NOTE_BYTES {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Replace a note, best effort: no lock, no sync, and any failure is
+    /// ignored (the note only improves a message).
+    fn write_note<T: Serialize>(&self, pass_id: &str, kind: &str, note: &T) {
+        let Some(dir) = self.existing_dir(pass_id) else {
+            return;
+        };
+        let Ok(mut text) = serde_json::to_string(note) else {
+            return;
+        };
+        text.push('\n');
+        let temp = dir.join(format!(
+            ".{pass_id}.{kind}.{}.{}.tmp",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .and_then(|()| fs::rename(&temp, dir.join(format!("{pass_id}.{kind}"))));
+        if written.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+    }
+
+    /// The adoptions that started a new history for `pass_id`, oldest
+    /// first; none when there is no readable note.
+    pub(crate) fn forks(&self, pass_id: &str) -> Vec<Fork> {
+        self.read_note::<ForksNote>(pass_id, "forks")
+            .filter(|n| n.hallpass_forks == 1 && n.pass_id == pass_id)
+            .map_or_else(Vec::new, |n| n.forks)
+    }
+
+    /// Note an adoption that started a new history. The caller holds the
+    /// witness lock.
+    pub(crate) fn record_fork(&self, pass_id: &str, fork: Fork) {
+        let mut forks = self.forks(pass_id);
+        forks.retain(|f| f.seq < fork.seq);
+        forks.push(fork);
+        let excess = forks.len().saturating_sub(MAX_FORKS);
+        forks.drain(..excess);
+        self.write_note(
+            pass_id,
+            "forks",
+            &ForksNote {
+                hallpass_forks: 1,
+                pass_id: pass_id.to_owned(),
+                forks,
+            },
+        );
+    }
+
+    /// Note the pass file just read, and return a warning when it is the
+    /// same file as at the last read with different contents: it was
+    /// rewritten in place, not replaced by a rename, and a command that reads
+    /// a pass during such a save can see only part of it. A touch (the
+    /// contents unchanged) and a replacement by rename (a new file) are not
+    /// reported. `spend`, `permits` and `status` call this.
+    ///
+    /// Advisory: it writes only `<pass id>.pass-file` in an existing state
+    /// directory, never creates the directory, ignores every failure, and
+    /// never refuses anything.
+    #[must_use]
+    pub fn observe_pass_file(&self, loaded: &crate::LoadedPass) -> Option<String> {
+        let pass_id = &loaded.pass.id;
+        let seen = PassFileNote {
+            hallpass_pass_file: 1,
+            pass_id: pass_id.clone(),
+            path: ledger_identity(&loaded.path),
+            dev: loaded.file.dev,
+            ino: loaded.file.ino,
+            born_ns: loaded.file.born_ns,
+            digest: loaded.digest.to_string(),
+        };
+        let last = self.read_note::<PassFileNote>(pass_id, "pass-file");
+        if last.as_ref() == Some(&seen) {
+            return None;
+        }
+        self.write_note(pass_id, "pass-file", &seen);
+        let last = last?;
+        let rewritten = last.hallpass_pass_file == 1
+            && last.pass_id == seen.pass_id
+            && last.path == seen.path
+            && last.dev == seen.dev
+            && last.ino == seen.ino
+            && last.born_ns == seen.born_ns
+            && last.digest != seen.digest;
+        rewritten.then(|| {
+            format!(
+                "the pass file {} was changed in place since hallpass last read it: the same file was rewritten, not replaced. A command that reads a pass while it is saved in place can see only part of it, and a part can grant more. Save a pass by writing the new version to a file in the same directory and renaming it over the old one (`mv`), and give callers the approved digest (`--digest`).",
+                quote_path(&loaded.path)
+            )
+        })
+    }
+}
+
 /// A fully serialized witness that fits the reader's size limit.
 pub struct PreparedWitness(String);
 
@@ -441,6 +719,20 @@ pub struct Witnessed {
     pub totals: BTreeMap<String, u64>,
     /// When it was written (UTC, `YYYY-MM-DDTHH:MM:SSZ`).
     pub updated: String,
+}
+
+/// Whether two sets of totals count the same: the same counters with the
+/// same amounts. A counter recorded with 0 counts nothing, so it is the same
+/// as no entry.
+#[must_use]
+pub fn same_totals(a: &BTreeMap<String, u64>, b: &BTreeMap<String, u64>) -> bool {
+    let counted = |t: &BTreeMap<String, u64>| {
+        t.iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, n)| (k.clone(), *n))
+            .collect::<Vec<_>>()
+    };
+    counted(a) == counted(b)
 }
 
 /// The totals in words: `calls 4, requests 30`, or `nothing`.

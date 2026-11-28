@@ -422,23 +422,38 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
 
 fn ancestry_text(text: &mut String, ancestry: &evidence::BackupAncestry) {
     text.push_str("Ancestry of the extended candidates (by tip group):\n");
-    if ancestry.prefix_links.is_empty() {
-        text.push_str(
-            "  No tip group is a prefix of another. This is not a finding of unrelated\n  backups: only candidates that extend the witness are compared, so candidates\n  that are prefixes of the witness (exact or shorter) never appear here.\n",
-        );
-    }
-    for (from, to) in &ancestry.prefix_links {
-        let _ = writeln!(text, "  group {from} is a prefix of group {to}");
-    }
     let groups = ancestry
         .maximal_groups
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    if ancestry.maximal_groups.is_empty() {
-        text.push_str("  No extended candidate, so there is no maximal group.\n");
-    } else {
+    // Lead with the conclusion. Only candidates that extend the witness are
+    // compared here; one at or behind the witness (exact or shorter) is
+    // judged by its own row.
+    if ancestry.prefix_links.is_empty() {
+        match ancestry.maximal_groups.len() {
+            0 => text.push_str(
+                "  Nothing to compare: no candidate extends the witness. Candidates at or\n  behind the witness (exact or shorter) are not compared here; see their rows.\n",
+            ),
+            1 => {
+                let _ = writeln!(
+                    text,
+                    "  Nothing to compare: only tip group {groups} extends the witness."
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    text,
+                    "  The extended tip groups {groups} split after the witness: none is a\n  prefix of another, so at most one of them is the ledger hallpass wrote."
+                );
+            }
+        }
+    }
+    for (from, to) in &ancestry.prefix_links {
+        let _ = writeln!(text, "  group {from} is a prefix of group {to}");
+    }
+    if !ancestry.maximal_groups.is_empty() {
         let _ = writeln!(
             text,
             "  Maximal groups (not a prefix of any other): {groups}"

@@ -154,7 +154,7 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
             "Pass file beside the live ledger: {}, so this pass file is a second pass file with the same id",
             case.path("p.toml").display()
         ),
-        "replace the content of the live pass file with the content of this pass file",
+        "copy it beside the live pass file, `mv` the copy over that file and spend from it",
         "move the live ledger to the expected ledger path",
         "Do not run `hallpass adopt` on this pass file",
         "give it its own id",
@@ -183,7 +183,7 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
     let shown = case.run(&["status", "q.toml"]);
     assert_eq!(shown.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&shown.stderr).contains("replace the content of"),
+        String::from_utf8_lossy(&shown.stderr).contains("`mv` the copy over that file"),
         "{}",
         text(&shown)
     );
@@ -203,7 +203,10 @@ fn a_second_pass_file_is_sent_to_the_live_ledger_and_never_adopted() {
     assert_eq!(bytes(&case.witness()), witness);
 
     // Applying the revision as advised continues the count, with no fork.
-    fs::write(case.path("p.toml"), bytes(&case.path("q.toml"))).expect("revise in place");
+    // A copy renamed over the live pass, as the message advises, is not a
+    // pass changed in place, so the spend warns of nothing.
+    fs::copy(case.path("q.toml"), case.path("p.toml.new")).expect("copy");
+    fs::rename(case.path("p.toml.new"), case.path("p.toml")).expect("revise by rename");
     let (rc, out) = case.spend("p.toml");
     assert_eq!(rc, 0, "{out}");
     assert_eq!((&out["spent"], &out["total"]), (&4.into(), &200.into()));

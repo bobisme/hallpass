@@ -279,6 +279,12 @@ enum Command {
         /// Require the exact reviewed preview token.
         #[arg(long, value_name = "TOKEN", conflicts_with = "preview")]
         token: Option<String>,
+        /// When a command proved the witness damaged before the ledger was
+        /// lost, carry per counter the higher of the witness's total and the
+        /// verified total it noted (without this, such an adoption is
+        /// refused).
+        #[arg(long)]
+        carry_noted_totals: bool,
         #[command(flatten)]
         lock: LockArgs,
     },
@@ -1259,6 +1265,7 @@ fn status_with_clock(
         Ok(v) => v,
         Err(e) => return error_output("status", Some(file), &e),
     };
+    view.warnings.extend(state_dir.observe_pass_file(&loaded));
     let now = sample();
     view.warnings.extend(view.clock_warning(now));
     let tally = &view.tally;
@@ -2167,23 +2174,70 @@ fn ledger(file: &Path, counter: Option<&str>, tail: Option<usize>, since: Option
     }
 }
 
-fn preview_adopt(file: &Path) -> Output {
-    match hallpass::preview_adopt(file, &StateDir::from_env()) {
+fn preview_adopt(file: &Path, carry_noted: bool) -> Output {
+    match hallpass::preview_adopt_with(file, &StateDir::from_env(), carry_noted) {
         Ok(p) => Output {
             code: 0,
             text: format!(
-                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}. Projected: {}. Token: {}\n",
+                "ADOPTION PREVIEW: {} for {} at sequence {}. Present: {}. Carry: {}{}. Projected: {}. Token: {}\n",
                 p.case.as_str(),
                 p.pass_id,
                 p.seq,
                 hallpass::totals_text(&p.present),
                 hallpass::totals_text(&p.carried),
+                if p.from_note.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (the higher of the witness's and the noted verified totals; from the note: {})",
+                        hallpass::totals_text(&p.from_note)
+                    )
+                },
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
+    }
+}
+
+/// The warning for an adoption that carries totals the ledger cannot
+/// confirm: they come from the witness alone.
+fn carried_from_witness(p: &hallpass::AdoptPreview) -> Option<String> {
+    let why = match p.case {
+        hallpass::AdoptCase::LedgerMissing => "the ledger is missing",
+        hallpass::AdoptCase::LedgerChanged => {
+            "the ledger does not hold the line the witness recorded"
+        }
+        _ => return None,
+    };
+    if p.carried.is_empty() {
+        return None;
+    }
+    let source = if p.from_note.is_empty() {
+        "come from the witness alone".to_owned()
+    } else {
+        format!(
+            "are, per counter, the higher of the witness's total and the verified total noted when the witness was found damaged (from the note: {})",
+            hallpass::totals_text(&p.from_note)
+        )
+    };
+    Some(format!(
+        "the carried totals ({}) {source}: {why}, so hallpass cannot check them. Compare them with your run records before you adopt. If the ledger hallpass last wrote can be found, put it back instead.",
+        hallpass::totals_text(&p.carried)
+    ))
+}
+
+/// Where carried totals came from, for the adoption lines.
+fn carried_source(from_note: &std::collections::BTreeMap<String, u64>) -> String {
+    if from_note.is_empty() {
+        "Carried from the witness".to_owned()
+    } else {
+        format!(
+            "Carried, per counter, the higher of the witness's total and the verified total noted when the witness was found damaged (from the note: {})",
+            hallpass::totals_text(from_note)
+        )
     }
 }
 
@@ -2192,15 +2246,22 @@ fn preview_adopt(file: &Path) -> Output {
 fn inconclusive_references(applies: bool, when: &str) -> Vec<String> {
     applies
         .then(|| format!(
-            "{when} guarded spends (--require-new-ref) on this ledger cannot show that a caller reference is new: the adopted ledger may lack lines hallpass had recorded, so they are refused as reference-inconclusive until the references that may be in the lost lines are reconciled: list them from your run records and record them with `hallpass reconcile-references` (see hallpass help reconcile-references). Check each reference against your run record"
+            "{when} guarded spends (--require-new-ref) on this ledger cannot show that a caller reference is new: the adopted ledger may lack lines hallpass had recorded, so they are refused as reference-inconclusive until the references that may be in the lost lines are reconciled: list them from your run records and record them with `hallpass reconcile-references` (see hallpass help reconcile-references). Check each reference against your run record."
         ))
         .into_iter()
         .collect()
 }
 
-fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Output {
+fn adopt(
+    file: &Path,
+    reason: &str,
+    token: Option<&str>,
+    carry_noted: bool,
+    clock: &Clock,
+) -> Output {
+    let state = StateDir::from_env();
     let outcome =
-        match hallpass::adopt_guarded(file, reason, clock.now, &StateDir::from_env(), token) {
+        match hallpass::adopt_guarded_with(file, reason, clock.now, &state, token, carry_noted) {
             Ok(o) => o,
             Err(e) => return error_output("adopt", Some(file), &e),
         };
@@ -2212,11 +2273,12 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
     };
     let a = &outcome.adoption;
     let text = format!(
-        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. Carried from the witness: {}. Spent now: {}.\n",
+        "ADOPTED: {} for pass {} ({what}). Recorded as ledger entry {} with the reason {}. {}: {}. Spent now: {}.\n",
         safe(&outcome.ledger.display().to_string()),
         outcome.pass_id,
         a.seq,
         quoted(&a.reason),
+        carried_source(&outcome.from_note),
         hallpass::totals_text(&a.carried),
         hallpass::totals_text(&outcome.totals),
     );
@@ -2236,6 +2298,7 @@ fn adopt(file: &Path, reason: &str, token: Option<&str>, clock: &Clock) -> Outpu
             "seq": a.seq,
             "reason": a.reason,
             "carried": a.carried,
+            "from_note": outcome.from_note,
             "previous": a.previous.as_ref().map(witnessed_json),
             "totals": outcome.totals,
             "warnings": inconclusive_references(a.makes_references_inconclusive(), "from this adoption on,").into_iter().chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>(),
@@ -2612,15 +2675,17 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
             reason,
             preview,
             token,
+            carry_noted_totals,
             ..
         } => {
             if *preview {
-                preview_adopt(file)
+                preview_adopt(file, *carry_noted_totals)
             } else {
                 adopt(
                     file,
                     reason.as_deref().unwrap_or_default(),
                     token.as_deref(),
+                    *carry_noted_totals,
                     &clock,
                 )
             }

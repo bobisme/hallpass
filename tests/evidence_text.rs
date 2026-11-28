@@ -286,8 +286,10 @@ fn other_advanced_commands_print_readable_text() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Captured witness: sequence 1 hash "), "{out}");
     assert!(out.contains("extended"), "{out}");
-    assert!(out.contains("No tip group is a prefix of another"), "{out}");
-    assert!(out.contains("prefixes of the witness"), "{out}");
+    assert!(
+        out.contains("Nothing to compare: only tip group 1 extends the witness."),
+        "{out}"
+    );
     assert!(out.contains("Maximal groups"), "{out}");
     let (_, out) = text(&["compare-backups", file, s(&extension)]);
     assert!(!out.contains("Ancestry"), "{out}");

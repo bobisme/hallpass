@@ -478,6 +478,7 @@ path and the time. Every command that reads the ledger (`status`,
 | present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
 | present | the witnessed line is there, and `k` entries follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added entries; they count |
 | present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
+| present | the witnessed line is there, but the witness's totals are not the ledger's verified totals at that sequence (a counter added, removed or changed; a counter at 0 counts as absent) | the witness is damaged: as in the next row |
 | present | could not be read (no state directory, damaged, not private) | `spend` and `adopt`: **error `witness-unavailable`**. `status`, `permits`, `ledger`: answered, with a warning and `not-checked` |
 
 The same evidence, by command:
@@ -488,6 +489,22 @@ The same evidence, by command:
 | Ledger without a witness | evaluate with warning | report missing witness | evaluate; a real spend without `--require-new-ref`, or `adopt`, establishes the witness |
 | Unusable witness state | evaluate with warning | report not-checked | error |
 | Missing or divergent witnessed history | error | error | error |
+
+The totals are compared at the witnessed sequence, not at the end of the
+ledger, so a ledger ahead of its witness (a crash between the append and
+the witness update) is still checked. `compare-backups` warns when a
+candidate holds the witnessed line with other totals.
+
+Beside the witness, hallpass keeps two notes that only choose words and
+never decide a count or a refusal, and a third that only adds a refusal. A missing or damaged note changes only a
+message. `<pass id>.forks` records where an adoption that replaced the
+witnessed history put its line (`ledger-missing` and `ledger-changed`
+adoptions; the latest 16). A ledger that holds the line before such an
+adoption and a different line where it is, is `ledger-changed` with "a
+different history from sequence N" instead of "an older copy".
+`<pass id>.pass-file` is described under "When the pass is edited", and
+`<pass id>.witness-damage` (which does decide a refusal: an adoption from a
+witness it names) under `adopt`.
 
 The path in the witness is informational: identity is the hash chain. A
 pass moved with its ledger is accepted with a warning and the witness
@@ -503,8 +520,9 @@ recorded (same sequence number and hash). If all of that holds, the ledger
 is not lost, and the error is `ledger-elsewhere`. This is the usual case of
 an amended approval saved as a second file with the same id, or of a pass
 moved without its ledger. The message names the intact ledger and the pass
-file beside it, if there is one. To apply a revision, replace the content
-of that pass file with the new one and spend from it; the count carries on.
+file beside it, if there is one. To apply a revision, copy the new file into
+that pass file's directory, rename the copy over it (`mv`), and spend from
+it; the count carries on.
 If the old file is being retired, or there is none, move the ledger beside
 the new file instead. Do not adopt: adoption would start a second ledger
 for the id. If the file cannot be opened, does not verify, belongs to
@@ -524,6 +542,23 @@ pass digest, the witness's previous record, and `carried`):
 - ledger changed: `carried` is, per counter, what the witness recorded
   beyond what the ledger holds;
 - no witness: `carried` is empty.
+
+In the first two cases the ledger cannot confirm the carried totals: the
+ledger is missing, or it does not hold the witnessed line. They come from
+the witness alone. `adopt --preview` says so in `warnings` when it would
+carry an amount. A witness edited, or damaged without becoming unreadable,
+while its ledger was still there is refused by every command that compares
+them (see "The witness"). The command that finds it notes what it saw in
+`<pass id>.witness-damage`: the digest of the witness file's bytes, the
+witnessed sequence, and both sets of totals. While the witness still has
+those bytes, `adopt` and `adopt --preview` refuse (`witness-unavailable`)
+to carry its totals, and advise putting the ledger or a backup back. If no
+copy is left, `adopt --carry-noted-totals` carries, per counter, the higher
+of the witness's total and the verified total noted, so the note never
+lowers a count; the flag is an error when no note applies. Without a note,
+adoption is as before. A witness damaged after the ledger was lost, with no
+command in between, can only be checked against the operator's run
+records.
 
 The first two may have lost lines and their caller references, so later
 guarded spends refuse new references as `reference-inconclusive`; the third
@@ -706,7 +741,16 @@ and says that a newer hallpass may have written it.
   `pass-changed`.
 - Replace the pass file at its path: write the new version to a file in the
   same directory, `chmod 600` it, and `mv` it over the old one, so that no
-  command reads a save in progress. A revision kept as a second file with
+  command reads a save in progress. `spend`, `permits` and `status` note the
+  pass file they read (device, inode, birth time where the file system
+  records one, and the digest) in `<pass id>.pass-file` in an existing state
+  directory. When a later one reads the same file with other contents, it
+  warns that the pass was changed in place and recommends `mv` and
+  `--digest`. It warns once per change and never refuses. A touch (same
+  contents) and a replacement by `mv` (a new file) are not warned about. The
+  warning comes after the change, so it does not stop a read of a save in
+  progress; it tells the operator that their way of saving is exposed. A
+  revision kept as a second file with
   the same id has no ledger beside it, and is refused as `ledger-elsewhere`
   while the first file's ledger is intact (see "The witness").
 

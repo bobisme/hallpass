@@ -139,6 +139,7 @@ pub fn permits_with_clock_in(
     }
     let loaded = load(path)?;
     let mut view = read_summary(&loaded, state)?;
+    view.warnings.extend(state.observe_pass_file(&loaded));
     let now = clock();
     view.warnings.extend(view.clock_warning(now));
     let decision = decide_targets(

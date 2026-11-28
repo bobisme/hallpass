@@ -1157,6 +1157,36 @@ fn check_backup_paths(paths: &[PathBuf]) -> Result<(), Error> {
     Ok(())
 }
 
+/// The warning for a candidate that holds the witnessed line with other
+/// totals there than the witness records: the witness is damaged.
+fn damaged_totals(
+    state: &StateDir,
+    id: &str,
+    witness: Option<&crate::Witnessed>,
+    parsed: &super::Parsed,
+    path: &Path,
+) -> Option<String> {
+    let w = witness?;
+    let spent = parsed.prefix_spent.as_ref()?;
+    if parsed.prefix != Some((w.seq, w.tail)) || crate::witness::same_totals(spent, &w.totals) {
+        return None;
+    }
+    Some(
+        state
+            .damaged(
+                id,
+                &format!(
+                    "it records spent: {} at sequence {}, but {} holds the witnessed line with spent: {} there",
+                    crate::witness::totals_text(&w.totals),
+                    w.seq,
+                    crate::display_quoted(&path.display().to_string()),
+                    crate::witness::totals_text(spent)
+                ),
+            )
+            .to_string(),
+    )
+}
+
 /// Compare backup tips, optionally verifying ancestry among witnessed extensions.
 ///
 /// # Errors
@@ -1205,6 +1235,9 @@ pub fn compare_backups_with_ancestry(
         };
         match inspect_candidate(path, witness.as_ref().map(|w| w.seq)) {
             Ok(parsed) => {
+                if parsed.pass_id == *id {
+                    warnings.extend(damaged_totals(state, id, witness.as_ref(), &parsed, path));
+                }
                 let tip = Checkpoint {
                     version: 1,
                     pass_id: parsed.pass_id,

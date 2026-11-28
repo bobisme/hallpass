@@ -259,7 +259,19 @@ witness catches them.
   count. Anything else (fewer lines, a different line at that position) is
   `ledger-changed`. A missing ledger with a witness of any line is
   `ledger-missing`, and nothing is created, so the count does not restart
-  at 0.
+  at 0. The witness's totals must equal the ledger's verified totals at the
+  witnessed line; a difference means the witness was damaged after it was
+  written, and it is treated as an unreadable witness. Adoption trusts
+  these totals, so they must not drift unseen while the ledger can still
+  confirm them.
+- **No checksum over the witness.** A checksum would add something only
+  when the ledger is gone, and there only against accidents: an operator
+  who edits the witness can recompute it. The witness is written to a
+  temporary file, synced and renamed, so it is never torn, and a damaged
+  file almost always fails to parse. A new field would also make every
+  earlier hallpass, which refuses unknown witness fields, call each new
+  witness damaged. Checking the totals against the ledger catches the same
+  edits whenever the ledger is there, with no format change.
 - **Identity is the chain, not the path.** The path in the witness is
   recorded for messages only. A pass moved with its ledger matches, and the
   witness follows it (warning). If the ledger was copied, the first copy
@@ -270,8 +282,8 @@ witness catches them.
   it is intact (opened under the usual rules, fully verified, ending with
   the witnessed line), else `ledger-missing`. The first is the common
   case of an amended approval saved as a new file: the message names the
-  live ledger and its pass file, says to replace that file's content with
-  the revision, and `adopt` refuses, since adopting would fork the
+  live ledger and its pass file, says to replace that file with the
+  revision by `mv`, and `adopt` refuses, since adopting would fork the
   history. A ledger that cannot be verified there falls back to
   `ledger-missing`, so the path in the witness never decides a count.
 - **Order of writes**: ledger first (appended and synced), witness second
@@ -488,7 +500,11 @@ No locking crate: the standard library has file locks.
   still be read part-way. Replace a pass by writing the new version in the
   same directory, `chmod 600`, then `mv` over the old file; a tool that
   spends while the owner may change the pass should pin the digest
-  (`--digest`, `expect_digest`).
+  (`--digest`, `expect_digest`). `spend`, `permits` and `status` warn when
+  the pass file they read is the same file as at the last read with other
+  contents (changed in place, not replaced by `mv`). The warning comes after
+  the save, not during it: it tells the operator that their way of saving is
+  exposed, and does not stop a read part-way.
 - **The window uses the caller's clock.** Changing the system clock moves
   the window. CLI spends sample time after preparatory witness writes under the writer locks;
   status, permits and previews sample after verifying their evidence. A

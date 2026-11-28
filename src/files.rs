@@ -409,6 +409,35 @@ pub struct LoadedPass {
     pub digest: Digest,
     /// The path it was read from.
     pub path: PathBuf,
+    /// Which file was read, to tell a pass rewritten in place from one
+    /// replaced by a rename.
+    pub(crate) file: FileId,
+}
+
+/// The identity of an open file: its device, inode and, where the file
+/// system records one, its birth time. A file replaced by a rename has a new
+/// identity; a file rewritten in place keeps its own. The birth time tells a
+/// new file that reuses a freed inode number from the old one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+    pub born_ns: Option<u64>,
+}
+
+impl FileId {
+    fn of(meta: &fs::Metadata) -> Self {
+        let born_ns = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| u64::try_from(d.as_nanos()).ok());
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            born_ns,
+        }
+    }
 }
 
 /// Open `path` with `options` only if it is a regular file and not a
@@ -704,6 +733,11 @@ fn settled_bytes(
 /// with a newline. This is the only read of a pass file: the bytes it
 /// returns are both the ones parsed and the ones digested.
 pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
+    read_pass_file(path).map(|(bytes, _)| bytes)
+}
+
+/// [`read_pass_bytes`], and the identity of the file the bytes came from.
+fn read_pass_file(path: &Path) -> Result<(Vec<u8>, FileId), Error> {
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
     check_pass_owner_mode(
@@ -712,7 +746,8 @@ pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
         rustix::process::geteuid().as_raw(),
         meta.mode(),
     )?;
-    settled_bytes(&file, path, std::time::SystemTime::now, std::thread::sleep)
+    let bytes = settled_bytes(&file, path, std::time::SystemTime::now, std::thread::sleep)?;
+    Ok((bytes, FileId::of(&meta)))
 }
 
 /// Read, validate and digest the pass at `path`.
@@ -738,7 +773,7 @@ pub fn load(path: &Path) -> Result<LoadedPass, Error> {
 /// # Errors
 /// Returns the same validation and file errors as [`load`].
 pub fn load_with_bytes(path: &Path) -> Result<(LoadedPass, Vec<u8>), Error> {
-    let bytes = read_pass_bytes(path)?;
+    let (bytes, file) = read_pass_file(path)?;
     let digest = Digest::of(&bytes);
     let text = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid {
         path: path.to_path_buf(),
@@ -756,6 +791,7 @@ pub fn load_with_bytes(path: &Path) -> Result<(LoadedPass, Vec<u8>), Error> {
             pass,
             digest,
             path: path.to_path_buf(),
+            file,
         },
         bytes,
     ))

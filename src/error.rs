@@ -451,7 +451,7 @@ impl ElsewhereLedger {
             return out;
         }
         if self.live_pass.is_some() {
-            out.push("If this pass file revises that approval, replace the content of the live pass file with the content of this pass file and spend from the live pass file: the count carries on.".to_owned());
+            out.push("If this pass file revises that approval, copy it beside the live pass file, `mv` the copy over that file and spend from it: the count carries on.".to_owned());
             out.push("If the live pass file is being retired instead, move the live ledger to the expected ledger path.".to_owned());
         } else {
             out.push(
@@ -480,7 +480,8 @@ impl std::fmt::Display for ElsewhereLedger {
 /// updated) gets nothing more; every other cause is a state directory that is
 /// missing, not writable or not usable, whose step is the directory.
 fn witness_advice(detail: &str) -> &'static str {
-    const OWN_STEP: [&str; 5] = [
+    const OWN_STEP: [&str; 6] = [
+        "--carry-noted-totals",
         "move it aside and run `hallpass adopt`",
         "run `chmod ",
         "ask the approval owner",

@@ -38,7 +38,9 @@ use crate::files::{
 use crate::name::HostName;
 use crate::pass::{MAX_CEILING, is_counter_name};
 use crate::request::{TargetRefusal, decide_targets};
-use crate::witness::{StateDir, Witnessed, ledger_identity, totals_text, valid_totals};
+use crate::witness::{
+    Fork, StateDir, Witnessed, ledger_identity, same_totals, totals_text, valid_totals,
+};
 use crate::{MAX_TARGETS, NamedTarget};
 
 mod append;
@@ -660,6 +662,9 @@ struct Parsed {
     /// The hash of the last physical line scanned.
     tail: Digest,
     prefix: Option<(u64, Digest)>,
+    /// The totals at the requested sequence, when the scan reached it: what
+    /// a witness of that sequence must record.
+    prefix_spent: Option<BTreeMap<String, u64>>,
     last_time: Option<OffsetDateTime>,
     /// The latest time on any line, and the first line that records it.
     latest: Option<(OffsetDateTime, u64)>,
@@ -924,6 +929,7 @@ fn scan_ledger(
         reconciled_adoption: None,
         tail: Digest::of(&first),
         prefix: (requested == Some(0)).then(|| (0, Digest::of(&first))),
+        prefix_spent: (requested == Some(0)).then(BTreeMap::new),
         last_time: None,
         latest: None,
         adoption_count: 0,
@@ -1040,6 +1046,7 @@ fn scan_ledger(
         record_checkpoint(&mut checkpoints, last_seq, parsed.tail);
         if requested == Some(last_seq) {
             parsed.prefix = Some((last_seq, parsed.tail));
+            parsed.prefix_spent = Some(parsed.tally.spent.clone());
         }
     }
     Ok(parsed)
@@ -1333,6 +1340,25 @@ fn compare(
             let moved = (w.ledger != here).then(|| w.ledger.clone());
             let witnessed = p.prefix == Some((w.seq, w.tail));
             if witnessed {
+                // The ledger holds the witnessed line, so its verified
+                // totals there are the ones hallpass recorded; a witness
+                // that says otherwise was damaged after it was written.
+                if let Some(spent) = &p.prefix_spent
+                    && !same_totals(spent, &w.totals)
+                {
+                    // Remember it: once the ledger is lost, nothing else
+                    // could show that these totals are wrong.
+                    state.record_damage(pass_id, w, spent);
+                    return Err(state.damaged(
+                        pass_id,
+                        &format!(
+                            "it records spent: {} at sequence {}, but the verified ledger has spent: {} there",
+                            totals_text(&w.totals),
+                            w.seq,
+                            totals_text(spent)
+                        ),
+                    ));
+                }
                 let added = p.seq - w.seq;
                 let status = if added == 0 {
                     WitnessStatus::Matches
@@ -1341,19 +1367,32 @@ fn compare(
                 };
                 return Ok((status, moved));
             }
-            let mut detail = if w.seq > p.seq {
-                format!(
+            let fork = divergence(ledger, p.seq, &state.forks(pass_id));
+            let mut detail = match (w.seq > p.seq, fork) {
+                (true, None) => format!(
                     "the witness recorded logical sequence {} (spent: {}) on {}, but this ledger ends at sequence {}: entries were removed, or this is an older copy",
                     w.seq,
                     totals_text(&w.totals),
                     w.updated,
                     p.seq
-                )
-            } else {
-                format!(
+                ),
+                (true, Some(f)) => format!(
+                    "the witness recorded logical sequence {} (spent: {}) on {}, but this ledger ends at sequence {} and is a different history from sequence {}: hallpass adopted another copy of the ledger there on {}",
+                    w.seq,
+                    totals_text(&w.totals),
+                    w.updated,
+                    p.seq,
+                    f.seq,
+                    f.time
+                ),
+                (false, None) => format!(
                     "entry {} is not the line hallpass wrote there on {}: it was edited, or this is a different ledger for the same pass id",
                     w.seq, w.updated
-                )
+                ),
+                (false, Some(f)) => format!(
+                    "entry {} is not the line hallpass wrote there on {}: this ledger is a different history from sequence {}, where hallpass adopted another copy of the ledger on {}",
+                    w.seq, w.updated, f.seq, f.time
+                ),
             };
             if let Some(other) = &moved {
                 if Path::new(other).exists() {
@@ -1373,6 +1412,42 @@ fn compare(
             })
         }
     }
+}
+
+/// The adoption at which `ledger` (verified to sequence `seq`) leaves the
+/// history hallpass recorded: it holds the line before the adoption, and a
+/// different line where the adoption is. `None` when no noted adoption is
+/// such a point, or the ledger cannot be read again. Only the words of a
+/// refusal depend on this.
+fn divergence(ledger: &Path, seq: u64, forks: &[Fork]) -> Option<Fork> {
+    let forks: Vec<&Fork> = forks.iter().filter(|f| f.seq > 0 && f.seq <= seq).collect();
+    if forks.is_empty() {
+        return None;
+    }
+    let wanted: std::collections::BTreeSet<u64> =
+        forks.iter().flat_map(|f| [f.seq - 1, f.seq]).collect();
+    let mut found = BTreeMap::new();
+    // The caller holds a lock on this ledger, so no writer changes it; a
+    // second shared lock from this process could wait on the first.
+    let file = open_no_follow(ledger, OpenOptions::new().read(true)).ok()?;
+    scan_ledger(
+        ledger,
+        BufReader::new(&file),
+        false,
+        None,
+        Some((&wanted, &mut found)),
+        &mut |_| Ok(()),
+    )
+    .ok()?;
+    let written = |seq: u64, hash: &str| {
+        found
+            .get(&seq)
+            .is_some_and(|d: &Digest| d.to_string() == hash)
+    };
+    forks
+        .into_iter()
+        .find(|f| written(f.seq - 1, &f.prev) && !written(f.seq, &f.hash))
+        .cloned()
 }
 
 /// The error for a pass with no ledger beside it whose witness recorded
@@ -1534,7 +1609,17 @@ fn visit_view(
             },
             None,
         ),
-        Ok(w) => compare(&loaded.path, &path, parsed.as_ref(), w.as_ref(), state, id)?,
+        Ok(w) => match compare(&loaded.path, &path, parsed.as_ref(), w.as_ref(), state, id) {
+            // A witness that contradicts the ledger is a damaged witness:
+            // answered with a warning, as one that does not parse.
+            Err(e @ Error::WitnessUnavailable { .. }) => (
+                WitnessStatus::NotChecked {
+                    reason: e.to_string(),
+                },
+                None,
+            ),
+            other => other?,
+        },
     };
     let mut warnings = warnings(&witness, moved.as_ref(), id, false);
     warnings.extend(crate::files::shared_directory_warning(&loaded.path));
@@ -1550,6 +1635,7 @@ fn visit_view(
         reconciled_adoption: None,
         tail: Digest::of(b""),
         prefix: None,
+        prefix_spent: None,
         last_time: None,
         latest: None,
         adoption_count: 0,
@@ -1980,7 +2066,8 @@ fn lock_for_writing(
     lock_timeout: Option<std::time::Duration>,
     visit: &mut Visitor<'_>,
 ) -> Result<Locked, Error> {
-    lock_for_writing_notifying(pass_path, state, adopting, guard, lock_timeout, None, visit)
+    let adopting = adopting.then_some(false);
+    lock_for_writing_inner(pass_path, state, adopting, guard, lock_timeout, None, visit)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1988,6 +2075,30 @@ fn lock_for_writing_notifying(
     pass_path: &Path,
     state: &StateDir,
     adopting: bool,
+    guard: Option<&str>,
+    lock_timeout: Option<std::time::Duration>,
+    on_wait: Option<fn(&crate::files::LockWait)>,
+    visit: &mut Visitor<'_>,
+) -> Result<Locked, Error> {
+    let adopting = adopting.then_some(false);
+    lock_for_writing_inner(
+        pass_path,
+        state,
+        adopting,
+        guard,
+        lock_timeout,
+        on_wait,
+        visit,
+    )
+}
+
+/// `adopting` is `Some(carry_noted)` for an adoption (see
+/// [`adopt_guarded_with`]), `None` for every other writer.
+#[allow(clippy::too_many_arguments)]
+fn lock_for_writing_inner(
+    pass_path: &Path,
+    state: &StateDir,
+    adopting: Option<bool>,
     guard: Option<&str>,
     lock_timeout: Option<std::time::Duration>,
     on_wait: Option<fn(&crate::files::LockWait)>,
@@ -2001,10 +2112,16 @@ fn lock_for_writing_notifying(
     let wait = LockBudget::requested(lock_timeout, on_wait);
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
+    if let Some(carry_noted) = adopting {
+        // Before anything is created: a refused adoption leaves no ledger.
+        noted_totals(state, &id, witness.as_ref(), carry_noted, pass_path)?;
+    }
     if let Some(expected) = guard {
-        let current = preview_adopt(pass_path, state).map_err(|e| match e {
+        let carry_noted = adopting.unwrap_or(false);
+        let current = preview_adopt_with(pass_path, state, carry_noted).map_err(|e| match e {
             // The preview's own refusal, so that both say the same.
             Error::LedgerElsewhere(_) | Error::LedgerClockMix { .. } => e,
+            e @ Error::WitnessUnavailable { .. } => e,
             _ => stale_token(pass_path),
         })?;
         if current.token != expected {
@@ -2015,7 +2132,7 @@ fn lock_for_writing_notifying(
     let created = !exists(&path)?;
     let mut guarded_missing_pass = None;
     if created {
-        if adopting {
+        if adopting.is_some() {
             let Some(known) = witness.as_ref().filter(|w| w.seq > 0) else {
                 return Err(Error::Usage(
                     "there is no ledger and no witness of any spend for this pass: nothing to adopt. Nothing was recorded".to_owned(),
@@ -2593,6 +2710,7 @@ fn prepare_witness(
         warnings.clear();
     }
     warnings.extend(crate::files::shared_directory_warning(pass_path));
+    warnings.extend(state.observe_pass_file(&locked.loaded));
     if !preserve_unanchored && (status != WitnessStatus::Matches || moved.is_some()) {
         state.write(
             id,
@@ -2629,6 +2747,10 @@ pub struct AdoptOutcome {
     pub pass_id: String,
     /// The totals after the adoption (spends and carried amounts).
     pub totals: BTreeMap<String, u64>,
+    /// The counters whose carried total came from the note of a damaged
+    /// witness (with `--carry-noted-totals`), and that noted total: the
+    /// verified total was higher than the witness's. Empty otherwise.
+    pub from_note: BTreeMap<String, u64>,
 }
 
 /// Read-only adoption snapshot and its guarded-apply token.
@@ -2650,6 +2772,8 @@ pub struct AdoptPreview {
     pub previous: Option<Witnessed>,
     /// Opaque versioned reviewed-state token.
     pub token: String,
+    /// As [`AdoptOutcome::from_note`].
+    pub from_note: BTreeMap<String, u64>,
 }
 
 impl AdoptPreview {
@@ -2699,6 +2823,80 @@ fn carry(present: &BTreeMap<String, u64>, witness: Option<&Witnessed>) -> BTreeM
     carried
 }
 
+/// The counters `raised` (the witness with noted totals) carries above the
+/// witness itself, with the noted total.
+fn raised_counters(
+    raised: Option<&Witnessed>,
+    witness: Option<&Witnessed>,
+) -> BTreeMap<String, u64> {
+    let (Some(raised), Some(w)) = (raised, witness) else {
+        return BTreeMap::new();
+    };
+    raised
+        .totals
+        .iter()
+        .filter(|(c, n)| **n > w.totals.get(*c).copied().unwrap_or(0))
+        .map(|(c, n)| (c.clone(), *n))
+        .collect()
+}
+
+/// Note where an adoption replaced the history the witness recorded, so
+/// that a copy of that history is later named as one.
+fn note_fork(state: &StateDir, id: &str, line: &AdoptLine, text: &str, now: OffsetDateTime) {
+    state.record_fork(
+        id,
+        Fork {
+            seq: line.seq,
+            hash: Digest::of(text.as_bytes()).to_string(),
+            prev: line.prev.clone(),
+            time: stamp(now),
+        },
+    );
+}
+
+/// The witness to carry totals from when a command proved this witness
+/// damaged (a note in the state directory matches its bytes): refused
+/// without `carry_noted`; with it, the witness with, per counter, the
+/// higher of its own and the verified total noted. `None` when there is no
+/// note, so the witness is used as it is.
+fn noted_totals(
+    state: &StateDir,
+    id: &str,
+    witness: Option<&Witnessed>,
+    carry_noted: bool,
+    pass_path: &Path,
+) -> Result<Option<Witnessed>, Error> {
+    let note = witness.and_then(|_| state.noted_damage(id));
+    let (Some(w), Some(note)) = (witness, note) else {
+        if carry_noted {
+            return Err(Error::Usage(format!(
+                "--carry-noted-totals: no damage is noted for the witness of pass `{id}`, so there are no noted totals to carry; nothing was recorded. Run `hallpass adopt {} --preview` without it",
+                pass_path.display()
+            )));
+        }
+        return Ok(None);
+    };
+    if !carry_noted {
+        return Err(state.noted_as_damaged(
+            id,
+            &format!(
+                "a command found that it records spent: {} at sequence {}, while the verified ledger had spent: {} there, and an adoption would carry those totals. Put the ledger back beside the pass, or a backup that holds sequence {}. If no copy is left, run `hallpass adopt {} --reason \"...\" --carry-noted-totals`: it carries, per counter, the higher of the two totals",
+                totals_text(&note.recorded),
+                note.seq,
+                totals_text(&note.verified),
+                note.seq,
+                pass_path.display()
+            ),
+        ));
+    }
+    let mut raised = w.clone();
+    for (counter, n) in &note.verified {
+        let total = raised.totals.entry(counter.clone()).or_insert(0);
+        *total = (*total).max(*n);
+    }
+    Ok(Some(raised))
+}
+
 fn adoption_token(
     loaded: &LoadedPass,
     path: &Path,
@@ -2744,6 +2942,21 @@ fn stale_token(pass_path: &Path) -> Error {
 /// # Errors
 /// If the state is not adoptable or any evidence is invalid.
 pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview, Error> {
+    preview_adopt_with(pass_path, state, false)
+}
+
+/// [`preview_adopt`], and with `carry_noted` the preview of an adoption
+/// that carries the totals noted for a damaged witness (see
+/// [`adopt_guarded_with`]).
+///
+/// # Errors
+/// As [`preview_adopt`]; a witness noted as damaged without `carry_noted`
+/// ([`Error::WitnessUnavailable`]); `carry_noted` with no such note.
+pub fn preview_adopt_with(
+    pass_path: &Path,
+    state: &StateDir,
+    carry_noted: bool,
+) -> Result<AdoptPreview, Error> {
     let loaded = load(pass_path)?;
     let id = &loaded.pass.id;
     let path = ledger_path(pass_path);
@@ -2789,7 +3002,9 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
     let present = parsed
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
-    let carried = carry(&present, witness.as_ref());
+    let raised = noted_totals(state, id, witness.as_ref(), carry_noted, pass_path)?;
+    let from_note = raised_counters(raised.as_ref(), witness.as_ref());
+    let carried = carry(&present, raised.as_ref().or(witness.as_ref()));
     let mut totals = present.clone();
     for (counter, n) in &carried {
         let _ = add(&mut totals, counter, *n);
@@ -2806,6 +3021,7 @@ pub fn preview_adopt(pass_path: &Path, state: &StateDir) -> Result<AdoptPreview,
         totals,
         previous: witness,
         token,
+        from_note,
     })
 }
 
@@ -2872,9 +3088,42 @@ pub fn adopt_guarded(
     state: &StateDir,
     token: Option<&str>,
 ) -> Result<AdoptOutcome, Error> {
+    adopt_guarded_with(pass_path, reason, now, state, token, false)
+}
+
+/// [`adopt_guarded`], choosing what to do with a witness that a command
+/// proved damaged against its ledger before the ledger was lost or replaced
+/// (hallpass notes that in the state directory).
+///
+/// Without `carry_noted` such an adoption is refused: the witness's totals
+/// are known to be wrong. With it, the adoption carries, per counter, the
+/// higher of the witness's total and the verified total noted, so no count
+/// is lowered. Restoring the ledger, or a backup that holds the noted
+/// sequence, is better: it keeps the receipts.
+///
+/// # Errors
+/// As [`adopt_guarded`]; a witness noted as damaged without `carry_noted`
+/// ([`Error::WitnessUnavailable`]); `carry_noted` with no such note
+/// ([`Error::Usage`]).
+pub fn adopt_guarded_with(
+    pass_path: &Path,
+    reason: &str,
+    now: OffsetDateTime,
+    state: &StateDir,
+    token: Option<&str>,
+    carry_noted: bool,
+) -> Result<AdoptOutcome, Error> {
     check_clock(now)?;
     check_reason(reason).map_err(|m| Error::Usage(format!("{m}; nothing was recorded")))?;
-    let mut locked = lock_for_writing(pass_path, state, true, token, None, &mut |_| Ok(()))?;
+    let mut locked = lock_for_writing_inner(
+        pass_path,
+        state,
+        Some(carry_noted),
+        token,
+        None,
+        None,
+        &mut |_| Ok(()),
+    )?;
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
     let case = if locked.created {
@@ -2896,7 +3145,12 @@ pub fn adopt_guarded(
             Err(e) => return Err(e),
         }
     };
-    let carried = carry(&locked.parsed.tally.spent, locked.witness.as_ref());
+    let raised = noted_totals(state, &id, locked.witness.as_ref(), carry_noted, pass_path)?;
+    let from_note = raised_counters(raised.as_ref(), locked.witness.as_ref());
+    let carried = carry(
+        &locked.parsed.tally.spent,
+        raised.as_ref().or(locked.witness.as_ref()),
+    );
     let line = AdoptLine {
         seq: locked.parsed.seq + 1,
         time: rfc3339(now),
@@ -2930,6 +3184,9 @@ pub fn adopt_guarded(
         },
     )?;
     append(&mut locked, &text, "adoption")?;
+    if case != AdoptCase::NoWitness {
+        note_fork(state, &id, &line, &text, now);
+    }
     state.publish(&id, &prepared)
         .map_err(|e| Error::WitnessUnavailable {
             pass_id: id.clone(),
@@ -2954,6 +3211,7 @@ pub fn adopt_guarded(
         created: locked.created,
         pass_id: id,
         totals,
+        from_note,
     })
 }
 
