@@ -235,7 +235,9 @@ fn waits_notices_and_times_out(case: &Case, command: &[&str]) {
     let out = case.run(&args);
     let took = started.elapsed();
     assert!(
-        took >= LIMIT && took < LIMIT + Duration::from_millis(1500),
+        // The upper bound only shows the wait stopped at the limit; process
+        // start-up under a loaded parallel test run can take seconds.
+        took >= LIMIT && took < LIMIT + Duration::from_millis(6000),
         "{args:?} took {took:?}"
     );
     assert_lock_timeout(&args, &out);

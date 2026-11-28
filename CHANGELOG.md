@@ -283,6 +283,14 @@ Changes since commit d70c09f.
 - The `ledger-elsewhere` advice says to replace the live pass file by `mv`.
   Library: `AdoptPreview.from_note` (a new public field).
 
+- A new caller reference must be printable ASCII. References holding any
+  other character (accented letters, Cyrillic lookalikes, Unicode hyphens) are
+  refused by `spend`, batches, library requests and `reconcile-references`; a
+  ledger that already holds such references still reads, finds them with
+  `receipt` and reconciles them.
+- A repeated `--format` or `--json` is a usage error; the last one no longer
+  wins silently.
+
 ### Added
 
 - Library: `spend_charges_batch`, `spend_charges_batch_in`,
@@ -628,3 +636,19 @@ Changes since commit d70c09f.
   (bn-ykr). `handoff` no longer says "Nothing needs attention" when the pass
   path is spelled differently (bn-yi9). Rehearsal mode against a release build
   no longer debits live and runs the callback (bn-2kr).
+- A file size limit (`ulimit -f`, RLIMIT_FSIZE) no longer kills hallpass with
+  SIGXFSZ partway through a ledger line. Before each write, hallpass checks
+  that the file stays within the limit and otherwise writes nothing, so a
+  spend fails `ledger-append-failed` / `not-recorded` with a reply and an
+  unchanged ledger. The check covers new ledgers, the witness and its notes,
+  the repair copy, `init` / `retrieve --output`, archive files and the
+  signature verifier's scratch files (bn-gr5).
+- The reference caller's `handoff` flags a last pin without a signature that
+  follows a signed pin for the same pass (bn-1kc).
+- README, DESIGN, EVIDENCE and INTEGRATING name whole-machine restores (ledger
+  and state directory rolled back together) as a residual risk, and show a
+  periodic `checkpoint` kept off the machine plus `verify-checkpoint` after a
+  restore (bn-2r2).
+- Caller references that look alike are no longer accepted as distinct new
+  references (bn-s33).
+- An oversized `--n` states the limit (1 to 1000000000000) (bn-27g).
