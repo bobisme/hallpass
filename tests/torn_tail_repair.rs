@@ -319,6 +319,7 @@ fn no_witness_and_a_stale_or_malformed_token_are_refused() {
     assert!(message(&v).contains("is not a repair token"), "{v}");
 
     fs::remove_file(case.witness()).expect("remove witness");
+    fs::remove_file(case.witness().with_extension("recorded")).expect("and its copy");
     let (rc, v) = case.preview();
     assert_eq!(rc, 1, "{v}");
     assert!(message(&v).contains("there is no witness"), "{v}");

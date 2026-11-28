@@ -430,6 +430,7 @@ fn a_reconciliation_that_cannot_be_recorded_records_nothing() {
     // A ledger whose adoption kept every line.
     e.recorded("unit-1", 1);
     fs::remove_file(e.witness()).expect("a new state directory");
+    fs::remove_file(e.witness().with_extension("recorded")).expect("and its copy");
     let kept = e.adopt();
     assert_eq!(kept["case"], "no-witness");
     let before = e.bytes();
@@ -504,6 +505,7 @@ fn a_reconciliation_that_cannot_be_recorded_records_nothing() {
     // Without a witness hallpass cannot tell whether the ledger is
     // complete: adopt it as it stands first.
     fs::remove_file(e.witness()).expect("a new state directory");
+    fs::remove_file(e.witness().with_extension("recorded")).expect("and its copy");
     let message = attempt(&e, "1", &list, "x");
     usage(&message, "there is no witness for pass `review-example`");
     assert!(

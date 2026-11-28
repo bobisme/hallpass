@@ -233,6 +233,7 @@ fn an_adoption_that_carried_lost_totals_keeps_new_references_inconclusive() {
     // A later adoption that loses nothing does not bring the lost
     // references back.
     fs::remove_file(e.witness()).expect("a fresh state directory");
+    fs::remove_file(e.witness().with_extension("recorded")).expect("and its copy");
     assert_eq!(e.adopt("new state directory")["case"], "no-witness");
     let message = inconclusive(&mut e.guarded("unit-4"), "unit-4");
     assert!(
@@ -317,6 +318,7 @@ fn a_preview_and_a_spend_agree_on_an_unwitnessed_ledger_of_adoptions_only() {
     // Without a witness again, the one line could be the start of a longer
     // ledger, whatever kind of line it is.
     fs::remove_file(e.witness()).expect("a fresh state directory");
+    fs::remove_file(e.witness().with_extension("recorded")).expect("and its copy");
     for flags in [&["--dry-run"][..], &[]] {
         inconclusive(e.guarded("unit-1").args(flags), "unit-1");
     }

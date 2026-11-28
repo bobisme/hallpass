@@ -129,6 +129,39 @@ resort is to move the ledger aside (keep it, it holds the receipts) and run
 witness totals. The receipts in the moved ledger are not in the new chain. See
 [Dropping a cut-short last line](spec.md#dropping-a-cut-short-last-line).
 
+### A lost witness
+
+Each time hallpass writes the witness, it also writes a copy of it,
+`<pass id>.recorded`, in the same state directory. If the witness is missing
+but the copy is there, the witness was lost from this state directory (a
+cleanup, a partial restore). It is not a pass arriving from another machine,
+user or state directory. A spend is then refused with
+`error.code = "witness-unavailable"`, and the message names both files.
+Without this refusal, an older copy of the ledger put back with it would
+count less than was spent. `status`, `permits` and `ledger` still answer,
+with the witness `not-checked`.
+
+If a backup of the state directory holds the witness, put it back. If not,
+run `hallpass doctor engagement.toml`: it names
+`hallpass adopt engagement.toml --preview`. The adoption checks the ledger
+against the copy:
+
+- The ledger holds the line the copy records: the case is `no-witness`. The
+  adoption carries nothing and keeps every line, and guarded spends go on.
+- The ledger does not hold that line (an older copy): the case is
+  `ledger-changed`. The adoption carries what the copy records beyond the
+  ledger, so the count is not lowered, and it may have lost lines: guarded
+  spends are `reference-inconclusive` until you reconcile the references.
+- The ledger is missing too: the case is `ledger-missing`, and the adoption
+  starts a new ledger that carries the copy's totals.
+
+A state directory where the pass was only checked (`permits`, `status`, a
+guarded spend refused for want of a witness) holds `<pass id>.pass-file` and
+`<pass id>.lock` but no copy, so a ledger there is still an arrival. A copy
+that does not read as one (damaged, or for another pass id) is ignored. A
+state directory last written by an earlier release has no copy until the
+next write of the witness.
+
 ## Replay historical endpoint decisions
 
 Retain each revision the owner approves together with the signature that

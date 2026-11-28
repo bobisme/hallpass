@@ -320,6 +320,12 @@ witness catches them.
   (`--require-new-ref`) on a nonempty ledger records no witness: it cannot
   show that a reference is new in a ledger that may be a partial copy, so
   it refuses and names `adopt`, after which it checks references again.
+- **A witness lost from its own state directory** is not an arrival. Each
+  witness write also writes a copy, `<id>.recorded`; while the witness is
+  missing and the copy is there, `spend` refuses (`witness-unavailable`),
+  and `adopt` checks the ledger against the copy and carries what it
+  records beyond the ledger. The copy is not synced: it only adds a
+  refusal, and a missing or damaged copy gives the arrival above.
 - **Adoption** (`hallpass adopt FILE --reason TEXT`) is the one way past
   `ledger-missing` and `ledger-changed`. It writes an `adopt` line into the
   chain with the reason, the pass digest and the witness's previous record,

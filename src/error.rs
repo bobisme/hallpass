@@ -804,8 +804,9 @@ impl std::fmt::Display for ElsewhereLedger {
 /// updated) gets nothing more; every other cause is a state directory that is
 /// missing, not writable or not usable, whose step is the directory.
 fn witness_advice(detail: &str) -> &'static str {
-    const OWN_STEP: [&str; 6] = [
+    const OWN_STEP: [&str; 7] = [
         "--carry-noted-totals",
+        "so the witness was lost,",
         "move it aside and run `hallpass adopt`",
         "run `chmod ",
         "ask the approval owner",

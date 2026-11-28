@@ -482,7 +482,8 @@ path and the time. Every command that reads the ledger (`status`,
 | missing | none, or no lines recorded | nothing spent (`fresh`) |
 | missing | records lines | **error `ledger-missing`**, naming the witnessed totals, where the ledger was last seen and when, and what to do |
 | missing | records lines, and the ledger where the witness last saw it is another file that is intact (it holds the witnessed line, with or without entries after it) | **error `ledger-elsewhere`**, naming that ledger, its current totals and the pass file beside it, and how to apply a revision |
-| present | none | accepted with a warning (`missing`); `spend` records a witness |
+| present | none, and no copy (`<pass id>.recorded`) | accepted with a warning (`missing`); `spend` records a witness |
+| present or missing | none, but its copy records lines | the witness was lost here: as for a witness that could not be read (the last row), with the adoption described below |
 | present | its line `seq` hashes to the witnessed hash, and nothing follows | `matches` |
 | present | the witnessed line is there, and `k` entries follow | accepted with a warning (`extended`): a run stopped between the ledger and the witness, or a hallpass without witnesses added entries; they count |
 | present | the witnessed line is not there (a different line at that position, or fewer lines) | **error `ledger-changed`**, saying which, and naming another ledger of the same id if one exists where the witness saw it |
@@ -496,7 +497,7 @@ The same evidence, by command:
 |---|---|---|---|
 | Fresh pass, no previous spend | evaluate policy | report fresh | evaluate policy |
 | Ledger without a witness | evaluate with warning | report missing witness | evaluate; a real spend without `--require-new-ref`, or `adopt`, establishes the witness |
-| Unusable witness state | evaluate with warning | report not-checked | error |
+| Unusable witness state, or a lost one (its copy is there) | evaluate with warning | report not-checked | error |
 | Missing or divergent witnessed history | error | error | error |
 
 The totals are compared at the witnessed sequence, not at the end of the
@@ -505,8 +506,8 @@ the witness update) is still checked. `compare-backups` warns when a
 candidate holds the witnessed line with other totals.
 
 Beside the witness, hallpass keeps two notes that only choose words and
-never decide a count or a refusal, and a third that only adds a refusal. A missing or damaged note changes only a
-message. `<pass id>.forks` records where an adoption that replaced the
+never decide a count or a refusal, and two that only add a refusal. A missing or damaged note changes only a
+message, or gives the behaviour of earlier releases. `<pass id>.forks` records where an adoption that replaced the
 witnessed history put its line (`ledger-missing` and `ledger-changed`
 adoptions; the latest 16). A ledger that holds the line before such an
 adoption and a different line where it is, is `ledger-changed` with "a
@@ -514,6 +515,28 @@ different history from sequence N" instead of "an older copy".
 `<pass id>.pass-file` is described under "When the pass is edited", and
 `<pass id>.witness-damage` (which does decide a refusal: an adoption from a
 witness it names) under `adopt`.
+
+`<pass id>.recorded` is a copy of the witness, written (private, not
+synced) after each write of the witness. It differs from the witness only in
+its version key (`hallpass_recorded`), so that it is never read as one.
+While the witness file is missing and the copy reads as a copy for this pass
+id that records at least one line, the witness was lost from this state
+directory: it is not an arrival. `spend`, `repair`, `checkpoint` and
+`reconcile-references` refuse with `witness-unavailable`, naming both files;
+`status`, `permits` and `ledger` answer with `not-checked`. Nothing else in
+the state directory shows a spend from it: `<pass id>.pass-file` is also
+written by `permits` and `status`, and `<pass id>.lock` by a guarded spend
+refused for want of a witness, which records nothing. A missing, damaged or
+foreign copy is ignored, and a ledger without a witness is then an arrival,
+as before; a state directory last written by an earlier release has no copy
+until its next witness write. `adopt` reads the copy in place of the lost
+witness: a ledger that holds the copy's line is adopted as a ledger without
+a witness (`no-witness`, carrying nothing, keeping references conclusive);
+a ledger that does not is `ledger-changed`, and a missing one
+`ledger-missing`, each carrying what the copy records beyond the ledger,
+with the copy as the adoption's previous witness, so guarded spends are
+`reference-inconclusive` until the references are reconciled. Doctor names
+the adoption preview.
 
 The path in the witness is informational: identity is the hash chain. A
 pass moved with its ledger is accepted with a warning and the witness

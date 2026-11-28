@@ -283,7 +283,11 @@ impl StateDir {
         }
         let path = dir.join(format!("{pass_id}.witness"));
         match fs::symlink_metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return self
+                    .recorded(pass_id)
+                    .map_or(Ok(None), |copy| Err(self.lost(pass_id, &path, &copy)));
+            }
             Err(e) => {
                 return Err(self.unavailable(
                     pass_id,
@@ -329,6 +333,61 @@ impl StateDir {
             updated: record.updated,
             test_clock: record.test_clock == Some(true),
         }))
+    }
+
+    /// [`StateDir::read`], except that a lost witness (see
+    /// [`StateDir::recorded`]) reads as its copy, and the flag says so.
+    /// Only an adoption reads it so: the copy is what it carries from.
+    pub(crate) fn read_or_copy(&self, pass_id: &str) -> Result<(Option<Witnessed>, bool), Error> {
+        match self.read(pass_id) {
+            Err(e) if self.witness_lost(pass_id) => self
+                .recorded(pass_id)
+                .map(|copy| (Some(copy), true))
+                .ok_or(e),
+            other => other.map(|w| (w, false)),
+        }
+    }
+
+    /// [`StateDir::read_or_copy`] when `copy` is true, else
+    /// [`StateDir::read`].
+    pub(crate) fn read_with_copy(
+        &self,
+        pass_id: &str,
+        copy: bool,
+    ) -> Result<Option<Witnessed>, Error> {
+        if copy {
+            Ok(self.read_or_copy(pass_id)?.0)
+        } else {
+            self.read(pass_id)
+        }
+    }
+
+    /// True when the witness file for `pass_id` is missing but its copy
+    /// (`<pass id>.recorded`) shows that this state directory recorded one.
+    pub(crate) fn witness_lost(&self, pass_id: &str) -> bool {
+        self.existing_dir(pass_id).is_some_and(|dir| {
+            matches!(
+                fs::symlink_metadata(dir.join(format!("{pass_id}.witness"))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            )
+        }) && self.recorded(pass_id).is_some()
+    }
+
+    /// The refusal for a witness that is missing while its copy shows that
+    /// one was recorded here.
+    fn lost(&self, pass_id: &str, path: &Path, copy: &Witnessed) -> Error {
+        let note = path.with_extension("recorded");
+        self.unavailable(
+            pass_id,
+            format!(
+                "{} is missing, but {} shows that this state directory recorded a witness for this pass (its last logical ledger sequence was {} (spent: {}) on {}), so the witness was lost, not a pass arriving from another machine, user or state directory. Without the witness, an older copy of the ledger would count less than was spent. Put the witness back from a backup of the state directory; if it is really lost, run `hallpass adopt` with `--preview` first: the adoption checks the ledger against that record and carries what the record has beyond the ledger, so the count is not lowered",
+                quote_path(path),
+                quote_path(&note),
+                copy.seq,
+                totals_text(&copy.totals),
+                copy.updated,
+            ),
+        )
     }
 
     /// Where the witness for `pass_id` last saw its ledger (an absolute
@@ -440,24 +499,34 @@ impl StateDir {
                 pass_id,
                 format!("{} cannot be written ({e})", quote_path(&path)),
             )
-        })
+        })?;
+        if let Ok(record) = serde_json::from_str::<WitnessFile>(&witness.0) {
+            self.write_note(pass_id, "recorded", &RecordedNote::from(record));
+        }
+        Ok(())
     }
 }
 
 // Advisory notes beside the witness.
 //
-// Two small files in the state directory help hallpass choose its words.
-// They never decide a count or a refusal, so a missing or damaged note only
-// costs a clearer message: hallpass then says what it said before. They are
-// separate from the witness so that the witness format (and the hallpass
-// releases that read it) is unchanged.
+// Small files in the state directory beside the witness. The first two
+// only help hallpass choose its words: they never decide a count or a
+// refusal, so a missing or damaged note only costs a clearer message. The
+// last one can only add a refusal; a missing or damaged copy gives the
+// behaviour of earlier releases. They are separate from the witness so that
+// the witness format (and the hallpass releases that read it) is unchanged.
 //
 // - `<pass id>.forks`: where an adoption started a new history (the adopted
 //   line, and the line before it), so that a ledger from before the adoption
 //   is named as a different history, not an older copy.
 // - `<pass id>.pass-file`: the identity and digest of the pass file at the
 //   last `spend`, `permits` or `status`, so that a pass rewritten in place is
-//   noticed.
+//   noticed. `permits` and `status` write it too, so it does not show that
+//   anything was spent here.
+// - `<pass id>.recorded`: a copy of the last witness written. It is the one
+//   note that decides a refusal: while it is there and the witness is not,
+//   the witness was lost here, so the ledger is not taken as one arriving
+//   from elsewhere (see `StateDir::recorded`).
 
 /// The largest note hallpass reads.
 const MAX_NOTE_BYTES: u64 = 64 * 1024;
@@ -497,6 +566,36 @@ struct PassFileNote {
     ino: u64,
     born_ns: Option<u64>,
     digest: String,
+}
+
+/// A copy of the last witness written, kept beside it as a note.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedNote {
+    hallpass_recorded: u32,
+    pass_id: String,
+    ledger: String,
+    seq: u64,
+    tail: String,
+    totals: BTreeMap<String, u64>,
+    updated: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test_clock: Option<bool>,
+}
+
+impl From<WitnessFile> for RecordedNote {
+    fn from(w: WitnessFile) -> Self {
+        Self {
+            hallpass_recorded: 1,
+            pass_id: w.pass_id,
+            ledger: w.ledger,
+            seq: w.seq,
+            tail: w.tail,
+            totals: w.totals,
+            updated: w.updated,
+            test_clock: w.test_clock,
+        }
+    }
 }
 
 /// What a command saw when it proved the witness damaged against a present
@@ -642,6 +741,37 @@ impl StateDir {
         if written.is_err() {
             let _ = fs::remove_file(&temp);
         }
+    }
+
+    /// The copy of the last witness written for `pass_id`
+    /// (`<pass id>.recorded`), when it is readable and records at least one
+    /// line. Every write of the witness also writes this copy, best effort,
+    /// so it shows that this state directory recorded a witness for the
+    /// pass. While the witness is missing and the copy is not, the witness
+    /// was lost here (a cleaned or partly restored state directory), and
+    /// [`StateDir::read`] refuses as for a witness it cannot read, instead
+    /// of taking the ledger as one arriving from elsewhere. Nothing else in
+    /// the state directory shows that: `<pass id>.pass-file` is written by
+    /// `permits` and `status` too, and `<pass id>.lock` by a guarded spend
+    /// that records nothing.
+    pub(crate) fn recorded(&self, pass_id: &str) -> Option<Witnessed> {
+        let note = self.read_note::<RecordedNote>(pass_id, "recorded")?;
+        if note.hallpass_recorded != 1
+            || note.pass_id != pass_id
+            || note.seq == 0
+            || !valid_totals(&note.totals)
+            || note.test_clock == Some(false)
+        {
+            return None;
+        }
+        Some(Witnessed {
+            ledger: note.ledger,
+            seq: note.seq,
+            tail: note.tail.parse().ok()?,
+            totals: note.totals,
+            updated: note.updated,
+            test_clock: note.test_clock == Some(true),
+        })
     }
 
     /// The adoptions that started a new history for `pass_id`, oldest

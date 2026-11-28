@@ -2452,7 +2452,8 @@ fn lock_for_writing_inner(
     let id = earlier.pass.id.clone();
     let wait = LockBudget::requested(lock_timeout, on_wait);
     let witness_lock = state.lock(&id, wait)?;
-    let witness = state.read(&id)?;
+    // An adoption acts on a lost witness's copy; everything else refuses.
+    let witness = state.read_with_copy(&id, adopting.is_some())?;
     if let Some(flags) = adopting {
         // Before anything is created: a refused adoption leaves no ledger.
         let raised = noted_totals(state, &id, witness.as_ref(), flags.carry_noted, pass_path)?;
@@ -3677,7 +3678,7 @@ fn preview_adopt_flags(
     } else {
         None
     };
-    let witness = state.read(id)?;
+    let (witness, lost) = state.read_or_copy(id)?;
     let parsed = file
         .as_ref()
         .map(|f| {
@@ -3711,6 +3712,8 @@ fn preview_adopt_flags(
         }
         Ok((WitnessStatus::Missing, _)) => AdoptCase::NoWitness,
         Ok(_) if flags.checkpoint.is_some() => AdoptCase::CheckpointBehind,
+        // The witness was lost, and the ledger holds what its copy recorded.
+        Ok(_) if lost => AdoptCase::NoWitness,
         Ok(_) => return Err(nothing_to_adopt(&path, pass_path)),
         Err(e) => return Err(e),
     };
@@ -3718,6 +3721,14 @@ fn preview_adopt_flags(
         given.still_behind(parsed, pass_path)?;
     }
     check_preview_write_access(pass_path, &path, parsed.is_some(), state, id)?;
+    // The token covers a lost witness's copy; the adoption acts on it only
+    // when the ledger does not hold its line.
+    let copy = witness.clone();
+    let witness = if case == AdoptCase::NoWitness {
+        None
+    } else {
+        witness
+    };
     let present = parsed
         .as_ref()
         .map_or_else(BTreeMap::new, |p| p.tally.spent.clone());
@@ -3744,7 +3755,7 @@ fn preview_adopt_flags(
         &loaded,
         &path,
         parsed.as_ref(),
-        witness.as_ref(),
+        copy.as_ref(),
         flags.checkpoint(),
     );
     let last_seen_unchecked = match (&case, &witness) {
@@ -3828,6 +3839,7 @@ fn locked_adopt_case(
         }
         Ok((WitnessStatus::Missing, _)) => Ok(AdoptCase::NoWitness),
         Ok(_) if checkpoint => Ok(AdoptCase::CheckpointBehind),
+        Ok(_) if state.witness_lost(id) => Ok(AdoptCase::NoWitness),
         Ok(_) => Err(nothing_to_adopt(&locked.path, pass_path)),
         Err(e) => Err(e),
     }
@@ -4018,6 +4030,11 @@ fn adopt_flags(
     let id = locked.loaded.pass.id.clone();
     let here = ledger_identity(&locked.path);
     let case = locked_adopt_case(pass_path, &locked, state, &id, flags.checkpoint.is_some())?;
+    if case == AdoptCase::NoWitness {
+        // A lost witness's copy whose line the ledger holds: adopted as a
+        // ledger without a witness (the token above covered the copy).
+        locked.witness = None;
+    }
     if let Some(given) = &flags.checkpoint {
         given.still_behind(&locked.parsed, pass_path)?;
     }

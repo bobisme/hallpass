@@ -213,6 +213,7 @@ fn without_witness() -> Case {
     let case = Case::new();
     assert_eq!(case.spend(&[]).0, 0);
     fs::remove_file(case.witness()).expect("remove witness");
+    fs::remove_file(case.witness().with_extension("recorded")).expect("and its copy");
     case
 }
 

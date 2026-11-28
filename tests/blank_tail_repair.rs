@@ -245,6 +245,8 @@ fn anything_but_a_blank_tail_after_the_witnessed_line_is_refused() {
     case.spend(2);
     case.append(b"\n");
     fs::remove_file(case.path("home/state/hallpass/blank-tail-2026-11.witness")).expect("rm");
+    // And its copy: a state directory that never recorded one.
+    fs::remove_file(case.path("home/state/hallpass/blank-tail-2026-11.recorded")).expect("rm");
     let (rc, v) = case.json(&["repair", "p.toml", "--drop-blank-tail", "--preview"]);
     assert_eq!(rc, 1, "{v}");
     assert!(message(&v).contains("no witness"), "{v}");

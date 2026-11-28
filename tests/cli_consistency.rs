@@ -108,6 +108,7 @@ fn absent_witness_is_reported() {
     let f = Fixture::new();
     f.spend("a");
     fs::remove_file(f.witness()).expect("remove witness");
+    fs::remove_file(f.witness().with_extension("recorded")).expect("and its copy");
     let (code, v) = f.checkpoint();
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["local_corroboration"], false);

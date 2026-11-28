@@ -196,6 +196,7 @@ fn unknown_references_remain_inconclusive_without_an_anchor_until_adopted() {
     let ledger = f.ledger();
     let witness = f.witness();
     fs::remove_file(&witness).expect("remove fixture witness");
+    fs::remove_file(witness.with_extension("recorded")).expect("and its copy");
     let before = fs::read(&ledger).expect("ledger");
     for flags in [&["--dry-run"][..], &[], &[]] {
         let value = reply(

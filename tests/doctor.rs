@@ -140,7 +140,11 @@ impl Case {
             && reply["message"]
                 .as_str()
                 .is_some_and(|m| m.starts_with("there is no witness"));
-        if reply["problem"] != "ledger-missing" && !no_witness {
+        let lost_witness = reply["problem"] == "witness-unavailable"
+            && reply["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("so the witness was lost,"));
+        if reply["problem"] != "ledger-missing" && !no_witness && !lost_witness {
             assert!(
                 !next.iter().any(|w| w == "adopt"),
                 "doctor named adopt for {}: {reply}",
@@ -573,6 +577,7 @@ fn assert_healthy(case: &Case, pass: &str) {
 fn a_ledger_without_a_witness_needs_the_adoption_a_guarded_spend_names() {
     let case = Case::spent(2);
     fs::remove_file(case.witness()).expect("lose witness");
+    fs::remove_file(case.witness().with_extension("recorded")).expect("and its copy");
     let (rc, reply) = case.doctor("c/p.toml");
     assert_eq!(rc, 2, "{reply}");
     assert_eq!(reply["result"], "needs-action", "{reply}");
@@ -626,10 +631,12 @@ fn moving_a_damaged_witness_aside_leads_to_the_adoption() {
     let words = next(&reply);
     assert_eq!(words[0], "mv", "{reply}");
     fs::rename(&words[1], &words[2]).expect("move aside");
+    // The copy of the witness shows that one was recorded here, so the
+    // witness is lost, not absent: a spend is refused until the adoption.
     let (rc, reply) = case.doctor("c/p.toml");
     assert_eq!(
-        (rc, &reply["result"]),
-        (2, &Value::from("needs-action")),
+        (rc, &reply["problem"]),
+        (2, &Value::from("witness-unavailable")),
         "{reply}"
     );
     assert_eq!(next(&reply)[..2], ["hallpass", "adopt"], "{reply}");

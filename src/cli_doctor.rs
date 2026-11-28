@@ -648,6 +648,13 @@ fn witness_issue(
             None,
             "Do not move the witness aside: the ledger is not beside the pass, and the witness is the record of its count. Put the ledger back beside the pass (restore it from a backup), then run doctor again.".to_owned(),
         ),
+        (Some(_), _) if reason.contains("so the witness was lost,") => (
+            adopt_preview(file, state),
+            format!(
+                "If a backup of the state directory holds the witness, put it back instead and run doctor again. Otherwise the preview compares the ledger with the copy of the witness, carries what the copy records beyond the ledger (so the count is not lowered), and prints its token; then run `hallpass adopt {} --reason \"...\" --token TOKEN`. A spend with --require-new-ref is then refused as reference-inconclusive until the references are reconciled. {again}",
+                shown(file)
+            ),
+        ),
         (_, Ok(dir)) if reason.contains("run `chmod 700") => (
             argv(["chmod", "700", &shown(dir)]),
             again,

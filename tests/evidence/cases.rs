@@ -377,6 +377,7 @@ fn audit_rejects_wrong_pass_id_and_reports_uncorroborated_history_independently(
     debit(file, REFERENCE);
     let w = witness(&case);
     fs::remove_file(&w).expect("unwitnessed history");
+    fs::remove_file(w.with_extension("recorded")).expect("and its copy");
     let audit = checked(&cmd, 2);
     clean(&audit);
     assert_eq!(audit["witness"], "missing");

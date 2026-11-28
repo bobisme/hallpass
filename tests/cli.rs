@@ -2266,6 +2266,7 @@ fn read_only_witness_policies_match_the_caller_contract() {
     let witness = case.state().join("example-2026-11.witness");
     let bytes = fs::read(&witness).expect("known witness");
     fs::remove_file(&witness).expect("remove witness from fixture");
+    fs::remove_file(witness.with_extension("recorded")).expect("and its copy");
     for query in [&permits[..], &status, &ledger, &preview] {
         let (rc, reply) = json(query, Some(NOW));
         assert_eq!(rc, 0, "{reply}");

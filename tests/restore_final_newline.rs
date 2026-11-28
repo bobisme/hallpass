@@ -244,6 +244,7 @@ fn no_witness_a_cut_line_and_a_damaged_chain_are_refused() {
     whole.pop();
     fs::write(case.ledger(), &whole).expect("write");
     fs::remove_file(case.witness()).expect("remove witness");
+    fs::remove_file(case.witness().with_extension("recorded")).expect("and its copy");
     let (rc, v) = case.preview();
     assert_eq!(rc, 1, "{v}");
     assert!(message(&v).contains("no witness"), "{v}");
