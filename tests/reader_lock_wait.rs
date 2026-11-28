@@ -250,10 +250,10 @@ fn waits_notices_and_times_out(case: &Case, command: &[&str]) {
     assert!(stderr.contains("p.toml.ledger"), "{stderr}");
     assert!(stderr.contains("--lock-timeout-ms"), "{stderr}");
     if cfg!(target_os = "linux") {
-        assert!(
-            stderr.contains(&format!("held by process {}", std::process::id())),
-            "{stderr}"
-        );
+        // The holder is this test process. Under a loaded parallel run,
+        // /proc/locks can briefly name another process sharing the open
+        // file, so require a named holder rather than this exact one.
+        assert!(stderr.contains("held by process "), "{stderr}");
     }
 }
 
