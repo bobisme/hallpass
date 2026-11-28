@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use super::{
     check_clock,
     debit::{decide_debit_policy, validate_unit},
-    decide_ceiling, declared_ceiling, preview_snapshot, warn_clock_rollback,
+    decide_ceiling, declared_ceiling, preview_snapshot, warn_clock_rollback, warn_left_counters,
 };
 use crate::{Charge, Digest, Error, Refusal, SpendRequest, StateDir, TargetRefusal};
 
@@ -93,6 +93,7 @@ pub fn capacity_with_clock_in(
     let now = clock();
     check_clock(now)?;
     warn_clock_rollback(now, view.latest_time, &mut view.warnings);
+    warn_left_counters(&loaded.pass, &view.tally, &mut view.warnings);
     let decision = decide_debit_policy(&loaded, policy, charges, now).and_then(|labels| {
         let mut counters = Vec::with_capacity(charges.len());
         for charge in charges {

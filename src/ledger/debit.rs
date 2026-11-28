@@ -375,6 +375,7 @@ use super::{
     lock_for_writing_notifying, prepare_witness,
     reference::{ReferenceEvidence, ReferenceMatches},
     rfc3339, validate_spend_policy, visit_preview_snapshot, warn_clock_rollback,
+    warn_left_counters,
 };
 use crate::request::TargetRefusal;
 use crate::witness::PreparedWitness;
@@ -739,6 +740,7 @@ fn spend_batch_using(
     let now = clock();
     check_clock(now)?;
     warn_clock_rollback(now, locked.parsed.latest, &mut warnings);
+    warn_left_counters(&locked.loaded.pass, &locked.parsed.tally, &mut warnings);
     let initial = locked.parsed.tally.spent(counter);
     let total = locked.loaded.pass.ceilings.get(counter).copied();
     let batch_units =
@@ -1038,6 +1040,7 @@ pub(super) fn decide_debit(
     reference: Option<(Refusal, ReferenceEvidence)>,
 ) -> SpendChargesOutcome {
     warn_clock_rollback(now, latest, &mut warnings);
+    warn_left_counters(&loaded.pass, tally, &mut warnings);
     let mut charges: Vec<_> = request
         .charges
         .iter()

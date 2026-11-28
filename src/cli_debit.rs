@@ -164,9 +164,36 @@ impl SpendReply<'_> {
     }
 }
 
+/// A whole-number flag value without a leading zero, which some tools read as
+/// octal. Other malformed text gets the type's own message.
+pub fn whole<T>(text: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    if has_leading_zero(text) {
+        return Err(format!(
+            "`{text}` has a leading zero, which some tools read as octal; write the number without leading zeros (for example {})",
+            if text.trim_start_matches('0').is_empty() {
+                "0"
+            } else {
+                text.trim_start_matches('0')
+            }
+        ));
+    }
+    text.parse::<T>().map_err(|e| e.to_string())
+}
+
+fn has_leading_zero(text: &str) -> bool {
+    text.len() > 1 && text.starts_with('0') && text.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Parse `--n`. Negative numbers reach this parser, so they get a clear error
 /// instead of clap's advice to pass them after `--`, which does not work.
 fn parse_amount(text: &str) -> Result<u64, String> {
+    if has_leading_zero(text) {
+        return whole::<u64>(text);
+    }
     if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
         text.parse::<u64>().map_err(|_| {
             format!(
@@ -207,7 +234,7 @@ pub struct DebitUnit {
     #[arg(long, value_name = "DIGEST")]
     digest: Option<String>,
     /// Refuse unless the window stays open this many seconds more.
-    #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+    #[arg(long, value_name = "SECONDS", default_value_t = 0, value_parser = whole::<u32>)]
     duration: u32,
 }
 
@@ -256,6 +283,14 @@ impl DebitUnit {
                         safe(charge)
                     ))
                 })?;
+                if has_leading_zero(n) {
+                    return Err(Error::Usage(format!(
+                        "--charge {} has an amount with a leading zero, which some tools read as octal: write the amount without leading zeros, for example {}={}",
+                        safe(charge),
+                        safe(counter),
+                        n.trim_start_matches('0')
+                    )));
+                }
                 if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(Error::Usage(format!(
                         "--charge {} has an amount that is not a whole number: an amount is digits only, from 1 to {}. Write for example {}=100",

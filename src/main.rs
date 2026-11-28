@@ -118,7 +118,7 @@ enum Command {
         #[arg(long, value_name = "HOSTNAME")]
         name: Option<String>,
         /// Refuse unless the window stays open this many seconds more.
-        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        #[arg(long, value_name = "SECONDS", default_value_t = 0, value_parser = cli_debit::whole::<u32>)]
         duration: u32,
         #[command(flatten)]
         lock: LockArgs,
@@ -135,7 +135,7 @@ enum Command {
         #[command(flatten)]
         unit: cli_debit::DebitUnit,
         /// Maximum milliseconds to wait in total for both writer locks (with --dry-run, for the ledger lock) while another process holds them. Zero tries each lock once; without it, the spend waits as long as it takes.
-        #[arg(long, value_name = "MILLISECONDS")]
+        #[arg(long, value_name = "MILLISECONDS", value_parser = cli_debit::whole::<u64>)]
         lock_timeout_ms: Option<u64>,
         /// Retain this caller/run reference with the debit.
         #[arg(long, value_name = "TEXT")]
@@ -166,10 +166,10 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         counter: Option<String>,
         /// Show only the last N entries (after --counter and --since). The whole chain is still verified.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = cli_debit::whole::<usize>)]
         tail: Option<usize>,
         /// Show only entries with sequence number >= SEQ (before --tail). The whole chain is still verified.
-        #[arg(long, value_name = "SEQ")]
+        #[arg(long, value_name = "SEQ", value_parser = cli_debit::whole::<u64>)]
         since: Option<u64>,
         #[command(flatten)]
         lock: LockArgs,
@@ -291,7 +291,7 @@ enum Command {
         /// The pass file.
         file: PathBuf,
         /// The sequence number of the latest adoption that may have lost lines (`unreconciled_adoption` in `hallpass ledger`).
-        #[arg(long, value_name = "SEQ")]
+        #[arg(long, value_name = "SEQ", value_parser = cli_debit::whole::<u64>)]
         adoption: u64,
         /// JSON file with `version` 1, the `pass_id` and the `references`: every caller reference that may be in the lost lines.
         #[arg(long, value_name = "LIST")]
@@ -383,7 +383,7 @@ struct DiffArgs {
     #[arg(long, value_name = "TIMESTAMP")]
     at: Option<String>,
     /// With --budget-impact, maximum milliseconds to wait for the ledger lock while another process holds it. Zero tries once; without it, diff waits as long as it takes.
-    #[arg(long, value_name = "MILLISECONDS", requires = "budget_impact")]
+    #[arg(long, value_name = "MILLISECONDS", requires = "budget_impact", value_parser = cli_debit::whole::<u64>)]
     lock_timeout_ms: Option<u64>,
 }
 
@@ -391,7 +391,7 @@ struct DiffArgs {
 #[derive(clap::Args)]
 struct LockArgs {
     /// Maximum milliseconds to wait in total for the locks this command takes, while another process holds them. Zero tries each lock once; without it, the command waits as long as it takes.
-    #[arg(long, value_name = "MILLISECONDS")]
+    #[arg(long, value_name = "MILLISECONDS", value_parser = cli_debit::whole::<u64>)]
     lock_timeout_ms: Option<u64>,
 }
 
@@ -735,6 +735,9 @@ fn check(file: &Path, clock: &Clock) -> Output {
             let overlaps = hallpass::review::name_overlap_warnings(&loaded.pass);
             let mut warnings = hallpass::review::breadth_warnings(&breadth);
             warnings.extend(overlaps.iter().map(|w| w.message.clone()));
+            warnings.extend(hallpass::review::duplicate_destination_warnings(
+                &loaded.pass,
+            ));
             let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
             warnings.extend(window.iter().map(|w| w.message.clone()));
             warnings.extend(approval_text_warnings(&loaded.pass));
@@ -836,6 +839,9 @@ fn review_lint(file: &Path, clock: &Clock) -> Output {
         .collect();
     let window = hallpass::review::window_warnings(&loaded.pass, Some(clock.now));
     let mut warnings = stale;
+    warnings.extend(hallpass::review::duplicate_destination_warnings(
+        &loaded.pass,
+    ));
     warnings.extend(window.iter().map(|w| w.message.clone()));
     warnings.extend(approval_text_warnings(&loaded.pass));
     let mut text = format!(

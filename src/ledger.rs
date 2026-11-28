@@ -2340,6 +2340,60 @@ fn warn_clock_rollback(
     warnings.extend(clock_rollback_warning(now, latest));
 }
 
+/// The most counters a left-the-pass warning names before it counts the rest.
+const LEFT_COUNTERS_LISTED: usize = 4;
+
+/// A warning when the ledger holds spend on a counter that the pass no longer
+/// has, as after a rename. That spend does not count against any ceiling in
+/// the pass, so a new counter starts from nothing. The warning names each such
+/// counter and its spend, and each counter of the pass with no spend. Advice
+/// only: an owner may drop a counter.
+fn warn_left_counters(pass: &crate::Pass, tally: &Tally, warnings: &mut Vec<String>) {
+    let left: Vec<(&String, u64)> = tally
+        .spent
+        .iter()
+        .filter(|(name, spent)| **spent > 0 && !pass.ceilings.contains_key(*name))
+        .map(|(name, spent)| (name, *spent))
+        .collect();
+    if left.is_empty() {
+        return;
+    }
+    let list = |items: Vec<String>| {
+        let more = items.len().saturating_sub(LEFT_COUNTERS_LISTED);
+        let mut text = items
+            .into_iter()
+            .take(LEFT_COUNTERS_LISTED)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if more > 0 {
+            let _ = write!(text, " and {more} more");
+        }
+        text
+    };
+    let gone = list(
+        left.iter()
+            .map(|(name, spent)| format!("{} ({spent} spent)", display_quoted(name)))
+            .collect(),
+    );
+    let fresh: Vec<String> = pass
+        .ceilings
+        .keys()
+        .filter(|name| tally.spent(name) == 0)
+        .map(|name| display_quoted(name))
+        .collect();
+    let new_note = if fresh.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; the pass has counters with nothing spent: {}. If this is a rename, the old spend does not count against the new ceiling",
+            list(fresh)
+        )
+    };
+    warnings.push(format!(
+        "the ledger has spend on counters that the pass no longer has: {gone}{new_note}. Ask the owner whether the counter was dropped on purpose, and restore its name if not"
+    ));
+}
+
 fn evaluate_spend(
     loaded: &LoadedPass,
     request: &SpendRequest<'_>,
@@ -2349,6 +2403,7 @@ fn evaluate_spend(
     latest: Option<(OffsetDateTime, u64)>,
 ) -> SpendOutcome {
     warn_clock_rollback(now, latest, &mut warnings);
+    warn_left_counters(&loaded.pass, tally, &mut warnings);
     let total = loaded.pass.ceilings.get(request.counter).copied();
     let spent = tally.spent(request.counter);
     let mut outcome = SpendOutcome {

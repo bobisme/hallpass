@@ -44,8 +44,8 @@ pub struct Loosening {
 /// A ceiling change loosens when the limit is raised, or when a new counter
 /// becomes spendable without NEW requiring every debit to charge it. A counter
 /// with no ceiling cannot be spent at all (`unknown-counter`), so removing a
-/// ceiling narrows. Any other field here is the approver or operator:
-/// authority passes to someone else.
+/// ceiling narrows. Any other field here is the approver, operator or reference:
+/// authority passes to someone else, or rests on a different written approval.
 fn ceiling_loosens(a: &Pass, b: &Pass, field: &str) -> bool {
     let Some(name) = field.strip_prefix("ceilings.") else {
         return true;
@@ -62,7 +62,7 @@ fn ceiling_loosens(a: &Pass, b: &Pass, field: &str) -> bool {
 /// Each is a change diff marks `[review required]`, other than the destination
 /// rules (which the endpoint proof judges): a longer
 /// window, a higher or new ceiling, a dropped requirement, an un-revoke, or a
-/// different approver or operator. A change that only narrows is not listed.
+/// different approver, operator or approval reference. A change that only narrows is not listed.
 #[must_use]
 pub fn non_endpoint_loosenings(old: &LoadedPass, new: &LoadedPass) -> Vec<Loosening> {
     let (a, b) = (&old.pass, &new.pass);
@@ -228,7 +228,7 @@ pub fn diff(old: &LoadedPass, new: &LoadedPass) -> DiffReport {
         "approval.reference",
         &a.approval.reference,
         &b.approval.reference,
-        false,
+        true,
     );
     change(
         &mut changes,
@@ -847,6 +847,31 @@ pub fn breadth_warnings(b: &Breadth) -> Vec<String> {
     }
     if b.ipv6.parse::<u128>().map_or(true, |n| n > (1u128 << 64)) {
         out.push("declared IPv6 breadth exceeds the one /64 consumer comparison point".to_owned());
+    }
+    out
+}
+
+/// A warning for each destination that repeats an earlier one.
+///
+/// A repeat has the same network, protocol, ports and names, under another
+/// label. It grants nothing more, so it is more often a copy that was never
+/// edited than a plan. Advice only: the pass stays valid.
+#[must_use]
+pub fn duplicate_destination_warnings(pass: &Pass) -> Vec<String> {
+    let same = |a: &crate::Destination, b: &crate::Destination| {
+        a.network == b.network
+            && a.protocol == b.protocol
+            && a.ports.normalized_ranges() == b.ports.normalized_ranges()
+            && a.names == b.names
+    };
+    let mut out = Vec::new();
+    for (i, later) in pass.destinations.iter().enumerate() {
+        if let Some(first) = pass.destinations[..i].iter().find(|d| same(d, later)) {
+            out.push(format!(
+                "destination `{}` repeats destination `{}`: the same network, protocol, ports and names; remove one, or change what it grants",
+                later.label, first.label
+            ));
+        }
     }
     out
 }

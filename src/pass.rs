@@ -17,6 +17,7 @@ use crate::name::{HostName, MAX_NAMES};
 use crate::ports::PortSet;
 
 mod marks;
+mod oversized;
 
 /// The one pass format version this library reads.
 pub const FORMAT_VERSION: i64 = 1;
@@ -389,6 +390,13 @@ impl Pass {
             Ok(table) => table,
             Err(e) => {
                 let e: toml::de::Error = e;
+                if let Some(problem) = e
+                    .span()
+                    .and_then(|span| oversized::problem(text, span.start, e.message()))
+                {
+                    problems.push(problem);
+                    return Err(problems);
+                }
                 let at = e
                     .span()
                     .and_then(|span| text.get(..span.start))
