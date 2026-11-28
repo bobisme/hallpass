@@ -412,6 +412,9 @@ pub struct LoadedPass {
     /// Which file was read, to tell a pass rewritten in place from one
     /// replaced by a rename.
     pub(crate) file: FileId,
+    /// What `fstat` said when the bytes were read, to let a later read of
+    /// the same unchanged file skip the settle wait (see [`load_after`]).
+    pub(crate) mark: Stamp,
 }
 
 /// The identity of an open file: its device, inode and, where the file
@@ -677,10 +680,15 @@ const PASS_SETTLE: Duration = Duration::from_millis(20);
 /// write may have been up to this much later than the time it shows.
 const COARSE_TIMESTAMP: Duration = Duration::from_secs(2);
 
+/// How far ahead of the clock a modification time may be before hallpass
+/// warns about it (a coarse timestamp can run ahead by this much, and
+/// clocks differ a little).
+const FUTURE_TOLERANCE: Duration = Duration::from_secs(2);
+
 /// What `fstat` says about a pass file: any write changes the size or the
 /// modification time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Stamp {
+pub struct Stamp {
     size: u64,
     modified: (i64, i64),
 }
@@ -692,6 +700,16 @@ impl Stamp {
             size: meta.size(),
             modified: (meta.mtime(), meta.mtime_nsec()),
         })
+    }
+
+    /// Whether the modification time is later than `now`.
+    fn in_future(&self, now: std::time::SystemTime) -> bool {
+        let (seconds, nanos) = self.modified;
+        let last = i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+        let now = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos().cast_signed());
+        last > now
     }
 
     /// How much longer to wait, at `now`, before the file has gone
@@ -758,15 +776,43 @@ const NO_FINAL_NEWLINE: &str = "the file does not end with a newline, so its las
 /// time. A read that does not hold still is refused, and so is a file whose
 /// last line has no newline. Both reads use the open file, so a pass
 /// replaced by `mv` meanwhile is read as it was when it was opened.
+#[cfg(test)]
 fn settled_bytes(
     file: &File,
     path: &Path,
     now: impl FnOnce() -> std::time::SystemTime,
     pause: impl FnOnce(Duration),
 ) -> Result<Vec<u8>, Error> {
+    settled_read(file, path, now, pause, None).map(|(bytes, _)| bytes)
+}
+
+/// [`settled_bytes`], and the `fstat` the bytes were settled against.
+///
+/// `prior` is an earlier read of the same file that was settled: its stamp
+/// and digest. A modification time in the future gives no moment to settle
+/// from, so every read of such a file waits [`PASS_SETTLE`]. When this read
+/// finds the same file with the same stamp and the same bytes as `prior`,
+/// and that stamp is in the future, nothing has been written since `prior`
+/// was settled (a write sets the modification time to now, which differs),
+/// and the wait is skipped. Any difference falls back to the full wait.
+fn settled_read(
+    file: &File,
+    path: &Path,
+    now: impl FnOnce() -> std::time::SystemTime,
+    pause: impl FnOnce(Duration),
+    prior: Option<(Stamp, &Digest)>,
+) -> Result<(Vec<u8>, Stamp), Error> {
     let bytes = read_from_start(file, path)?;
     let first = Stamp::of(file, path)?;
-    let wait = first.unsettled_for(now());
+    let now = now();
+    let held = prior.is_some_and(|(stamp, digest)| {
+        stamp == first && first.in_future(now) && *digest == Digest::of(&bytes)
+    });
+    let wait = if held {
+        Duration::ZERO
+    } else {
+        first.unsettled_for(now)
+    };
     if !wait.is_zero() || first.size != bytes.len() as u64 {
         pause(wait);
         let again = read_from_start(file, path)?;
@@ -777,7 +823,27 @@ fn settled_bytes(
     if bytes.last().is_some_and(|&last| last != b'\n') {
         return Err(file_problem(path, NO_FINAL_NEWLINE));
     }
-    Ok(bytes)
+    Ok((bytes, first))
+}
+
+/// The warning for a pass whose modification time is in the future, or
+/// `None`. Every read of such a file waits the whole settle period, because
+/// there is no moment to count it from.
+#[must_use]
+pub fn future_mtime_warning(pass: &Path) -> Option<String> {
+    let modified = fs::metadata(pass).ok()?.modified().ok()?;
+    let ahead = modified.duration_since(std::time::SystemTime::now()).ok()?;
+    if ahead <= FUTURE_TOLERANCE {
+        return None;
+    }
+    let shown = time::OffsetDateTime::from(modified)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "an unreadable time".to_owned());
+    Some(format!(
+        "the pass file {} has a modification time of {shown}, which is in the future, so every call waits {} ms for it to settle. Fix the clock that is wrong, or run `touch` on the file.",
+        crate::witness::quote_path(pass),
+        PASS_SETTLE.as_millis()
+    ))
 }
 
 /// Read a pass file: not a link, a regular file, not writable by others,
@@ -785,11 +851,14 @@ fn settled_bytes(
 /// with a newline. This is the only read of a pass file: the bytes it
 /// returns are both the ones parsed and the ones digested.
 pub fn read_pass_bytes(path: &Path) -> Result<Vec<u8>, Error> {
-    read_pass_file(path).map(|(bytes, _)| bytes)
+    read_pass_file(path, None).map(|(bytes, _, _)| bytes)
 }
 
 /// [`read_pass_bytes`], and the identity of the file the bytes came from.
-fn read_pass_file(path: &Path) -> Result<(Vec<u8>, FileId), Error> {
+fn read_pass_file(
+    path: &Path,
+    prior: Option<&LoadedPass>,
+) -> Result<(Vec<u8>, FileId, Stamp), Error> {
     let file = open_no_follow(path, OpenOptions::new().read(true))?;
     let meta = file.metadata().map_err(|e| Error::io(path, &e))?;
     check_pass_owner_mode(
@@ -798,8 +867,16 @@ fn read_pass_file(path: &Path) -> Result<(Vec<u8>, FileId), Error> {
         rustix::process::geteuid().as_raw(),
         meta.mode(),
     )?;
-    let bytes = settled_bytes(&file, path, std::time::SystemTime::now, std::thread::sleep)?;
-    Ok((bytes, FileId::of(&meta)))
+    let id = FileId::of(&meta);
+    let prior = prior.filter(|p| p.file == id).map(|p| (p.mark, &p.digest));
+    let (bytes, stamp) = settled_read(
+        &file,
+        path,
+        std::time::SystemTime::now,
+        std::thread::sleep,
+        prior,
+    )?;
+    Ok((bytes, id, stamp))
 }
 
 /// Read, validate and digest the pass at `path`.
@@ -825,7 +902,20 @@ pub fn load(path: &Path) -> Result<LoadedPass, Error> {
 /// # Errors
 /// Returns the same validation and file errors as [`load`].
 pub fn load_with_bytes(path: &Path) -> Result<(LoadedPass, Vec<u8>), Error> {
-    let (bytes, file) = read_pass_file(path)?;
+    load_inner(path, None)
+}
+
+/// Read the pass again, under a lock, after `earlier` was read and settled
+/// outside it. The result is a full read and is validated again; the only
+/// difference from [`load`] is that a file whose modification time is in
+/// the future and which is unchanged since `earlier` is not waited for a
+/// second time (see `settled_read`).
+pub fn load_after(path: &Path, earlier: &LoadedPass) -> Result<LoadedPass, Error> {
+    load_inner(path, Some(earlier)).map(|(loaded, _)| loaded)
+}
+
+fn load_inner(path: &Path, prior: Option<&LoadedPass>) -> Result<(LoadedPass, Vec<u8>), Error> {
+    let (bytes, file, mark) = read_pass_file(path, prior)?;
     let digest = Digest::of(&bytes);
     let text = std::str::from_utf8(&bytes).map_err(|_| Error::Invalid {
         path: path.to_path_buf(),
@@ -844,6 +934,7 @@ pub fn load_with_bytes(path: &Path) -> Result<(LoadedPass, Vec<u8>), Error> {
             digest,
             path: path.to_path_buf(),
             file,
+            mark,
         },
         bytes,
     ))
@@ -1122,5 +1213,120 @@ mod settle {
                 .expect("ends with a newline or is empty");
             assert_eq!(bytes, text.as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod future_settle {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn future_file() -> (tempfile::TempDir, PathBuf, File) {
+        let dir = tempfile::tempdir().expect("directory");
+        let path = dir.path().join("pass.toml");
+        fs::write(&path, "a = 1\n").expect("write");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open");
+        file.set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .expect("date ahead");
+        (dir, path, file)
+    }
+
+    #[test]
+    fn a_file_unchanged_since_a_settled_read_in_the_future_is_not_waited_for_again() {
+        let (_dir, path, file) = future_file();
+        let mut waits = Vec::new();
+        let (bytes, stamp) = settled_read(&file, &path, SystemTime::now, |w| waits.push(w), None)
+            .expect("first read");
+        assert_eq!(waits, [PASS_SETTLE], "the first read waits the period");
+        let digest = Digest::of(&bytes);
+        let (again, _) = settled_read(
+            &file,
+            &path,
+            SystemTime::now,
+            |_| panic!("no second wait"),
+            Some((stamp, &digest)),
+        )
+        .expect("second read");
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn a_changed_file_is_waited_for_again_even_when_dated_in_the_future() {
+        let (_dir, path, file) = future_file();
+        let (bytes, stamp) =
+            settled_read(&file, &path, SystemTime::now, |_| (), None).expect("first read");
+        let digest = Digest::of(&bytes);
+        // New bytes with the same size and the same time, as a writer that
+        // restores the time would leave them: the digest differs.
+        fs::write(&path, "a = 2\n").expect("rewrite");
+        file.set_modified(
+            SystemTime::UNIX_EPOCH + Duration::new(stamp.modified.0.cast_unsigned(), 0),
+        )
+        .expect("restore time");
+        let mut waited = false;
+        let result = settled_read(
+            &file,
+            &path,
+            SystemTime::now,
+            |_| waited = true,
+            Some((stamp, &digest)),
+        );
+        assert!(waited, "a changed file gets the full settle");
+        drop(result);
+        // A stamp that differs also gets the full settle.
+        let (bytes, stamp) =
+            settled_read(&file, &path, SystemTime::now, |_| (), None).expect("read");
+        let digest = Digest::of(&bytes);
+        file.set_modified(SystemTime::now() + Duration::from_secs(7200))
+            .expect("date moved");
+        let mut waited = false;
+        let _ = settled_read(
+            &file,
+            &path,
+            SystemTime::now,
+            |_| waited = true,
+            Some((stamp, &digest)),
+        );
+        assert!(waited);
+    }
+
+    #[test]
+    fn a_file_dated_in_the_past_is_never_held() {
+        let (_dir, path, file) = future_file();
+        file.set_modified(SystemTime::now() - Duration::from_secs(5))
+            .expect("date back");
+        let mut waits = 0;
+        let (bytes, stamp) =
+            settled_read(&file, &path, SystemTime::now, |_| waits += 1, None).expect("read");
+        assert_eq!(waits, 0, "an old file needs no wait");
+        // Held only for a time in the future: an old file is read twice
+        // when it differs, and this one differs from nothing, so no wait.
+        let digest = Digest::of(&bytes);
+        let mut waited = false;
+        settled_read(
+            &file,
+            &path,
+            || SystemTime::now() + Duration::from_secs(10_000),
+            |_| waited = true,
+            Some((stamp, &digest)),
+        )
+        .expect("read again");
+        assert!(!waited, "a settled old file is still not waited for");
+    }
+
+    #[test]
+    fn the_warning_names_the_time_and_the_remedy() {
+        let (_dir, path, _file) = future_file();
+        let text = future_mtime_warning(&path).expect("warns");
+        assert!(text.contains("modification time of"), "{text}");
+        assert!(text.contains("which is in the future"), "{text}");
+        assert!(text.contains("`touch`"), "{text}");
+        let (_dir, path, file) = future_file();
+        file.set_modified(SystemTime::now()).expect("now");
+        assert_eq!(future_mtime_warning(&path), None);
     }
 }

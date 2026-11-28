@@ -1626,6 +1626,7 @@ fn visit_view(
     };
     let mut warnings = warnings(&witness, moved.as_ref(), id, false);
     warnings.extend(crate::files::shared_directory_warning(&loaded.path));
+    warnings.extend(crate::files::future_mtime_warning(&loaded.path));
     let exists = parsed.is_some();
     let parsed = parsed.unwrap_or_else(|| Parsed {
         pass_id: id.clone(),
@@ -2110,7 +2111,8 @@ fn lock_for_writing_inner(
     if let Some(token) = guard {
         check_token_shape(token, pass_path)?;
     }
-    let id = load(pass_path)?.pass.id;
+    let earlier = load(pass_path)?;
+    let id = earlier.pass.id.clone();
     let wait = LockBudget::requested(lock_timeout, on_wait);
     let witness_lock = state.lock(&id, wait)?;
     let witness = state.read(&id)?;
@@ -2171,7 +2173,7 @@ fn lock_for_writing_inner(
     // is the pass as it is now, not as it was a moment ago.
     let loaded = match guarded_missing_pass {
         Some(snapshot) => snapshot,
-        None => load(pass_path)?,
+        None => crate::files::load_after(pass_path, &earlier)?,
     };
     if loaded.pass.id != id {
         return Err(Error::Usage(format!(
@@ -2712,6 +2714,7 @@ fn prepare_witness(
         warnings.clear();
     }
     warnings.extend(crate::files::shared_directory_warning(pass_path));
+    warnings.extend(crate::files::future_mtime_warning(pass_path));
     warnings.extend(state.observe_pass_file(&locked.loaded));
     if !preserve_unanchored && (status != WitnessStatus::Matches || moved.is_some()) {
         state.write(

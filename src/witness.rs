@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 
 /// A path as one quoted value in a message, escaped once.
-fn quote_path(path: impl AsRef<Path>) -> String {
+pub fn quote_path(path: impl AsRef<Path>) -> String {
     crate::display_quoted(&path.as_ref().display().to_string())
 }
 use crate::files::{Digest, open_no_follow};

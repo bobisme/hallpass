@@ -1267,6 +1267,7 @@ fn status_with_clock(
         Err(e) => return error_output("status", Some(file), &e),
     };
     view.warnings.extend(state_dir.observe_pass_file(&loaded));
+    view.warnings.extend(hallpass::future_mtime_warning(file));
     let now = sample();
     view.warnings.extend(view.clock_warning(now));
     let tally = &view.tally;
