@@ -1261,20 +1261,23 @@ doctor's own error, exit 1) and compares it with the ledger, read only:
   `checkpoint-holds`;
 - an adoption in the ledger acted on this checkpoint: finding
   `checkpoint-adopted`;
-- the ledger ends before the line (`shorter`): **blocked**
-  `checkpoint-behind`, naming `adopt FILE --checkpoint CHECKPOINT
-  --preview`; with a checkpoint without `totals` it names no command;
-- the ledger holds another line at that sequence (`mismatch`), or is
-  shorter but the lines the checkpoint proves are its own count more of
-  some counter than the checkpoint records (counts only grow, so its totals
-  do not belong to its line hashes): **blocked** `checkpoint-fork`, with no
-  command: hallpass does not merge two histories;
+- the ledger ends before the line (`shorter`), or reaches its sequence
+  with another line there (`mismatch`): **blocked** `checkpoint-behind`,
+  naming `adopt FILE --checkpoint CHECKPOINT --preview`; with a checkpoint
+  without `totals` it names no command;
+- either of those, but the lines the checkpoint proves are its own count
+  more of some counter than the checkpoint records (counts only grow, so
+  its totals do not belong to its line hashes): **blocked**
+  `checkpoint-fork`, with no command: hallpass does not merge two
+  histories;
 - the checkpoint is for another pass: **blocked** `checkpoint-foreign`.
 
 A shorter ledger is not always an older copy of the checkpointed history.
 After a whole-machine restore a worker may spend before anyone runs
 doctor, and then the ledger's last entries are new spends at the sequences
-the lost entries had. So hallpass places the ledger by the checkpoint:
+the lost entries had. When the worker spends more often than the restore
+lost entries, the ledger reaches the checkpoint's sequence with a new line
+there (`mismatch`). So hallpass places either ledger by the checkpoint:
 
 - **shared**: the ledger's lines through the last anchor whose hash the
   ledger has at that sequence, taken in order up to the first it does not
@@ -1283,13 +1286,18 @@ the lost entries had. So hallpass places the ledger by the checkpoint:
   and always for a checkpoint without `anchors`.
 - **new**: the ledger's line at the first anchor it does not have, and
   every later line, are not checkpointed ones; nor is a line whose time is
-  later than `latest`, or any line after it.
+  later than `latest`, or any line after it. For a ledger that reaches the
+  checkpoint's sequence, the checkpoint's own `hash` is one more anchor it
+  does not have.
 - the lines between are not placed: the checkpoint has no hash for them.
 
 The doctor finding and the preview say which lines are which. The headline
 says entries `ledger_seq + 1` to the checkpoint's sequence are missing only
 when every ledger line is shared; otherwise it says checkpointed entries
-after the last shared line are missing.
+after the last shared line are missing. When no anchor is shared, or the
+checkpoint has no `anchors`, no line is shared and every ledger line counts
+as new: the carry may be too high, never too low, so hallpass names the
+adoption and says so rather than leaving no step.
 
 Times never prove a line shared: a restored machine's clock may run behind
 the one that wrote the lost entries, so a spend since the restore can carry
@@ -1299,7 +1307,8 @@ A clock that ran ahead before the restore only makes `latest` later, so
 fewer lines are proved new; the carry does not depend on times.
 
 `adopt FILE --checkpoint CHECKPOINT` (with `--preview`, then `--reason` and
-`--token`) acts only on `checkpoint-behind` with `totals`. Every other
+`--token`) acts only on `checkpoint-behind` with `totals`, for a `shorter`
+or a `mismatch` ledger alike. Every other
 relation is a usage error that names the next step. The adoption carries,
 per counter, what the checkpoint's totals record beyond what the shared
 lines count, and so counts every other ledger line as new: the result is at
@@ -1314,10 +1323,13 @@ the witness also calls for an adoption (`ledger-missing`,
 two, so no count goes down. Its case is `checkpoint-behind` when the ledger
 and witness agree or there is neither. The line records the checkpoint
 (`checkpoint`, as exported but without `latest` and `anchors`), so it is
-not adopted twice. The token covers
+not adopted twice; its sequence may be below the adoption line's own.
+`verify-checkpoint` still says `mismatch` after the adoption: the lost
+lines are not back. The token covers
 the checkpoint. `--checkpoint` cannot be used with `--drop-rehearsal`.
 
-The checkpoint proves that the ledger once reached its sequence, and which
+The checkpoint proves that a ledger of the pass once reached its sequence
+with the line it commits to, and which
 ledger lines are its own as far as its anchors reach. It cannot show what
 the missing entries were, and nothing authenticates its totals beyond the
 operator who kept it. A higher count is the safe side for spending; a total

@@ -1275,7 +1275,9 @@ fn parse_adopt(parsed: &mut Parsed, line: AdoptLine) -> Result<Adoption, &'stati
     };
     if let Some(cp) = &line.checkpoint {
         let hash = checkpoint::check(cp).map_err(|_| bad)?;
-        if cp.pass_id != parsed.pass_id || cp.seq < line.seq {
+        // The checkpoint's sequence may be below the adoption's: a ledger
+        // that reached it with other lines is adopted too.
+        if cp.pass_id != parsed.pass_id {
             return Err(bad);
         }
         parsed.checkpoint_adoptions.push((line.seq, cp.seq, hash));

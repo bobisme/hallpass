@@ -450,7 +450,7 @@ fn a_ledger_that_holds_the_checkpointed_line_is_healthy_and_has_nothing_to_adopt
 }
 
 #[test]
-fn another_history_at_the_checkpointed_sequence_is_explained_not_merged() {
+fn another_history_at_the_checkpointed_sequence_is_placed_and_adopted() {
     let case = Case::restored();
     // Spends after the restore carry the ledger past the checkpoint's
     // sequence with lines of its own.
@@ -464,38 +464,32 @@ fn another_history_at_the_checkpointed_sequence_is_explained_not_merged() {
         "{verified}"
     );
 
+    // The checkpoint's line hashes place the ledger as they place a
+    // shorter one (bn-1e7w): doctor names the adoption.
     let (rc, doctor) = case.doctor();
     assert_eq!(rc, 2, "{doctor}");
-    assert_eq!(doctor["problem"], "checkpoint-fork", "{doctor}");
-    assert_eq!(doctor["next"], Value::Null, "{doctor}");
-    assert!(
-        doctor["next_step"]
-            .as_str()
-            .is_some_and(|s| s.contains("have the owner decide")),
-        "{doctor}"
-    );
+    assert_eq!(doctor["problem"], "checkpoint-behind", "{doctor}");
+    assert_eq!(doctor["next"][1], "adopt", "{doctor}");
 
-    let before = fs::read(case.path("c/p.toml.ledger")).expect("ledger");
+    // A checkpoint adoption is lossy, so it needs the reviewed token. The
+    // count ends at the checkpoint's 4 plus the 3 spends since the restore.
     let (rc, preview) = case.json(&["adopt", PASS_FILE, "--checkpoint", CHECKPOINT, "--preview"]);
-    assert_eq!(rc, 1, "{preview}");
-    assert!(
-        message(&preview).contains("different histories")
-            && message(&preview).contains("does not merge"),
-        "{preview}"
-    );
+    assert_eq!(rc, 0, "{preview}");
+    let token = preview["token"].as_str().expect("token").to_owned();
     let (rc, adopt) = case.json(&[
         "adopt",
         PASS_FILE,
         "--checkpoint",
         CHECKPOINT,
         "--reason",
-        "try anyway",
+        "restore; checkpoint from ticket",
+        "--token",
+        &token,
     ]);
-    assert_eq!(rc, 1, "{adopt}");
-    assert_eq!(
-        fs::read(case.path("c/p.toml.ledger")).expect("ledger"),
-        before
-    );
+    assert_eq!(rc, 0, "{adopt}");
+    assert_eq!(adopt["carried"]["calls"], 2, "{adopt}");
+    assert_eq!(adopt["totals"]["calls"], 7, "{adopt}");
+    assert_eq!(case.spent(), 7);
 }
 
 #[test]

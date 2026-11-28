@@ -24,6 +24,15 @@
 //! never prove a line shared, because a restored clock may run behind; a
 //! line later than the checkpoint's latest time only proves the ledger has
 //! entries the checkpoint does not show.
+//!
+//! The same placement holds for a ledger that reaches the checkpoint's
+//! sequence with another line there: after a restore, a worker that spent
+//! more than the entries lost carries the ledger to or past the
+//! checkpoint's sequence with lines of its own. The anchors prove the same
+//! shared lines as for a shorter ledger, and an adoption carries the same
+//! way. With no shared anchor, or a checkpoint without anchors, no line is
+//! shared and every ledger line counts as new: a count that may be too
+//! high, never too low.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -194,6 +203,14 @@ impl CheckpointGap {
         self.shared == self.ledger_seq
     }
 
+    /// Whether the ledger reaches the checkpoint's sequence, with another
+    /// line there than the one the checkpoint commits to
+    /// (`verify-checkpoint` says relation mismatch).
+    #[must_use]
+    pub const fn reaches(&self) -> bool {
+        self.ledger_seq >= self.checkpoint_seq
+    }
+
     /// One line for the doctor's headline: what is missing, as far as the
     /// checkpoint proves it.
     #[must_use]
@@ -203,6 +220,11 @@ impl CheckpointGap {
                 "the ledger is behind a retained checkpoint: entries {} to {} are missing",
                 self.ledger_seq + 1,
                 self.checkpoint_seq
+            )
+        } else if self.reaches() {
+            format!(
+                "the ledger has entries a retained checkpoint does not show: checkpointed entries after sequence {} are missing",
+                self.shared
             )
         } else if self.new_from.is_some() {
             format!(
@@ -242,7 +264,7 @@ impl CheckpointGap {
             format!("the ledger's {} checkpointed", span(1, k, "are", "is"))
         };
         let mut text = match (self.new_from, self.anchored) {
-            (Some(f), _) => {
+            (Some(f), anchored) => {
                 let (part, unknown) = if f > k + 1 {
                     (
                         format!("after a sequence from {k} to {}", f - 1),
@@ -251,11 +273,20 @@ impl CheckpointGap {
                             span(k + 1, f - 1, "may be", "may be")
                         ),
                     )
+                } else if k == 0 {
+                    ("from the first entry".to_owned(), String::new())
                 } else {
                     (format!("after sequence {k}"), String::new())
                 };
+                let shown = if anchored {
+                    format!(
+                        "The checkpoint's line hashes and latest time show that {shared}, but that"
+                    )
+                } else {
+                    "The checkpoint records no line hashes before its own (a hallpass before this one exported it), so no ledger entry is proved a checkpointed one. Its own line hash and latest time show that".to_owned()
+                };
                 format!(
-                    "The checkpoint's line hashes and latest time show that {shared}, but that the ledger's entry {f} is not a checkpointed one: the two histories part {part}, and the ledger's {} written since (for example by a spend after a whole-machine restore).{unknown} The checkpointed entries after the point where they part are missing.",
+                    "{shown} the ledger's entry {f} is not a checkpointed one: the two histories part {part}, and the ledger's {} written since (for example by a spend after a whole-machine restore).{unknown} The checkpointed entries after the point where they part are missing.",
                     span(f, m, "were", "was")
                 )
             }
@@ -313,7 +344,13 @@ pub enum CheckpointCover {
     /// says relation shorter).
     Behind(CheckpointGap),
     /// The ledger reaches the checkpointed sequence with another line there
-    /// (`verify-checkpoint` says relation mismatch): another history.
+    /// (`verify-checkpoint` says relation mismatch), placed by the
+    /// checkpoint's line hashes as a shorter ledger is: the lines it proves
+    /// its own, and the carry that counts every other line as new.
+    Parted(CheckpointGap),
+    /// Another history at the checkpointed sequence, with nothing placed.
+    /// [`compare_checkpoint`] no longer returns it: it returns
+    /// [`CheckpointCover::Parted`] instead.
     Forked {
         /// The ledger's last sequence.
         ledger_seq: u64,
@@ -370,7 +407,7 @@ pub fn compare_checkpoint(
             added: ledger_seq - checkpoint.seq,
         })
     } else {
-        Ok(CheckpointCover::Forked { ledger_seq })
+        gap(&path, parsed.as_ref(), &found, checkpoint).map(CheckpointCover::Parted)
     }
 }
 
@@ -384,9 +421,10 @@ fn adopted(parsed: Option<&Parsed>, checkpoint: &Checkpoint, hash: Digest) -> Op
         .map(|(at, _, _)| *at)
 }
 
-/// Place a ledger that ends before the checkpoint's line: the lines the
-/// checkpoint proves are its own, the first it proves is not, and the
-/// carry that counts every other line as new.
+/// Place a ledger that ends before the checkpoint's line, or holds another
+/// line at its sequence: the lines the checkpoint proves are its own, the
+/// first it proves is not, and the carry that counts every other line as
+/// new.
 fn gap(
     path: &Path,
     parsed: Option<&Parsed>,
@@ -413,6 +451,14 @@ fn gap(
             new_from = Some(*seq);
             break;
         }
+    }
+    // A ledger that reaches the checkpoint's sequence without its line
+    // there parts from it at or before that line: the checkpoint's own hash
+    // is one more anchor the ledger does not have.
+    if ledger_seq >= checkpoint.seq
+        && found.get(&checkpoint.seq).copied() != checkpoint.hash.parse::<Digest>().ok()
+    {
+        new_from = Some(new_from.map_or(checkpoint.seq, |f| f.min(checkpoint.seq)));
     }
     // A line later than every checkpointed line is not one of them, and
     // neither is any line after it.
@@ -505,21 +551,29 @@ impl Given {
         let ledger = quote_path(ledger_path(&loaded.path));
         let refuse = |why: String| Error::Usage(format!("--checkpoint: {why}"));
         match cover {
-            CheckpointCover::Behind(gap) if gap.recorded.is_none() => Err(refuse(format!(
-                "the checkpoint {} records no totals (a hallpass before this one exported it), so it shows that entries of pass `{id}` up to sequence {} are missing, but not what they counted; nothing was recorded. {}",
-                quote_path(&self.file),
-                gap.checkpoint_seq,
-                no_merge_step(&file, cp.seq)
-            ))),
-            CheckpointCover::Behind(gap) if !gap.above.is_empty() => Err(refuse(format!(
-                "the entries 1 to {} of {ledger} are checkpointed ones by the checkpoint's line hashes, but they count more than the checkpoint records for its sequence {} (spent in them: {}; in the checkpoint: {}). Counts only grow, so the checkpoint's totals do not belong to its line hashes, and hallpass does not carry from it. Nothing was recorded. {}",
-                gap.shared,
-                gap.checkpoint_seq,
-                totals_text(&gap.above),
-                totals_text(gap.recorded.as_ref().unwrap_or(&BTreeMap::new())),
-                no_merge_step(&file, cp.seq)
-            ))),
-            CheckpointCover::Behind(gap) => Ok(gap),
+            CheckpointCover::Behind(gap) | CheckpointCover::Parted(gap)
+                if gap.recorded.is_none() =>
+            {
+                Err(refuse(format!(
+                    "the checkpoint {} records no totals (a hallpass before this one exported it), so it shows that entries of pass `{id}` up to sequence {} are missing, but not what they counted; nothing was recorded. {}",
+                    quote_path(&self.file),
+                    gap.checkpoint_seq,
+                    no_merge_step(&file, cp.seq)
+                )))
+            }
+            CheckpointCover::Behind(gap) | CheckpointCover::Parted(gap)
+                if !gap.above.is_empty() =>
+            {
+                Err(refuse(format!(
+                    "the entries 1 to {} of {ledger} are checkpointed ones by the checkpoint's line hashes, but they count more than the checkpoint records for its sequence {} (spent in them: {}; in the checkpoint: {}). Counts only grow, so the checkpoint's totals do not belong to its line hashes, and hallpass does not carry from it. Nothing was recorded. {}",
+                    gap.shared,
+                    gap.checkpoint_seq,
+                    totals_text(&gap.above),
+                    totals_text(gap.recorded.as_ref().unwrap_or(&BTreeMap::new())),
+                    no_merge_step(&file, cp.seq)
+                )))
+            }
+            CheckpointCover::Behind(gap) | CheckpointCover::Parted(gap) => Ok(gap),
             CheckpointCover::Holds { added } => Err(refuse(format!(
                 "{ledger} holds the line the checkpoint commits to (sequence {}){}, so nothing it records is missing and there is nothing to adopt from it; nothing was recorded. Run `hallpass doctor {pass}` to see whether anything else needs an adoption",
                 cp.seq,

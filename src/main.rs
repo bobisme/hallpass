@@ -2281,7 +2281,7 @@ fn preview_adopt(
                 hallpass::totals_text(&p.totals),
                 p.token
             ),
-            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(checkpoint_warning)).chain(p.checkpoint_gap.as_ref().filter(|g| !g.exact()).map(placement_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
+            json: json!({"command":"adopt", "result":"preview", "case":p.case.as_str(), "pass_id":p.pass_id, "seq":p.seq, "present":p.present, "carried":p.carried, "totals":p.totals, "from_note":p.from_note, "previous":p.previous.as_ref().map(witnessed_json), "rehearsal":rehearsal_json(p.rehearsal.as_ref(), p.previous.as_ref()), "checkpoint":p.checkpoint, "token":p.token, "warnings": inconclusive_references(p.makes_references_inconclusive(), "after this adoption,").into_iter().chain(carried_from_witness(&p)).chain(p.checkpoint.as_ref().map(|cp| checkpoint_warning(cp, p.checkpoint_gap.as_ref()))).chain(p.checkpoint_gap.as_ref().filter(|g| !g.exact()).map(placement_warning)).chain(hallpass::shared_directory_warning(file)).collect::<Vec<_>>()}),
         },
         Err(e) => error_output("adopt", Some(file), &e),
     }
@@ -2320,10 +2320,16 @@ fn placement_warning(gap: &hallpass::CheckpointGap) -> String {
 
 /// What an adoption from a retained checkpoint relies on: what the
 /// checkpoint proves, and what it cannot.
-fn checkpoint_warning(cp: &hallpass::Checkpoint) -> String {
+fn checkpoint_warning(cp: &hallpass::Checkpoint, gap: Option<&hallpass::CheckpointGap>) -> String {
     format!(
-        "the checkpoint shows only that this ledger once reached sequence {}: it cannot show what the missing entries were, and its hash does not cover its totals. The carried totals are what the checkpoint file says, so they are only as trustworthy as the place you kept it. Carrying them can only raise a count, never lower one. Compare them with your run records before you adopt, and put back a copy of the ledger that holds sequence {} instead if you have one: it keeps the receipts.",
-        cp.seq, cp.seq
+        "the checkpoint shows only that this ledger once reached sequence {}{}: it cannot show what the missing entries were, and its hash does not cover its totals. The carried totals are what the checkpoint file says, so they are only as trustworthy as the place you kept it. Carrying them can only raise a count, never lower one. Compare them with your run records before you adopt, and put back a copy of the ledger that holds sequence {} instead if you have one: it keeps the receipts.",
+        cp.seq,
+        if gap.is_some_and(hallpass::CheckpointGap::reaches) {
+            " with another line there than it holds now"
+        } else {
+            ""
+        },
+        cp.seq
     )
 }
 
@@ -2528,7 +2534,9 @@ fn adopt(
         hallpass::AdoptCase::LedgerMissing => "the ledger was missing; a new one was started",
         hallpass::AdoptCase::LedgerChanged => "the ledger did not match its witness",
         hallpass::AdoptCase::NoWitness => "the ledger had no witness",
-        hallpass::AdoptCase::CheckpointBehind => "the ledger was behind a retained checkpoint",
+        hallpass::AdoptCase::CheckpointBehind => {
+            "the ledger did not hold the line a retained checkpoint commits to"
+        }
         _ => "adopted",
     };
     let a = &outcome.adoption;

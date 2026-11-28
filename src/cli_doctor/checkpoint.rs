@@ -5,6 +5,8 @@
 //! A ledger behind the checkpoint, or holding another history at its
 //! sequence, blocks: the ledger and its witness may both be an older copy
 //! (a whole-machine restore), and then they agree while entries are lost.
+//! Both are placed by the checkpoint's line hashes, and both name the
+//! adoption when the checkpoint's totals can be carried.
 
 use std::path::Path;
 
@@ -40,11 +42,13 @@ pub(super) fn findings(
         Ok(CheckpointCover::Adopted { seq }) => d.find(
             "checkpoint-adopted",
             format!(
-                "the adoption at entry {seq} acted on the checkpoint {named} (sequence {}): the ledger was behind it, and the adoption carried from its totals what the ledger's lines it proved its own did not count",
+                "the adoption at entry {seq} acted on the checkpoint {named} (sequence {}): the ledger did not hold the line it commits to, and the adoption carried from its totals what the ledger's lines it proved its own did not count",
                 cp.seq
             ),
         ),
-        Ok(CheckpointCover::Behind(gap)) => d.block(behind_issue(file, path, &named, cp, &gap)),
+        Ok(CheckpointCover::Behind(gap) | CheckpointCover::Parted(gap)) => {
+            d.block(behind_issue(file, path, &named, cp, &gap));
+        }
         Ok(CheckpointCover::Forked { ledger_seq }) => d.block(Issue {
             code: "checkpoint-fork".to_owned(),
             headline: Some(
@@ -77,7 +81,8 @@ pub(super) fn findings(
     }
 }
 
-/// The problem for a ledger that ends before the checkpointed line.
+/// The problem for a ledger that ends before the checkpointed line, or
+/// holds another line at its sequence.
 fn behind_issue(
     file: &Path,
     path: &Path,
@@ -85,12 +90,21 @@ fn behind_issue(
     cp: &Checkpoint,
     gap: &CheckpointGap,
 ) -> Issue {
-    let missing = format!(
-        "the ledger ends at sequence {}, but the checkpoint {named} commits to sequence {}: the ledger once reached it, and checkpointed entries are not here (for example the ledger and the state directory were both restored from an older copy). A spend now counts only what the ledger holds. {}",
-        gap.ledger_seq,
-        gap.checkpoint_seq,
-        gap.placement()
-    );
+    let missing = if gap.reaches() {
+        format!(
+            "the ledger reaches sequence {} (it ends at {}), but its line there is not the one the checkpoint {named} commits to (verify-checkpoint says relation mismatch): from some entry on, the ledger does not hold the checkpointed history, and checkpointed entries are not here (for example the ledger and the state directory were both restored from an older copy, and spends were made since). A spend now counts only what the ledger holds. {}",
+            gap.checkpoint_seq,
+            gap.ledger_seq,
+            gap.placement()
+        )
+    } else {
+        format!(
+            "the ledger ends at sequence {}, but the checkpoint {named} commits to sequence {}: the ledger once reached it, and checkpointed entries are not here (for example the ledger and the state directory were both restored from an older copy). A spend now counts only what the ledger holds. {}",
+            gap.ledger_seq,
+            gap.checkpoint_seq,
+            gap.placement()
+        )
+    };
     let Some(recorded) = &gap.recorded else {
         return Issue {
             code: "checkpoint-behind".to_owned(),

@@ -745,10 +745,9 @@ What doctor does with each relation:
 | `verify-checkpoint` relation | `doctor --checkpoint` | Next step |
 | --- | --- | --- |
 | `exact`, `extended` | finding `checkpoint-holds` | Nothing: the ledger holds the line. |
-| `shorter` | **blocked** `checkpoint-behind` | `adopt --checkpoint --preview`, below. |
-| `shorter`, checkpoint without `totals` | **blocked** `checkpoint-behind` | Put back a copy that holds the line, or have the owner decide. |
-| `shorter`, the lines the checkpoint proves its own count more than it records | **blocked** `checkpoint-fork` | As for `mismatch`. |
-| `mismatch` | **blocked** `checkpoint-fork` | Put back a copy that holds the line, or stop and have the owner decide: hallpass does not merge two histories. |
+| `shorter` or `mismatch` | **blocked** `checkpoint-behind` | `adopt --checkpoint --preview`, below. |
+| `shorter` or `mismatch`, checkpoint without `totals` | **blocked** `checkpoint-behind` | Put back a copy that holds the line, or have the owner decide. |
+| `shorter` or `mismatch`, the lines the checkpoint proves its own count more than it records | **blocked** `checkpoint-fork` | Put back a copy that holds the line, or stop and have the owner decide: hallpass does not merge two histories. |
 | `foreign` | **blocked** `checkpoint-foreign` | Give the checkpoint of this pass. |
 | `shorter` or `mismatch`, already adopted | finding `checkpoint-adopted` | Nothing more for the checkpoint. |
 
@@ -763,12 +762,16 @@ hallpass --json adopt engagement.toml --checkpoint checkpoint.json \
 
 A shorter ledger is not always an older copy of the checkpointed history.
 An automated worker may spend after the restore and before anyone runs
-doctor; its spend takes the sequence a lost entry had. hallpass places the
+doctor; its spend takes the sequence a lost entry had. After more spends
+than the restore lost, the ledger reaches the checkpoint's sequence with a
+new line there, and `verify-checkpoint` says `mismatch`; doctor and the
+adoption treat it the same way. hallpass places the
 ledger by the checkpoint's `anchors`: the ledger lines through the last
 anchor it holds (taken in order, up to the first it does not hold) are
 shared, the checkpointed history's own. A line at an anchor the ledger
 does not hold, a line with a time later than `latest`, and every line after
-either are new. Other lines are not placed. Doctor and the preview say
+either are new; for a ledger that reaches the checkpoint's sequence, so is
+its line there and every later one. Other lines are not placed. Doctor and the preview say
 which lines are which, and doctor's headline names missing entries by
 number only when every ledger line is shared.
 
@@ -778,8 +781,9 @@ other ledger line counts as new on top, so every count rises to at least
 the checkpoint's totals plus every spend since the restore; nothing is ever
 lowered. A line that is not placed but was an older copy of a checkpointed
 one counts twice, which is on the safe side. With a checkpoint from a
-hallpass before `anchors`, no line is shared, and every ledger line counts
-so: export checkpoints with this hallpass. Times never prove a line shared,
+hallpass before `anchors`, or one whose anchors the ledger holds none of,
+no line is shared, and every ledger line counts so: the count may be too
+high, never too low. Export checkpoints with this hallpass. Times never prove a line shared,
 because a restored clock may run behind; a later time proves a line new
 whatever any clock did. The adoption line records the checkpoint, so
 doctor then says `checkpoint-adopted`, and a second `adopt --checkpoint`
@@ -790,10 +794,13 @@ For example: two spends, a snapshot, two more spends, a checkpoint at
 sequence 4 with `totals` 4, then the snapshot put back and one more spend.
 The ledger has 3 lines and counts 3. The checkpoint's anchors prove lines 1
 and 2 shared and line 3 new, so the adoption carries 4 - 2 = 2, and the
-count is 5: the four before the restore and the one after.
+count is 5: the four before the restore and the one after. With three
+spends after the restore instead, the ledger has 5 lines and its line 4 is
+not the checkpointed one (`mismatch`); the anchors still prove lines 1 and
+2 shared, the adoption still carries 2, and the count is 7.
 
-Know what the checkpoint proves. It proves that this ledger once reached
-the checkpointed sequence, and which ledger lines are its own as far as its
+Know what the checkpoint proves. It proves that a ledger of this pass once
+reached the checkpointed sequence with the line it commits to, and which ledger lines are its own as far as its
 anchors reach. It does not show what the missing entries were. The totals are what the checkpoint
 file says, and nothing authenticates them beyond the place you kept it. A
 total raised by mistake only spends budget; one lowered would carry too
@@ -802,7 +809,7 @@ preview's carry with your run records before you adopt. hallpass refuses
 the adoption when the shared lines count more of a counter than the
 checkpoint records (counts only grow, so its totals do not belong to its
 line hashes), when the checkpoint
-records no totals, and for any relation other than `shorter`.
+records no totals, and for `exact` and `extended`.
 
 The receipts of the lost entries are gone, so the adoption may have lost
 caller references: from it on, a spend with `--require-new-ref` is refused
