@@ -584,7 +584,7 @@ fn corrupt_advice(
         )
     } else if last && line > 1 && detail == CUT_SHORT {
         format!(
-            "if a write failed while it recorded that line (for example on a full disk), the line was never confirmed. Do not edit the ledger by hand: `hallpass repair {pass} --drop-torn-tail --preview` checks that the witness proves the line was never counted, and then the repair removes it and keeps a copy. If it refuses, {}",
+            "if a write failed while it recorded that line (for example on a full disk), the line was never confirmed. Do not edit the ledger by hand: `hallpass repair {pass} --drop-torn-tail --preview` checks that the witness proves the line was never counted, and then the repair removes it and keeps a copy. If the line is whole and only its line end is missing, and the witness recorded that line, `hallpass repair {pass} --restore-final-newline --preview` adds the line end and drops nothing. If both refuse, {}",
             backup.replacen('R', "r", 1)
         )
     } else if last {

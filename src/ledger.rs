@@ -62,6 +62,8 @@ pub use reference::{
     ReferenceEvidence, ReferenceReconciliation, read_reference_list, reconcile_references,
 };
 use reference::{ReconcileLine, parse_reconcile};
+mod newline;
+pub use newline::{FinalNewline, preview_restore_final_newline, restore_final_newline};
 pub use repair::{TornTail, drop_torn_tail, preview_drop_torn_tail};
 
 /// The ledger format version.

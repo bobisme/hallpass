@@ -394,7 +394,7 @@ first one in request order. On success each
 A chain break at line N says that line N does not follow line N-1: one of the
 two was changed, or a line between them was removed or moved. When N is the last line of the file (`error.last_line` is
 true) and the line has no line end, the message names `hallpass repair FILE
---drop-torn-tail --preview` ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)).
+--drop-torn-tail --preview` and, for a line that is whole and lacks only its line end, `hallpass repair FILE --restore-final-newline --preview` ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)).
 In every other case it advises restoring the ledger from a backup, finding
 the good copy with `hallpass compare-backups`, and not editing lines by hand. It
 then names the last resort for when there is no backup: move the ledger aside and
@@ -660,6 +660,26 @@ exists), and synced. The repair records no ledger line and does not change
 the witness: the ledger then ends with the line the witness recorded, or
 with lines after it. In Rust: `preview_drop_torn_tail` and `drop_torn_tail`,
 which return a `TornTail`.
+
+When the cut-short last line is whole and the witness counted it, the
+repair above refuses, and `hallpass repair FILE --restore-final-newline
+--preview` applies instead. It prints a token (`newline1:sha256:...`) that
+`hallpass repair FILE --restore-final-newline --token TOKEN` takes. Both
+refuse (exit 1, `usage`, nothing changed) unless all of these hold:
+
+- the ledger does not end with a line end, and it has a complete header;
+- the ledger with a line end added verifies, for this pass: the last line
+  parses and chains to the line before it;
+- the witness exists, and the hash of that last line is the tail the
+  witness recorded at the last sequence number of the ledger.
+
+The repair takes both writer locks, checks the token again, appends one
+`\n` byte and syncs. It changes and removes no line, records no ledger line
+and does not change the witness. The JSON reply has `repair`
+`"restore-final-newline"`, `result` (`preview` or `repaired`), `seq`,
+`length` (the length before the line end) and `token`. In Rust:
+`preview_restore_final_newline` and `restore_final_newline`, which return a
+`FinalNewline`.
 
 ### `reconcile-references(pass, adoption, references, reason, now)`
 
@@ -1587,6 +1607,7 @@ Crate `hallpass` (re-exports `time`):
 | `spend_charges_batch`, `spend_charges_batch_in`, `spend_charges_batch_with_clock_in`, `SpendChargesBatchRequest`, `SpendChargesBatchOutcome`, `SpendChargesBatchUnitOutcome`, `MAX_DEBIT_BATCH_UNITS` | 1 to 1024 distinct guarded caller-reference debits, each one unit of the same counter and with one optional retained target, decided under one lock and committed as one all-or-none ledger line |
 | `adopt(path, reason, now, &StateDir) -> Result<AdoptOutcome, Error>` | record an adoption (`AdoptOutcome { case: AdoptCase, adoption: Adoption, ledger, created, pass_id, totals }`) |
 | `preview_adopt`, `adopt_guarded`, `AdoptPreview` | the adoption preview and its token |
+| `preview_restore_final_newline`, `restore_final_newline`, `FinalNewline` | the repair of a whole last ledger line that lacks only its line end ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)) |
 | `preview_drop_torn_tail`, `drop_torn_tail`, `TornTail` | the repair of a cut-short last ledger line, and its preview and token ([Dropping a cut-short last line](#dropping-a-cut-short-last-line)) |
 | `reconcile_references(path, adoption, &[String], reason, now, &StateDir) -> Result<ReconcileReferencesOutcome, Error>`, `read_reference_list(path, pass_id)`, `ReferenceReconciliation`, `MAX_RECONCILED_REFERENCES`, `MAX_REFERENCE_LIST_BYTES` | record a reference reconciliation (`ReconcileReferencesOutcome { reconciliation, ledger, pass_id, warnings }`) and read its list |
 | `tally(&LoadedPass) -> Result<Tally, Error>` | spent per counter, under a shared lock; reads the ledger only, without the witness (as in 0.1) |

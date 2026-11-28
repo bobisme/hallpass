@@ -33,7 +33,10 @@ caller](minimal-caller/minimal_caller.py). It asks `permits` first, runs one
 `spend --to ... --caller-ref ... --require-new-ref` before the work, checks
 the reply with `inspect_reply` and runs the work only on `proceed`. A refusal
 (exit 2), an unknown outcome and a possible debit (`reconcile`) each stop the
-work. It journals nothing and does not reconcile. Its digest pin is the
+work. It charges one unit to the counter `requests`; give a fourth
+argument, `minimal_caller.py PASS TARGET REF COUNTER`, to charge another
+ceiling counter (for example `calls`). It journals nothing and does not
+reconcile. Its digest pin is the
 digest its own `permits` call saw. That protects against a change between
 the preflight and the spend. It does not protect against a change made
 before the preflight, or a torn in-place save that the preflight itself read

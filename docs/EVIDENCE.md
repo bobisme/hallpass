@@ -99,6 +99,21 @@ proves the cut-short line was never counted. It keeps the removed bytes in
 `engagement.toml.ledger.torn-N` (named in `copy`). It refuses anything else,
 such as a complete last line that is invalid, damage before the last line or
 a missing witness: restore the ledger from a backup instead, as below.
+
+A last line that is whole (it parses and follows the line before it) and
+that the witness recorded as its last line, but that has no line end, is
+the one case where the witness counted the line. Dropping it would lower
+the count, so `--drop-torn-tail` refuses. Add the line end instead:
+
+```sh
+hallpass --json repair engagement.toml --restore-final-newline --preview
+hallpass --json repair engagement.toml --restore-final-newline --token "$token"
+```
+
+This appends one `\n` byte. No line is changed or removed, and no receipt is
+lost. It refuses, and changes nothing, when the last line does not parse or
+chain, when the witness is missing, or when the hash of that line is not the
+tail the witness recorded.
 If the witness counted the damaged last line, the repair always refuses,
 because removing the line would lower the count. With no backup, the last
 resort is to move the ledger aside (keep it, it holds the receipts) and run

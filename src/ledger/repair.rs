@@ -28,7 +28,7 @@ use crate::files::{Digest, LoadedPass, LockBudget, load, lock_shared, open_no_fo
 use crate::witness::{StateDir, Witnessed, ledger_identity};
 
 /// The advice for every refusal that only a backup can fix.
-const BACKUP: &str =
+pub(super) const BACKUP: &str =
     "Restore the ledger from a backup: `hallpass compare-backups` shows which copy is the good one";
 
 /// The token prefix: a repair token is never mistaken for an adoption token.
@@ -129,7 +129,7 @@ fn check_token_shape(token: &str, pass_path: &Path) -> Result<(), Error> {
 }
 
 /// Open the ledger, refusing a missing one with advice.
-fn open_ledger(pass_path: &Path, path: &Path, write: bool) -> Result<File, Error> {
+pub(super) fn open_ledger(pass_path: &Path, path: &Path, write: bool) -> Result<File, Error> {
     if !exists(path)? {
         return Err(Error::Usage(format!(
             "there is no ledger at {}, so there is no cut-short line to drop; nothing was changed. Run `hallpass status {}` to see the state of the pass",
@@ -205,8 +205,9 @@ fn inspect(
                     witness.seq, parsed.seq
                 ),
                 &format!(
-                    "{BACKUP}. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain",
-                    pass_path.display()
+                    "If that line is whole and only its line end is missing, `hallpass repair {0} --restore-final-newline --preview` checks it against the witness and adds the line end. Otherwise: {1}. With no backup, the last resort is to move the ledger aside (keep it) and run `hallpass adopt {0} --reason \"...\"`: the pass is then ledger-missing, and the adoption starts a new ledger that carries the witness totals. The receipts in the moved ledger are not in the new chain",
+                    pass_path.display(),
+                    BACKUP.replacen('R', "r", 1)
                 ),
             ));
         }
@@ -314,7 +315,7 @@ fn check_torn_start(torn: &[u8], seq: u64, witness_seq: u64) -> Result<(), Strin
 
 /// The length of the file up to and with its last line end, or `None` when
 /// it has none. Reads backwards from the end.
-fn last_line_end(file: &File, len: u64) -> std::io::Result<Option<u64>> {
+pub(super) fn last_line_end(file: &File, len: u64) -> std::io::Result<Option<u64>> {
     const CHUNK: u64 = 64 * 1024;
     let mut end = len;
     let mut buffer = vec![0; usize::try_from(CHUNK).unwrap_or(usize::MAX)];

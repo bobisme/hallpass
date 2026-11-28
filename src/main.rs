@@ -304,17 +304,24 @@ enum Command {
         #[command(flatten)]
         lock: LockArgs,
     },
-    /// Remove a last ledger line that a failed write cut short, when the witness proves it was never counted.
+    /// Repair a last ledger line that a failed write left damaged: remove it, or add its missing line end.
     ///
-    /// The removed bytes are kept in a new file beside the ledger
-    /// (LEDGER.torn-N). Anything else (a complete last line, damage before
-    /// it, a line the witness counted) is refused and nothing is changed.
+    /// --drop-torn-tail removes a last line that is cut short, when the
+    /// witness proves it was never counted; the removed bytes are kept in a
+    /// new file beside the ledger (LEDGER.torn-N). --restore-final-newline
+    /// adds the missing line end to a last line that is whole, chains, and is
+    /// the line the witness recorded. Anything else is refused and nothing is
+    /// changed.
+    #[command(group(clap::ArgGroup::new("repair_kind").required(true).args(["drop_torn_tail", "restore_final_newline"])))]
     Repair {
         /// The pass file.
         file: PathBuf,
-        /// Remove the cut-short last line (the only repair there is).
-        #[arg(long, required = true)]
+        /// Remove the cut-short last line.
+        #[arg(long)]
         drop_torn_tail: bool,
+        /// Add the missing line end to a whole last line that the witness recorded.
+        #[arg(long)]
+        restore_final_newline: bool,
         /// Show what would be removed, and the token, without changing anything.
         #[arg(long)]
         preview: bool,
@@ -2722,10 +2729,11 @@ fn dispatch(cli: &Cli, format: Format) -> Output {
         }
         Command::Repair {
             file,
+            restore_final_newline,
             preview,
             token,
             ..
-        } => cli_repair::repair(file, *preview, token.as_deref()),
+        } => cli_repair::repair(file, *restore_final_newline, *preview, token.as_deref()),
         Command::ReconcileReferences {
             file,
             adoption,

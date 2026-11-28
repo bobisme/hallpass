@@ -96,6 +96,7 @@ pub use ledger::{
     spend_charges_in, spend_charges_with_clock_in, spend_in, spend_with_clock_in, tally,
     verify_checkpoint, with_test_clock,
 };
+pub use ledger::{FinalNewline, preview_restore_final_newline, restore_final_newline};
 pub use ledger::{TornTail, drop_torn_tail, preview_drop_torn_tail};
 pub use ledger::{capacity, evidence, scenario};
 pub use name::{HostName, MAX_NAMES};

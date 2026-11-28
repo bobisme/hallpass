@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 
 use super::{OK, Output, error_output, safe};
 
-pub fn repair(file: &Path, preview: bool, token: Option<&str>) -> Output {
+pub fn repair(file: &Path, newline: bool, preview: bool, token: Option<&str>) -> Output {
     let state = StateDir::from_env();
+    if newline {
+        return restore_newline(file, &state, preview, token);
+    }
     let result = match token {
         Some(token) if !preview => hallpass::drop_torn_tail(file, &state, token),
         _ => hallpass::preview_drop_torn_tail(file, &state),
@@ -60,4 +63,46 @@ fn reply(file: &Path, torn: &TornTail) -> Value {
         "token": torn.token,
         "copy": torn.copy.as_ref().map(|c| c.display().to_string()),
     })
+}
+
+/// `--restore-final-newline`: the preview and the guarded repair.
+fn restore_newline(file: &Path, state: &StateDir, preview: bool, token: Option<&str>) -> Output {
+    let result = match token {
+        Some(token) if !preview => hallpass::restore_final_newline(file, state, token),
+        _ => hallpass::preview_restore_final_newline(file, state),
+    };
+    let done = match result {
+        Ok(done) => done,
+        Err(e) => return error_output("repair", Some(file), &e),
+    };
+    let ledger = safe(&done.ledger.display().to_string()).into_owned();
+    let text = if done.restored {
+        format!(
+            "REPAIRED: added the missing line end after sequence {} of {ledger}. No line was changed or removed; nothing was recorded or permitted.\n",
+            done.seq
+        )
+    } else {
+        format!(
+            "NEWLINE PREVIEW: the last line of the ledger {ledger} (sequence {}) is whole and is the line the witness recorded, but it has no line end. To add the line end, and nothing else, run `hallpass repair {} --restore-final-newline --token TOKEN` with this token. Token: {}\n",
+            done.seq,
+            safe(&file.display().to_string()),
+            done.token
+        )
+    };
+    Output {
+        code: OK,
+        json: json!({
+            "command": "repair",
+            "repair": "restore-final-newline",
+            "result": if done.restored { "repaired" } else { "preview" },
+            "file": file.display().to_string(),
+            "ledger": done.ledger.display().to_string(),
+            "pass_id": done.pass_id,
+            "seq": done.seq,
+            "witness_seq": done.seq,
+            "length": done.length,
+            "token": done.token,
+        }),
+        text,
+    }
 }

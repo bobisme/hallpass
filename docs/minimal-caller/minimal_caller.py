@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The smallest correct caller: preflight, spend before the work, strict reply check.
 
-usage: minimal_caller.py [--rehearsal] PASS ADDRESS:PORT/PROTOCOL REF
+usage: minimal_caller.py [--rehearsal] PASS ADDRESS:PORT/PROTOCOL REF [COUNTER]
+COUNTER is the ceiling counter to charge one unit to (default: requests).
 Exit: 0 the work ran | 2 hallpass refused, no work | 3 reconcile first | 1 stop.
 The work is a print. Replace do_work() with the one unit that sends traffic.
 --rehearsal is for tests with a debug hallpass and HALLPASS_UNSAFE_TEST_CLOCK.
@@ -27,7 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "conformance"))
 from check import inspect_reply  # the strict decoder INTEGRATING.md requires
 
 rehearsal = "--rehearsal" in sys.argv
-pass_file, to, ref = [a for a in sys.argv[1:] if a != "--rehearsal"]
+args = [a for a in sys.argv[1:] if a != "--rehearsal"]
+if len(args) not in (3, 4):
+    sys.exit("usage: minimal_caller.py [--rehearsal] PASS ADDRESS:PORT/PROTOCOL REF [COUNTER]")
+pass_file, to, ref = args[:3]
+counter = args[3] if len(args) == 4 else "requests"
 env = dict(os.environ)
 if not rehearsal:
     env.pop("HALLPASS_UNSAFE_TEST_CLOCK", None)  # a live caller never pins the clock
@@ -74,11 +79,11 @@ except (ValueError, KeyError, IndexError, TypeError, AttributeError, AssertionEr
 
 # 2. Spend before the work. The reply must match this expected object exactly.
 expected = {"file": pass_file, "pass_id": pre["pass_id"], "digest": pre["digest"], "mode": "scalar",
-            "charges": [{"counter": "requests", "n": 1}], "targets": [target],
+            "charges": [{"counter": counter, "n": 1}], "targets": [target],
             "record_targets": False, "caller_ref": ref, "note": None}
 dest = target["target"] + ("@" + target["name"] if target["name"] else "")
 code, out = hallpass("spend", "--digest", pre["digest"], "--caller-ref", ref, "--require-new-ref",
-                     "--to", dest, "--n", "1", "--", pass_file, "requests")
+                     "--to", dest, "--n", "1", "--", pass_file, counter)
 if rehearsal and code == 0:  # a debug build says test_clock = true; accept that one field in tests only
     if b'"test_clock":true' not in out:  # the preflight said true, so this is not expected: a debit may exist
         print("reconcile: rehearsal, but the spend reply is not on the test clock; the debit is live. "
