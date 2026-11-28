@@ -397,6 +397,12 @@ refusal keeps exit 2 and a success becomes exit 1, with nothing recorded to
 reconcile. A read-only command whose reader closed the pipe (`hallpass ledger
 FILE | head -1`) says nothing and keeps its own exit status.
 
+Always connect hallpass's stdout to something your caller reads. If the caller
+starts hallpass with stdout closed (`>&-`), the program runtime reopens it on
+`/dev/null` before hallpass runs, so the reply is discarded, the exit status is
+the normal one, and hallpass cannot tell this from a caller that chose
+`/dev/null`. Use `--caller-ref` and `receipt` to find out what was recorded.
+
 A failed write that hallpass rolled back is `error.code =
 "ledger-append-failed"` with `recording = "not-recorded"`: nothing was
 debited, and the unit may be submitted again after the cause (a full disk, a
