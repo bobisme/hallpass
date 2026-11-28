@@ -330,7 +330,7 @@ fn compare_backups_ancestry_leads_with_its_conclusion() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains(
-            "Ancestry of the extended candidates (by tip group):\n  Nothing to compare: no candidate extends the witness."
+            "Ancestry of the candidates at, ahead of or behind the witness (by tip group):\n  group 1 is a prefix of group 2"
         ),
         "{text}"
     );

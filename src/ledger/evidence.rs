@@ -1441,14 +1441,24 @@ pub fn compare_backups_with_ancestry(
     let ancestry_result = ancestry
         .then(|| analyze_ancestry(paths, &mut candidates, &mut errors))
         .transpose()?;
-    let extension_count = ancestry_result
-        .as_ref()
-        .map_or(extensions.len(), |a| a.maximal_groups.len());
+    // Shorter copies are grouped for the report only: the assessment counts
+    // the branches that extend the witness, as before.
+    let exact_now = exact && candidates.iter().any(|c| c.relation == "exact");
+    let extension_count = ancestry_result.as_ref().map_or(extensions.len(), |a| {
+        a.maximal_groups
+            .iter()
+            .filter(|g| {
+                candidates
+                    .iter()
+                    .any(|c| c.relation == "extended" && c.tip_group == Some(**g))
+            })
+            .count()
+    });
     let assessment = if anchor.is_none() {
         "inconclusive"
     } else if extension_count > 1 {
         "ambiguous"
-    } else if exact || extension_count > 0 {
+    } else if exact_now || extension_count > 0 {
         "preserved"
     } else {
         "no-match"
@@ -1483,12 +1493,12 @@ fn analyze_ancestry(
 ) -> Result<BackupAncestry, Error> {
     let wanted: BTreeSet<u64> = candidates
         .iter()
-        .filter(|c| c.relation == "extended")
+        .filter(|c| in_ancestry_pool(c))
         .filter_map(|c| c.tip.as_ref().map(|t| t.seq))
         .collect();
     let mut scans = BTreeMap::new();
     for (i, row) in candidates.iter_mut().enumerate() {
-        if row.relation != "extended" {
+        if !in_ancestry_pool(row) {
             continue;
         }
         match inspect_candidate_checkpoints(&paths[i], &wanted) {
@@ -1524,6 +1534,14 @@ fn analyze_ancestry(
     Ok(ancestry_links(candidates, &scans))
 }
 
+/// Copies that are compared for ancestry: the ones that extend the witness,
+/// the one at it and the verified ones behind it. A hash-chained line holds every line
+/// before it, so a prefix match between two verified copies is sound at any
+/// length.
+fn in_ancestry_pool(row: &BackupCandidate) -> bool {
+    matches!(row.relation, "extended" | "exact" | "shorter")
+}
+
 fn regroup_verified(candidates: &mut [BackupCandidate]) {
     let mut groups = BTreeMap::new();
     for (i, row) in candidates.iter_mut().enumerate() {
@@ -1544,7 +1562,7 @@ fn ancestry_links(
     let mut links = BTreeSet::new();
     let mut valid_groups = BTreeSet::new();
     for a in candidates {
-        if a.relation != "extended" {
+        if !in_ancestry_pool(a) {
             continue;
         }
         let Some(atip) = &a.tip else {
@@ -1555,7 +1573,7 @@ fn ancestry_links(
         };
         valid_groups.insert(agroup);
         for (j, b) in candidates.iter().enumerate() {
-            if b.relation != "extended" {
+            if !in_ancestry_pool(b) {
                 continue;
             }
             let Some(btip) = &b.tip else {

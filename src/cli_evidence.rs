@@ -431,7 +431,7 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
         None => text.push_str("Captured witness: none\n"),
     }
     if let Some(ancestry) = &report.ancestry {
-        ancestry_text(&mut text, ancestry);
+        ancestry_text(&mut text, ancestry, &report.candidates);
     }
     for (i, row) in report.candidates.iter().enumerate() {
         let detail = match (&row.tip, &row.error) {
@@ -470,8 +470,19 @@ pub fn backups(file: &Path, candidates: &[PathBuf], ancestry: bool) -> Output {
     output("compare-backups", file, code, value, text)
 }
 
-fn ancestry_text(text: &mut String, ancestry: &evidence::BackupAncestry) {
-    text.push_str("Ancestry of the extended candidates (by tip group):\n");
+fn ancestry_text(
+    text: &mut String,
+    ancestry: &evidence::BackupAncestry,
+    candidates: &[evidence::BackupCandidate],
+) {
+    let behind = candidates.iter().any(|c| c.relation == "shorter");
+    if behind {
+        text.push_str(
+            "Ancestry of the candidates at, ahead of or behind the witness (by tip group):\n",
+        );
+    } else {
+        text.push_str("Ancestry of the extended candidates (by tip group):\n");
+    }
     let groups = ancestry
         .maximal_groups
         .iter()
@@ -481,7 +492,23 @@ fn ancestry_text(text: &mut String, ancestry: &evidence::BackupAncestry) {
     // Lead with the conclusion. Only candidates that extend the witness are
     // compared here; one at or behind the witness (exact or shorter) is
     // judged by its own row.
-    if ancestry.prefix_links.is_empty() {
+    if ancestry.prefix_links.is_empty() && behind {
+        match ancestry.maximal_groups.len() {
+            0 => {}
+            1 => {
+                let _ = writeln!(
+                    text,
+                    "  Nothing to compare: only tip group {groups} is at, ahead of or behind the witness."
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    text,
+                    "  The tip groups {groups} are on separate branches: none is a prefix of\n  another, so at most one of them lies on the line hallpass wrote."
+                );
+            }
+        }
+    } else if ancestry.prefix_links.is_empty() {
         match ancestry.maximal_groups.len() {
             0 => text.push_str(
                 "  Nothing to compare: no candidate extends the witness. Candidates at or\n  behind the witness (exact or shorter) are not compared here; see their rows.\n",
@@ -504,10 +531,12 @@ fn ancestry_text(text: &mut String, ancestry: &evidence::BackupAncestry) {
         let _ = writeln!(text, "  group {from} is a prefix of group {to}");
     }
     if !ancestry.maximal_groups.is_empty() {
-        let _ = writeln!(
-            text,
-            "  Maximal groups (not a prefix of any other): {groups}"
-        );
+        let label = if behind {
+            "Newest copy on each branch (not a prefix of any other)"
+        } else {
+            "Maximal groups (not a prefix of any other)"
+        };
+        let _ = writeln!(text, "  {label}: {groups}");
     }
 }
 

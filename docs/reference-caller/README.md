@@ -28,7 +28,7 @@ caller.py reconcile-references JOURNAL PASS --reason TEXT [--also JOURNAL ...] [
 |---|---|---|
 | `pin` | Archives the reviewed pass with `hallpass archive` and journals its ID and digest. Later units pin this digest. With `--require-signature`, pins only a signed revision: see below. | 0 pinned, 1 error |
 | `run` | Performs one unit: see below. | 0 sent, 2 refused, 1 unknown or usage error |
-| `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
+| `handoff` | Puts each reference in the journal beside the ledger, through `hallpass reconcile`, in manifests of at most 1,024 rows (hallpass's limit for one); a longer journal is asked in chunks and the rows are merged, so the output is the same as for one run. Other debits are counted, not judged: see below. | 0 nothing needs attention, 2 something does, 1 error |
 | `reconcile-references` | After an adoption that may have lost lines, records every reference in the journals with `hallpass reconcile-references`, so that guarded spends resume: see below. | 0 recorded, or nothing to reconcile; 1 error |
 
 The journal records each pass by its ID, its digest and its resolved path.

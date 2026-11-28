@@ -30,6 +30,7 @@ import check  # noqa: E402  The reference reply decoder, docs/conformance/check.
 INTERRUPT = os.environ.get("REFERENCE_CALLER_INTERRUPT")  # after-spend, after-callback
 
 
+MAX_MANIFEST_ROWS = 1_024  # hallpass reconcile takes at most this many rows in one manifest
 MAX_REFERENCES = 10_000  # hallpass records at most this many references in one reconciliation
 
 
@@ -468,24 +469,25 @@ def handoff(a):
     pending = ledger.get("unreconciled_adoption")
     rows = {}
     if mine:
-        manifest = {"version": 1, "pass_id": ledger["pass_id"], "units": [
-            {"caller_ref": ref, "digest": intent_record(rs)["digest"], "charges": intent_record(rs)["charges"],
-             "targets": intent_record(rs)["targets"]} for ref, rs in mine.items()]}
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
-            json.dump(manifest, f)
-            f.flush()
-            code, out = hallpass("reconcile", "--", a.pass_file, f.name)
-        reply = decode(out)
-        if code not in (0, 2) or not isinstance(reply.get("rows"), list):
-            fail(f"reconcile failed: {message(reply)}")
-        rows = {}
-        for row in reply["rows"]:
-            # A debit lost with an adopted ledger is absent, but a reference
-            # reconciliation lists it: say so rather than "no debit".
-            if row["result"] == "absent" and row.get("reconciled_at"):
-                rows[row["caller_ref"]] = ("reconciled", row["reconciled_at"])
-            else:
-                rows[row["caller_ref"]] = (row["result"], row["sequences"])
+        # One manifest takes at most MAX_MANIFEST_ROWS rows: ask in chunks and merge the rows.
+        entries = [{"caller_ref": ref, "digest": intent_record(rs)["digest"], "charges": intent_record(rs)["charges"],
+                    "targets": intent_record(rs)["targets"]} for ref, rs in mine.items()]
+        for start in range(0, len(entries), MAX_MANIFEST_ROWS):
+            manifest = {"version": 1, "pass_id": ledger["pass_id"], "units": entries[start:start + MAX_MANIFEST_ROWS]}
+            with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
+                json.dump(manifest, f)
+                f.flush()
+                code, out = hallpass("reconcile", "--", a.pass_file, f.name)
+            reply = decode(out)
+            if code not in (0, 2) or not isinstance(reply.get("rows"), list):
+                fail(f"reconcile failed: {message(reply)}")
+            for row in reply["rows"]:
+                # A debit lost with an adopted ledger is absent, but a reference
+                # reconciliation lists it: say so rather than "no debit".
+                if row["result"] == "absent" and row.get("reconciled_at"):
+                    rows[row["caller_ref"]] = ("reconciled", row["reconciled_at"])
+                else:
+                    rows[row["caller_ref"]] = (row["result"], row["sequences"])
 
     table = [(ref, caller_record(rs), *rows[ref]) for ref, rs in mine.items()]
     others = []

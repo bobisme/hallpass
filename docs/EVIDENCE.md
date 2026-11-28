@@ -515,12 +515,21 @@ again before its hashes are trusted; changed or corrupt candidates produce a
 partial error. An absent witness remains inconclusive. This comparison does not
 restore a backup or prove any external work.
 
-Only candidates that extend the witness are compared. Candidates that equal or
-precede the witness never appear in `ancestry`. Empty `prefix_links` therefore
-means that no extended tip group is a prefix of another. It does not mean that
-the backups are unrelated. Text output leads with the conclusion: "Nothing to
-compare" when no candidate, or only one tip group, extends the witness, and
-that the groups split after the witness when two or more do.
+Candidates that extend the witness, equal it or lie behind it (`shorter`) are
+compared. This is sound for a copy behind the witness too: each line holds the
+hash of the line before it, so a verified copy whose tip hash is found at the
+same sequence in another verified copy is a prefix of it. With the ledger lost
+and every backup older than the last spend, the copies still show which lie on
+one line and which is a fork, and the newest copy on each branch. This only
+reads: the relations, the assessment and the adoption advice do not change. A
+copy behind the witness that is a prefix of no other copy may still be an
+older copy of the ledger hallpass wrote; the copies given are all that is
+compared. A candidate that `mismatch`es, is foreign or is unreadable never
+appears in `ancestry`. Empty `prefix_links` therefore means that no tip group
+is a prefix of another. It does not mean that the backups are unrelated. Text
+output leads with the conclusion: "Nothing to compare" when only one tip group
+is compared, and that the groups split when two or more are compared and none
+is a prefix of another.
 
 A candidate that holds the witnessed line but has other totals there than
 the witness records shows that the witness is damaged; `warnings` says so.
